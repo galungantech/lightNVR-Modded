@@ -347,14 +347,10 @@ export function StreamConfigModal({
           const statusCode = response.status;
           const statusText = response.statusText || '';
           showStatusMessage(
-            t(
-              'streamConfig.zonesLoadFailed',
-              'Failed to load detection zones (HTTP {statusCode}{statusText}). Please try again or contact an administrator.',
-              {
-                statusCode,
-                statusText: statusText ? `: ${statusText}` : '',
-              }
-            ),
+            t('streamsConfig.zonesLoadFailed', {
+              statusCode,
+              statusText: statusText ? `: ${statusText}` : '',
+            }),
             'error'
           );
         }
@@ -362,11 +358,7 @@ export function StreamConfigModal({
         console.error('Error loading zones:', error);
         const errorMessage = (error && error.message) ? error.message : String(error || '');
         showStatusMessage(
-          t(
-            'streamConfig.zonesLoadError',
-            'An error occurred while loading detection zones. Details: {errorMessage}',
-            { errorMessage }
-          ),
+          t('streamsConfig.zonesLoadError', { errorMessage }),
           'error'
         );
       }
@@ -432,7 +424,7 @@ export function StreamConfigModal({
                     type="text"
                     id="stream-name"
                     name="name"
-                    className={`w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground ${isEditing ? 'bg-muted/30' : ''}`}
+                    className={`w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground ${isEditing ? 'bg-muted/30' : ''}`}
                     value={currentStream.name}
                     onChange={onInputChange}
                     disabled={isEditing}
@@ -456,7 +448,7 @@ export function StreamConfigModal({
                     type="text"
                     id="stream-url"
                     name="url"
-                    className={`w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground ${hideCredentials ? 'cursor-not-allowed opacity-75' : ''}`}
+                    className={`w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground ${hideCredentials ? 'cursor-not-allowed opacity-75' : ''}`}
                     placeholder={t('streamsConfig.streamUrlPlaceholder')}
                     value={hideCredentials ? obfuscateUrlCredentials(currentStream.url) : currentStream.url}
                     onChange={onInputChange}
@@ -477,7 +469,7 @@ export function StreamConfigModal({
                     type="text"
                     id="stream-sub-url"
                     name="subStreamUrl"
-                    className={`w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground ${hideCredentials ? 'cursor-not-allowed opacity-75' : ''}`}
+                    className={`w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground ${hideCredentials ? 'cursor-not-allowed opacity-75' : ''}`}
                     placeholder={t('streamsConfig.subStreamUrlPlaceholder')}
                     value={hideCredentials ? obfuscateUrlCredentials(currentStream.subStreamUrl || '') : (currentStream.subStreamUrl || '')}
                     onChange={onInputChange}
@@ -496,7 +488,7 @@ export function StreamConfigModal({
                     type="text"
                     id="stream-admin-url"
                     name="adminUrl"
-                    className={`w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground ${hideCredentials ? 'cursor-not-allowed opacity-75' : ''}`}
+                    className={`w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground ${hideCredentials ? 'cursor-not-allowed opacity-75' : ''}`}
                     placeholder="http://192.168.1.100/"
                     value={hideCredentials ? obfuscateUrlCredentials(currentStream.adminUrl || '') : (currentStream.adminUrl || '')}
                     onChange={onInputChange}
@@ -516,7 +508,7 @@ export function StreamConfigModal({
                     type="text"
                     id="stream-tags"
                     name="tags"
-                    className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                    className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                     placeholder={t('streamsConfig.streamTagsPlaceholder')}
                     value={currentStream.tags || ''}
                     onChange={onInputChange}
@@ -573,7 +565,7 @@ export function StreamConfigModal({
                   <select
                     id="stream-playback-transport"
                     name="playbackTransport"
-                    className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                    className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                     value={currentStream.playbackTransport || 'auto'}
                     onChange={onInputChange}
                   >
@@ -631,7 +623,7 @@ export function StreamConfigModal({
                           type="text"
                           id="stream-onvif-username"
                           name="onvifUsername"
-                          className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                          className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                           placeholder="admin"
                           value={currentStream.onvifUsername || ''}
                           onChange={onInputChange}
@@ -643,7 +635,7 @@ export function StreamConfigModal({
                           type="password"
                           id="stream-onvif-password"
                           name="onvifPassword"
-                          className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                          className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                           placeholder="••••••••"
                           value={currentStream.onvifPassword || ''}
                           onChange={onInputChange}
@@ -655,7 +647,7 @@ export function StreamConfigModal({
                           type="text"
                           id="stream-onvif-profile"
                           name="onvifProfile"
-                          className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                          className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                           placeholder="Profile_1"
                           value={currentStream.onvifProfile || ''}
                           onChange={onInputChange}
@@ -667,7 +659,7 @@ export function StreamConfigModal({
                           type="number"
                           id="stream-onvif-port"
                           name="onvifPort"
-                          className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                          className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                           placeholder="80"
                           min="0"
                           max="65535"
@@ -703,7 +695,7 @@ export function StreamConfigModal({
                   <select
                     id="stream-codec"
                     name="codec"
-                    className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                    className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                     value={(currentStream.codec || '').toLowerCase()}
                     onChange={onInputChange}
                   >
@@ -719,7 +711,7 @@ export function StreamConfigModal({
                   <select
                     id="stream-protocol"
                     name="protocol"
-                    className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                    className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                     value={currentStream.protocol}
                     onChange={onInputChange}
                   >
@@ -832,13 +824,13 @@ export function StreamConfigModal({
                             📅 {t('streamsConfig.onASchedule')}
                           </span>
                           <span className="text-xs text-muted-foreground">
-                            — restrict detection-triggered clips independently
+                            {t('streamsConfig.detectionScheduleHelpShort')}
                           </span>
                         </label>
                         {currentStream.detectionRecordOnSchedule && (
                           <div className="rounded-xl border border-primary/25 bg-background p-3 shadow-sm">
                             <p className="text-xs text-muted-foreground mb-3">
-                              External events are still annotated outside these hours, but they will not start a detection clip.
+                              {t('streamsConfig.detectionScheduleHelp')}
                             </p>
                             <RecordingScheduleGrid
                               schedule={currentStream.detectionRecordingSchedule?.length === HOURS_PER_WEEK
@@ -951,7 +943,7 @@ export function StreamConfigModal({
                           <select
                             id="stream-detection-model"
                             name="detectionModel"
-                            className="flex-1 px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                            className="flex-1 px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                             value={getDetectionModelSelectValue(currentStream.detectionModel)}
                             onChange={onInputChange}
                           >
@@ -980,7 +972,7 @@ export function StreamConfigModal({
                           <button
                             type="button"
                             onClick={onRefreshModels}
-                            className="p-2 rounded-md bg-secondary hover:bg-secondary/80 text-secondary-foreground focus:outline-none"
+                            className="p-2 rounded-md bg-secondary hover:bg-secondary/80 text-secondary-foreground"
                             title={t('streamsConfig.refreshModels')}
                           >
                             <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
@@ -1036,7 +1028,7 @@ export function StreamConfigModal({
                                   type="text"
                                   id="stream-custom-api-url"
                                   name="detectionModel"
-                                  className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground font-mono text-sm"
+                                  className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground font-mono text-sm"
                                   placeholder={t('streamsConfig.customApiEndpointPlaceholder')}
                                   value={currentStream.detectionModel}
                                   onChange={onInputChange}
@@ -1078,7 +1070,7 @@ export function StreamConfigModal({
                           type="text"
                           id="stream-detection-url"
                           name="detectionUrl"
-                          className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground font-mono text-sm"
+                          className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground font-mono text-sm"
                           placeholder={t('streamsConfig.detectionUrlPlaceholder')}
                           value={currentStream.detectionUrl || ''}
                           onChange={onInputChange}
@@ -1117,7 +1109,7 @@ export function StreamConfigModal({
                             type="number"
                             id="stream-detection-interval"
                             name="detectionInterval"
-                            className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                            className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                             min="1"
                             max="100"
                             value={currentStream.detectionInterval}
@@ -1134,7 +1126,7 @@ export function StreamConfigModal({
                             type="number"
                             id="stream-pre-buffer"
                             name="preBuffer"
-                            className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                            className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                             min="0"
                             max="60"
                             value={currentStream.preBuffer}
@@ -1151,7 +1143,7 @@ export function StreamConfigModal({
                             type="number"
                             id="stream-post-buffer"
                             name="postBuffer"
-                            className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                            className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                             min="0"
                             max="300"
                             value={currentStream.postBuffer}
@@ -1169,7 +1161,7 @@ export function StreamConfigModal({
                         <select
                           id="stream-detection-object-filter"
                           name="detectionObjectFilter"
-                          className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                          className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                           value={currentStream.detectionObjectFilter || 'none'}
                           onChange={onInputChange}
                         >
@@ -1191,7 +1183,7 @@ export function StreamConfigModal({
                             type="text"
                             id="stream-detection-object-filter-list"
                             name="detectionObjectFilterList"
-                            className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                            className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                             placeholder={t('streamsConfig.objectFilterListPlaceholder')}
                             value={currentStream.detectionObjectFilterList || ''}
                             onChange={onInputChange}
@@ -1219,14 +1211,14 @@ export function StreamConfigModal({
                         type="number"
                         id="retention-days"
                         name="retentionDays"
-                        className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                        className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                         min="-1"
                         max="365"
                         value={currentStream.retentionDays ?? -1}
                         onChange={onInputChange}
                       />
                       <p className="mt-1 text-xs text-muted-foreground">{t('streamsConfig.retentionDaysHelp')}</p>
-                      <p className="mt-1 text-xs text-muted-foreground">-1 = inherit the global setting</p>
+                      <p className="mt-1 text-xs text-muted-foreground">{t('streamsConfig.inheritGlobalSetting')}</p>
                     </div>
                     <div>
                       <label htmlFor="detection-retention-days" className="block text-sm font-medium mb-2">
@@ -1236,14 +1228,14 @@ export function StreamConfigModal({
                         type="number"
                         id="detection-retention-days"
                         name="detectionRetentionDays"
-                        className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                        className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                         min="-1"
                         max="365"
                         value={currentStream.detectionRetentionDays ?? -1}
                         onChange={onInputChange}
                       />
                       <p className="mt-1 text-xs text-muted-foreground">{t('streamsConfig.detectionRetentionDaysHelp')}</p>
-                      <p className="mt-1 text-xs text-muted-foreground">-1 = inherit the global setting</p>
+                      <p className="mt-1 text-xs text-muted-foreground">{t('streamsConfig.inheritGlobalSetting')}</p>
                     </div>
                     <div>
                       <label htmlFor="max-storage-mb" className="block text-sm font-medium mb-2">
@@ -1253,7 +1245,7 @@ export function StreamConfigModal({
                         type="number"
                         id="max-storage-mb"
                         name="maxStorageMb"
-                        className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                        className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                         min="0"
                         step="100"
                         value={currentStream.maxStorageMb || 0}
@@ -1269,7 +1261,7 @@ export function StreamConfigModal({
                         type="number"
                         id="tier-critical-multiplier"
                         name="tierCriticalMultiplier"
-                        className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                        className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                         min="0"
                         step="0.25"
                         value={currentStream.tierCriticalMultiplier ?? 3.0}
@@ -1284,7 +1276,7 @@ export function StreamConfigModal({
                         type="number"
                         id="tier-important-multiplier"
                         name="tierImportantMultiplier"
-                        className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                        className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                         min="0"
                         step="0.25"
                         value={currentStream.tierImportantMultiplier ?? 2.0}
@@ -1299,7 +1291,7 @@ export function StreamConfigModal({
                         type="number"
                         id="tier-ephemeral-multiplier"
                         name="tierEphemeralMultiplier"
-                        className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                        className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                         min="0"
                         step="0.25"
                         value={currentStream.tierEphemeralMultiplier ?? 0.25}
@@ -1314,7 +1306,7 @@ export function StreamConfigModal({
                         type="number"
                         id="storage-priority"
                         name="storagePriority"
-                        className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                        className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                         min="1"
                         max="10"
                         value={currentStream.storagePriority ?? 5}
@@ -1375,7 +1367,7 @@ export function StreamConfigModal({
                             />
                             <span className="font-medium">{zone.name}</span>
                             <span className="text-sm text-muted-foreground">
-                              ({zone.polygon.length} points)
+                              {t('streamsConfig.zonePoints', { count: zone.polygon.length })}
                             </span>
                           </div>
                           <span className={`text-sm px-2 py-1 rounded ${zone.enabled ? 'bg-[hsl(var(--success-muted))] text-[hsl(var(--success-muted-foreground))]' : 'bg-muted text-muted-foreground'}`}>
@@ -1527,7 +1519,7 @@ export function StreamConfigModal({
                             type="number"
                             id="ptz-max-x"
                             name="ptzMaxX"
-                            className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                            className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                             min="0"
                             value={currentStream.ptzMaxX || 0}
                             onChange={onInputChange}
@@ -1543,7 +1535,7 @@ export function StreamConfigModal({
                             type="number"
                             id="ptz-max-y"
                             name="ptzMaxY"
-                            className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                            className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                             min="0"
                             value={currentStream.ptzMaxY || 0}
                             onChange={onInputChange}
@@ -1559,7 +1551,7 @@ export function StreamConfigModal({
                             type="number"
                             id="ptz-max-z"
                             name="ptzMaxZ"
-                            className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                            className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                             min="0"
                             value={currentStream.ptzMaxZ || 0}
                             onChange={onInputChange}
@@ -1602,7 +1594,7 @@ export function StreamConfigModal({
                   <select
                     id="stream-priority"
                     name="priority"
-                    className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                    className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                     value={currentStream.priority}
                     onChange={onInputChange}
                   >
@@ -1621,7 +1613,7 @@ export function StreamConfigModal({
                     type="number"
                     id="stream-segment"
                     name="segment"
-                    className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                    className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                     min="30"
                     max="3600"
                     value={currentStream.segment}
@@ -1638,7 +1630,7 @@ export function StreamConfigModal({
                     type="text"
                     id="motion-trigger-source"
                     name="motionTriggerSource"
-                    className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                    className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                     placeholder={t('streamsConfig.motionTriggerSourcePlaceholder')}
                     value={currentStream.motionTriggerSource || ''}
                     onChange={onInputChange}
@@ -1661,7 +1653,7 @@ export function StreamConfigModal({
                 <textarea
                   id="go2rtc-source-override"
                   name="go2rtcSourceOverride"
-                  className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground font-mono text-sm"
+                  className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground font-mono text-sm"
                   rows="4"
                   placeholder={"rtsp://admin:pass@camera/stream#transport=tcp\n\nOr multi-source:\n- rtsp://admin:pass@camera/main#transport=tcp\n- ffmpeg:camera1#video=h264#hardware"}
                   value={currentStream.go2rtcSourceOverride || ''}
@@ -1687,7 +1679,7 @@ export function StreamConfigModal({
                   type="text"
                   id="publish-url"
                   name="publishUrl"
-                  className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground font-mono text-sm"
+                  className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground font-mono text-sm"
                   placeholder="rtmp://a.rtmp.youtube.com/live2/xxxx-xxxx-xxxx-xxxx-xxxx"
                   value={currentStream.publishUrl || ''}
                   onChange={onInputChange}

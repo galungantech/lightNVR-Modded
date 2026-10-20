@@ -22,6 +22,7 @@ const HIDEABLE_COLUMNS = [
  * Inline tag cell with overlay toggle
  */
 function TagCell({ recording, onTagsChanged }) {
+  const { t } = useI18n();
   const [showOverlay, setShowOverlay] = useState(false);
   return (
     <td className="px-6 py-4">
@@ -35,7 +36,7 @@ function TagCell({ recording, onTagsChanged }) {
           <button
             className="p-0.5 rounded hover:bg-muted/70 transition-colors"
             onClick={() => setShowOverlay(!showOverlay)}
-            title="Manage tags"
+            title={t('recordings.manageTagsInline')}
           >
             <TagIcon className="w-3.5 h-3.5 text-muted-foreground" />
           </button>
@@ -364,7 +365,17 @@ export function RecordingsTable({
                 )}
                 <td className="px-6 py-4 whitespace-nowrap">{formatUtils.formatDateTime(recording.start_time_unix ?? recording.start_time)}</td>
                 {isColumnVisible('duration') && (
-                  <td className="px-6 py-4 whitespace-nowrap">{formatUtils.formatDuration(recording.duration)}</td>
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    {recording.in_progress ? (
+                      <span className="inline-flex items-center gap-1.5 text-destructive" title={t('recordings.inProgressToast')}>
+                        <span className="inline-block w-2 h-2 rounded-full bg-destructive animate-pulse" aria-hidden="true" />
+                        {formatUtils.formatDuration(formatUtils.liveRecordingDuration(recording))}
+                        <span className="text-xs font-medium uppercase">{t('recordings.inProgressBadge')}</span>
+                      </span>
+                    ) : (
+                      formatUtils.formatDuration(recording.duration)
+                    )}
+                  </td>
                 )}
                 {isColumnVisible('size') && (
                   <td className="px-6 py-4 whitespace-nowrap">{recording.size || t('common.unknown')}</td>
@@ -386,7 +397,7 @@ export function RecordingsTable({
                           <path d="M10 12a2 2 0 100-4 2 2 0 000 4z"></path>
                           <path fillRule="evenodd" d="M.458 10C1.732 5.943 5.522 3 10 3s8.268 2.943 9.542 7c-1.274 4.057-5.064 7-9.542 7S1.732 14.057.458 10zM14 10a4 4 0 11-8 0 4 4 0 018 0z" clipRule="evenodd"></path>
                         </svg>
-                        Yes
+                        {t('common.yes')}
                       </span>
                     ) : ''}
                   </td>
@@ -397,7 +408,7 @@ export function RecordingsTable({
                 {isColumnVisible('actions') && (
                   <td className="px-6 py-4 whitespace-nowrap">
                     <div className="flex space-x-2">
-                      <button className="p-1 rounded-full focus:outline-none"
+                      <button className="p-1 rounded-full"
                               style={{color: 'hsl(var(--primary))'}}
                               onMouseOver={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--primary) / 0.1)'}
                               onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
@@ -407,7 +418,7 @@ export function RecordingsTable({
                           <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd"></path>
                         </svg>
                       </button>
-                      <button className="p-1 rounded-full focus:outline-none"
+                      <button className="p-1 rounded-full"
                               style={{color: 'hsl(var(--success))'}}
                               onMouseOver={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--success) / 0.1)'}
                               onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
@@ -417,7 +428,7 @@ export function RecordingsTable({
                           <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd"></path>
                         </svg>
                       </button>
-                      <a className="p-1 rounded-full focus:outline-none inline-flex"
+                      <a className="p-1 rounded-full inline-flex"
                               style={{color: 'hsl(var(--info))'}}
                               onMouseOver={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--info) / 0.1)'}
                               onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
@@ -427,7 +438,7 @@ export function RecordingsTable({
                           <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd"></path>
                         </svg>
                       </a>
-                      <button className="p-1 rounded-full focus:outline-none"
+                      <button className="p-1 rounded-full"
                               style={{color: recording.protected ? 'hsl(var(--warning))' : 'hsl(var(--muted-foreground))'}}
                               onMouseOver={(e) => e.currentTarget.style.backgroundColor = recording.protected ? 'hsl(var(--warning) / 0.1)' : 'hsl(var(--muted-foreground) / 0.1)'}
                               onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
@@ -442,7 +453,7 @@ export function RecordingsTable({
                         </svg>
                       </button>
                       {canDelete && (
-                        <button className="p-1 rounded-full focus:outline-none"
+                        <button className="p-1 rounded-full"
                                 style={{color: 'hsl(var(--danger))'}}
                                 onMouseOver={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--danger) / 0.1)'}
                                 onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'transparent'}

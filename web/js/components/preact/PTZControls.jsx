@@ -5,6 +5,8 @@
 
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 import { useI18n } from '../../i18n.js';
+import { showSuccessToast, showErrorToast } from './ToastContainer.jsx';
+import { getPtzCapabilities, getPtzPresets, savePtzPreset, setPtzHome } from './ptzActions.js';
 
 /**
  * PTZ API functions
@@ -42,32 +44,12 @@ const ptzApi = {
     return response.json();
   },
 
-  async getPresets(streamName) {
-    const response = await fetch(
-      `/api/streams/${encodeURIComponent(streamName)}/ptz/presets`
-    );
-
-    return response.json();
-  },
-
   async gotoPreset(streamName, token) {
-    const response = await fetch(
-      `/api/streams/${encodeURIComponent(streamName)}/ptz/preset`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token })
-      }
-    );
-
-    return response.json();
-  },
-
-  async getCapabilities(streamName) {
-    const response = await fetch(
-      `/api/streams/${encodeURIComponent(streamName)}/ptz/capabilities`
-    );
-
+    const response = await fetch(`/api/streams/${encodeURIComponent(streamName)}/ptz/goto-preset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token })
+    });
     return response.json();
   }
 };
@@ -186,6 +168,12 @@ export function PTZControls({
   const [presets, setPresets] = useState([]);
   const [isMoving, setIsMoving] = useState(false);
   const [error, setError] = useState(null);
+  const [capabilities, setCapabilities] = useState(null);
+  const [canManage, setCanManage] = useState(true);
+  const [presetName, setPresetName] = useState('');
+  const [showPresetForm, setShowPresetForm] = useState(false);
+  const [confirmSetHome, setConfirmSetHome] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   // =========================
   // DRAG STATE
@@ -208,162 +196,72 @@ export function PTZControls({
   // =========================
   useEffect(() => {
     if (!stream?.name || !stream?.ptz_enabled) return;
-
-    ptzApi.getPresets(stream.name)
-      .then(data => setPresets(data.presets || []))
-      .catch(err =>
-        console.error('Failed to get PTZ presets:', err)
-      );
+    let active = true;
+    setCapabilities(null);
+    setCanManage(true);
+    setPresets([]);
+    setPresetName('');
+    setShowPresetForm(false);
+    setConfirmSetHome(false);
+    getPtzCapabilities(stream.name)
+      .then(data => { if (active) setCapabilities(data); })
+      .catch(err => console.error('Failed to get PTZ capabilities:', err));
+    getPtzPresets(stream.name)
+      .then(data => { if (active) setPresets(data.presets || []); })
+      .catch(err => console.error('Failed to get PTZ presets:', err));
+    return () => { active = false; };
   }, [stream?.name, stream?.ptz_enabled]);
 
-  // =========================
-  // DRAG FUNCTIONS
-  // =========================
-  const clampPosition = useCallback((x, y) => {
-
-    const panel = panelRef.current;
-
-    if (!panel) return { x, y };
-
-    const parent = panel.parentElement;
-
-    if (!parent) return { x, y };
-
-    const parentRect = parent.getBoundingClientRect();
-    const panelRect = panel.getBoundingClientRect();
-
-    const maxX = parentRect.width - panelRect.width;
-    const maxY = parentRect.height - panelRect.height;
-
-    return {
-      x: Math.max(0, Math.min(x, maxX)),
-      y: Math.max(0, Math.min(y, maxY))
-    };
-
+  const handleActionFailure = useCallback((err, message) => {
+    if (err.status === 403) {
+      setCanManage(false);
+      setShowPresetForm(false);
+      setConfirmSetHome(false);
+    }
+    showErrorToast(message);
+    console.error(message, err);
   }, []);
 
-  const startDrag = useCallback((e) => {
+  const handleSavePreset = useCallback(async (event) => {
+    event.preventDefault();
+    const name = presetName.trim();
+    if (!stream?.name || !name || saving) return;
+    setSaving(true);
+    try {
+      await savePtzPreset(stream.name, name, setPresets);
+      setShowPresetForm(false);
+      setPresetName('');
+      showSuccessToast(t('live.ptzPresetSaved'));
+    } catch (err) {
+      handleActionFailure(err, t(err.stage === 'refresh'
+        ? 'live.ptzPresetRefreshFailed' : 'live.ptzPresetSaveFailed'));
+    } finally {
+      setSaving(false);
+    }
+  }, [stream?.name, presetName, saving, t, handleActionFailure]);
 
-    const panel = panelRef.current;
+  const handleSetHome = useCallback(async () => {
+    if (!stream?.name || saving) return;
+    setSaving(true);
+    try {
+      await setPtzHome(stream.name);
+      setConfirmSetHome(false);
+      showSuccessToast(t('live.ptzHomeSet'));
+    } catch (err) {
+      handleActionFailure(err, t('live.ptzSetHomeFailed'));
+    } finally {
+      setSaving(false);
+    }
+  }, [stream?.name, saving, t, handleActionFailure]);
 
-    if (!panel) return;
-
-    dragData.current.dragging = true;
-
-    const clientX = e.touches
-      ? e.touches[0].clientX
-      : e.clientX;
-
-    const clientY = e.touches
-      ? e.touches[0].clientY
-      : e.clientY;
-
-    dragData.current.offsetX =
-      clientX + position.x;
-
-    dragData.current.offsetY =
-      clientY + position.y;
-
-    e.preventDefault();
-
-  }, [position]);
-
-  const onDrag = useCallback((e) => {
-
-    if (!dragData.current.dragging) return;
-
-    const clientX = e.touches
-      ? e.touches[0].clientX
-      : e.clientX;
-
-    const clientY = e.touches
-      ? e.touches[0].clientY
-      : e.clientY;
-
-    let newX =
-      dragData.current.offsetX - clientX;
-
-    let newY =
-      dragData.current.offsetY - clientY;
-
-    const clamped =
-      clampPosition(newX, newY);
-
-    setPosition(clamped);
-
-  }, [clampPosition]);
-
-  const stopDrag = useCallback(() => {
-    dragData.current.dragging = false;
-  }, []);
-
-  useEffect(() => {
-
-    window.addEventListener(
-      'mousemove',
-      onDrag
-    );
-
-    window.addEventListener(
-      'mouseup',
-      stopDrag
-    );
-
-    window.addEventListener(
-      'touchmove',
-      onDrag,
-      { passive: false }
-    );
-
-    window.addEventListener(
-      'touchend',
-      stopDrag
-    );
-
-    return () => {
-
-      window.removeEventListener(
-        'mousemove',
-        onDrag
-      );
-
-      window.removeEventListener(
-        'mouseup',
-        stopDrag
-      );
-
-      window.removeEventListener(
-        'touchmove',
-        onDrag
-      );
-
-      window.removeEventListener(
-        'touchend',
-        stopDrag
-      );
-
-    };
-
-  }, [onDrag, stopDrag]);
-
-  // =========================
-  // PTZ FUNCTIONS
-  // =========================
-  const handleMoveStart = useCallback(
-    (pan, tilt, zoom) => {
-
-      if (!stream?.name) return;
-
-      setIsMoving(true);
-      setError(null);
-
-      ptzApi.move(
-        stream.name,
-        pan * speed,
-        tilt * speed,
-        zoom * speed
-      ).catch(err => {
-
+  // Handle continuous move
+  const handleMoveStart = useCallback((pan, tilt, zoom) => {
+    if (!stream?.name) return;
+    setIsMoving(true);
+    setError(null);
+    
+    ptzApi.move(stream.name, pan * speed, tilt * speed, zoom * speed)
+      .catch(err => {
         setIsMoving(false);
 
         setError(
@@ -501,17 +399,9 @@ export function PTZControls({
 
         {onClose && (
           <button
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              onClose?.();
-            }}
-            onTouchStart={(e) => {
-              e.stopPropagation();
-            }}
-            onMouseDown={(e) => {
-              e.stopPropagation();
-            }}
+            type="button"
+            onClick={onClose}
+            aria-label={t('common.close')}
             style={{
               background: 'none',
               border: 'none',
@@ -575,7 +465,9 @@ export function PTZControls({
 
         {/* HOME BUTTON */}
         <button
+          type="button"
           onClick={handleHome}
+          aria-label={t('live.goToHomePosition')}
           style={{
             width: '40px',
             height: '40px',
@@ -685,6 +577,7 @@ export function PTZControls({
 
         <input
           type="range"
+          aria-label={t('live.speedLabel')}
           min="0.1"
           max="1"
           step="0.1"
@@ -713,10 +606,8 @@ export function PTZControls({
       {presets.length > 0 && (
         <div style={{ marginTop: '4px' }}>
           <select
-            onChange={(e) =>
-              e.target.value &&
-              handlePreset(e.target.value)
-            }
+            aria-label={t('live.goToPreset')}
+            onChange={(e) => e.target.value && handlePreset(e.target.value)}
             style={{
               width: '100%',
               padding: '6px',
@@ -752,7 +643,59 @@ export function PTZControls({
         </div>
       )}
 
-      {/* Error */}
+      {canManage && capabilities?.has_presets && (
+        showPresetForm ? (
+          <form onSubmit={handleSavePreset} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <label htmlFor="ptz-preset-name" style={{ color: 'white', fontSize: '11px' }}>
+              {t('live.ptzPresetName')}
+              <input
+                id="ptz-preset-name"
+                type="text"
+                aria-label={t('live.ptzPresetName')}
+                value={presetName}
+                onInput={(event) => setPresetName(event.currentTarget.value)}
+                maxLength={64}
+                required
+                style={{ padding: '6px', borderRadius: '4px' }}
+              />
+            </label>
+            <div style={{ display: 'flex', gap: '4px' }}>
+              <button type="submit" disabled={saving || !presetName.trim()} aria-label={t('live.ptzSavePreset')}>
+                {t('live.ptzSavePreset')}
+              </button>
+              <button type="button" disabled={saving} onClick={() => setShowPresetForm(false)} aria-label={t('common.cancel')}>
+                {t('common.cancel')}
+              </button>
+            </div>
+          </form>
+        ) : (
+          <button type="button" onClick={() => { setConfirmSetHome(false); setShowPresetForm(true); }} aria-label={t('live.ptzSaveCurrentPosition')}>
+            {t('live.ptzSaveCurrentPosition')}
+          </button>
+        )
+      )}
+
+      {canManage && capabilities?.has_home_position && (
+        confirmSetHome ? (
+          <div style={{ color: 'white', fontSize: '11px' }}>
+            <span>{t('live.ptzConfirmSetHome')}</span>
+            <div style={{ display: 'flex', gap: '4px' }}>
+              <button type="button" disabled={saving} onClick={handleSetHome} aria-label={t('live.ptzSetHome')}>
+                {t('live.ptzSetHome')}
+              </button>
+              <button type="button" disabled={saving} onClick={() => setConfirmSetHome(false)} aria-label={t('common.cancel')}>
+                {t('common.cancel')}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button type="button" onClick={() => { setShowPresetForm(false); setConfirmSetHome(true); }} aria-label={t('live.ptzSetCurrentPositionHome')}>
+            {t('live.ptzSetCurrentPositionHome')}
+          </button>
+        )
+      )}
+
+      {/* Error message */}
       {error && (
         <div
           style={{

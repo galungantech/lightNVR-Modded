@@ -127,7 +127,6 @@ export function SettingsView() {
     defaultDetectionThreshold: 50,
     defaultPreBuffer: 5,
     defaultPostBuffer: 10,
-    bufferStrategy: 'auto',
     detectionGracePeriod: 2,
     // In-process LiteRT detection engine
     detectionEngineEnabled: false,
@@ -372,7 +371,6 @@ export function SettingsView() {
       defaultDetectionThreshold: settingsData.default_detection_threshold || 50,
       defaultPreBuffer: settingsData.pre_detection_buffer ?? 5,
       defaultPostBuffer: settingsData.post_detection_buffer ?? 10,
-      bufferStrategy: settingsData.buffer_strategy || 'auto',
       defaultPlaybackTransport: settingsData.default_playback_transport || 'auto',
       detectionGracePeriod: settingsData.detection_grace_period ?? 2,
       detectionEngineEnabled: settingsData.detection_engine_enabled || false,
@@ -512,7 +510,6 @@ export function SettingsView() {
       default_detection_threshold: settings.defaultDetectionThreshold,
       pre_detection_buffer: parseInt(settings.defaultPreBuffer, 10),
       post_detection_buffer: parseInt(settings.defaultPostBuffer, 10),
-      buffer_strategy: settings.bufferStrategy,
       default_playback_transport: settings.defaultPlaybackTransport,
       detection_grace_period: parseInt(settings.detectionGracePeriod, 10),
       detection_engine_enabled: !!settings.detectionEngineEnabled,
@@ -861,15 +858,15 @@ export function SettingsView() {
                   type="search"
                   value={searchQuery}
                   onInput={(e) => setSearchQuery(e.target.value)}
-                  placeholder={t('settings.searchPlaceholder') !== 'settings.searchPlaceholder' ? t('settings.searchPlaceholder') : 'Search settings…'}
+                  placeholder={t('settings.searchPlaceholder')}
                   class="w-full p-2 pr-8 border border-input rounded bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-primary min-h-11"
-                  aria-label="Search settings"
+                  aria-label={t('settings.searchLabel')}
                 />
                 {searchQuery ? (
                   <button
                     type="button"
                     onClick={() => setSearchQuery('')}
-                    aria-label="Clear search"
+                    aria-label={t('settings.clearSearch')}
                     class="absolute right-1 top-1/2 -translate-y-1/2 h-8 w-8 flex items-center justify-center text-muted-foreground hover:text-foreground"
                   >
                     ×
@@ -928,7 +925,7 @@ export function SettingsView() {
           >
             <div class="flex items-center justify-end gap-3">
               {isDirty ? (
-                <span class="text-xs text-muted-foreground">{t('settings.unsavedChanges') !== 'settings.unsavedChanges' ? t('settings.unsavedChanges') : 'Unsaved changes'}</span>
+                <span class="text-xs text-muted-foreground">{t('settings.unsavedChanges')}</span>
               ) : null}
               <AsyncButton
                 id="save-settings-btn"

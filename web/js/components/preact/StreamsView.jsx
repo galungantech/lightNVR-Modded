@@ -1451,7 +1451,7 @@ const handleDrop = (e, targetIndex) => {
             <>
               {!selectionMode && (
                 <button
-                  className="flex items-center gap-1.5 text-sm px-2 py-1 rounded hover:bg-muted/70 transition-colors text-muted-foreground focus:outline-none"
+                  className="flex items-center gap-1.5 text-sm px-2 py-1 rounded hover:bg-muted/70 transition-colors text-muted-foreground"
                   onClick={() => setSelectionMode(true)}
                   title={t('streams.enterSelectionMode')}
                 >
@@ -1464,14 +1464,14 @@ const handleDrop = (e, targetIndex) => {
               )}
               <button
                   id="discover-onvif-btn"
-                  className="btn-secondary focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2"
+                  className="btn-secondary focus:ring-2 focus:ring-primary focus:ring-offset-2"
                   onClick={openOnvifModal}
               >
                 {t('streams.discoverOnvifCameras')}
               </button>
               <button
                   id="add-stream-btn"
-                  className="btn-primary focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2"
+                  className="btn-primary focus:ring-2 focus:ring-primary focus:ring-offset-2"
                   onClick={openAddStreamModal}
               >
                 {t('streams.addStream')}
@@ -1642,7 +1642,7 @@ const handleDrop = (e, targetIndex) => {
               <option value="disabled">{t('availability.disabled')}</option>
               <option value="all">{t('availability.all')}</option>
             </select>
-            <span className="font-medium">{t('streams.sortBy') || 'Sort by'}:</span>
+            <span className="font-medium">{t('streams.sortBy')}:</span>
             {[
               { key: 'name',       label: t('common.name') },
               { key: 'status',     label: t('common.status') },
@@ -1847,7 +1847,7 @@ const handleDrop = (e, targetIndex) => {
                 <h4 className="text-md font-medium">{t('streams.discoveredDevices')}</h4>
                 <button
                     id="discover-btn"
-                    className="btn-primary focus:outline-none focus:ring-2 focus:ring-primary"
+                    className="btn-primary focus:ring-2 focus:ring-primary"
                     onClick={startOnvifDiscovery}
                     disabled={isDiscovering}
                     type="button"
@@ -1933,7 +1933,7 @@ const handleDrop = (e, targetIndex) => {
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           <button
-                              className={alreadyAdded ? 'btn-secondary focus:outline-none' : 'btn-primary focus:outline-none'}
+                              className={alreadyAdded ? 'btn-secondary' : 'btn-primary'}
                               onClick={() => testOnvifConnection(device)}
                               disabled={isConnecting}
                               type="button"
@@ -1970,7 +1970,7 @@ const handleDrop = (e, targetIndex) => {
                         type="text"
                         id="onvif-username"
                         name="username"
-                        className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none bg-background text-foreground"
+                        className="w-full px-3 py-2 border border-input rounded-md shadow-sm bg-background text-foreground"
                         placeholder="admin"
                         value={onvifCredentials.username}
                         onChange={handleCredentialChange}
@@ -1982,7 +1982,7 @@ const handleDrop = (e, targetIndex) => {
                         type="password"
                         id="onvif-password"
                         name="password"
-                        className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none bg-background text-foreground"
+                        className="w-full px-3 py-2 border border-input rounded-md shadow-sm bg-background text-foreground"
                         placeholder="password"
                         value={onvifCredentials.password}
                         onChange={handleCredentialChange}
@@ -2014,7 +2014,7 @@ const handleDrop = (e, targetIndex) => {
                           <td className="px-6 py-4 whitespace-nowrap">{profile.fps}</td>
                           <td className="px-6 py-4 whitespace-nowrap">
                             <button
-                                className="btn-primary focus:outline-none focus:ring-2 focus:ring-primary"
+                                className="btn-primary focus:ring-2 focus:ring-primary"
                                 onClick={() => addOnvifDeviceAsStream(profile)}
                                 type="button"
                             >
@@ -2056,7 +2056,7 @@ const handleDrop = (e, targetIndex) => {
                 <input
                     type="text"
                     id="custom-stream-name"
-                    className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none bg-background text-foreground"
+                    className="w-full px-3 py-2 border border-input rounded-md shadow-sm bg-background text-foreground"
                     value={customStreamName}
                     onChange={(e) => setCustomStreamName(e.target.value)}
                 />
@@ -2074,7 +2074,7 @@ const handleDrop = (e, targetIndex) => {
                 {t('common.cancel')}
               </button>
               <button
-                  className="btn-primary focus:outline-none focus:ring-2 focus:ring-primary"
+                  className="btn-primary focus:ring-2 focus:ring-primary"
                   onClick={submitOnvifDevice}
                   type="button"
                   disabled={!customStreamName.trim() || isAddingStream}

@@ -16,6 +16,8 @@
 #include <netdb.h>
 #include <ifaddrs.h>
 #include <net/if.h>
+#include <netinet/in.h>
+#include <netpacket/packet.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -159,7 +161,7 @@ static void get_cached_recording_aggregates(int *count, int64_t *bytes) {
         now - recording_aggregate_cache.refreshed_at >=
             SYSTEM_RECORDING_AGGREGATE_TTL_SECONDS) {
         int refreshed_count = get_recording_count(
-            0, 0, NULL, 0, NULL, -1, NULL, 0, NULL, NULL);
+            0, 0, NULL, 0, NULL, -1, NULL, 0, NULL, NULL, false);
         int64_t refreshed_bytes = get_stream_storage_bytes(NULL);
         if (refreshed_count >= 0) recording_aggregate_cache.count = refreshed_count;
         if (refreshed_bytes >= 0) recording_aggregate_cache.bytes = refreshed_bytes;
@@ -261,6 +263,102 @@ static void format_triplet_version(unsigned version_int, char *buffer, size_t bu
              AV_VERSION_MAJOR(version_int),
              AV_VERSION_MINOR(version_int),
              AV_VERSION_MICRO(version_int));
+}
+
+#define SYSTEM_INFO_MAX_INTERFACES 64
+
+typedef struct {
+    char name[IFNAMSIZ];
+    char ipv4[INET_ADDRSTRLEN];
+    char ipv6[INET6_ADDRSTRLEN];
+    char mac[18];
+    bool ipv6_link_local;
+    unsigned int flags;
+} system_info_interface_t;
+
+static system_info_interface_t *find_or_add_interface(
+    system_info_interface_t *list, size_t *count, const char *name) {
+    for (size_t i = 0; i < *count; ++i) {
+        if (strcmp(list[i].name, name) == 0) return &list[i];
+    }
+    if (*count >= SYSTEM_INFO_MAX_INTERFACES) return NULL;
+    system_info_interface_t *entry = &list[(*count)++];
+    memset(entry, 0, sizeof(*entry));
+    safe_strcpy(entry->name, name, sizeof(entry->name), 0);
+    return entry;
+}
+
+/* Host interface list for the admin-only System page. The health snapshot
+ * only carries hashed interface IDs and carrier state, so read names,
+ * addresses and MACs directly. Loopback is omitted, as are interfaces that
+ * are administratively down with no address (e.g. unused sit0/ip6tnl0). */
+static void add_network_interfaces_json(cJSON *interfaces) {
+    struct ifaddrs *ifaddr = NULL;
+    if (getifaddrs(&ifaddr) != 0) {
+        log_warn("getifaddrs failed: %s", strerror(errno));
+        return;
+    }
+
+    system_info_interface_t list[SYSTEM_INFO_MAX_INTERFACES];
+    size_t count = 0;
+    for (const struct ifaddrs *ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_name || (ifa->ifa_flags & IFF_LOOPBACK)) continue;
+        system_info_interface_t *entry =
+            find_or_add_interface(list, &count, ifa->ifa_name);
+        if (!entry) continue;
+        entry->flags |= ifa->ifa_flags;
+        if (!ifa->ifa_addr) continue;
+
+        int family = ifa->ifa_addr->sa_family;
+        if (family == AF_INET && !entry->ipv4[0]) {
+            const struct sockaddr_in *in = (const struct sockaddr_in *)ifa->ifa_addr;
+            inet_ntop(AF_INET, &in->sin_addr, entry->ipv4, sizeof(entry->ipv4));
+        } else if (family == AF_INET6) {
+            const struct sockaddr_in6 *in6 = (const struct sockaddr_in6 *)ifa->ifa_addr;
+            bool link_local = IN6_IS_ADDR_LINKLOCAL(&in6->sin6_addr);
+            // Prefer the first routable address over link-local fe80::/10
+            if (!entry->ipv6[0] || (entry->ipv6_link_local && !link_local)) {
+                inet_ntop(AF_INET6, &in6->sin6_addr, entry->ipv6, sizeof(entry->ipv6));
+                entry->ipv6_link_local = link_local;
+            }
+        } else if (family == AF_PACKET) {
+            const struct sockaddr_ll *ll = (const struct sockaddr_ll *)ifa->ifa_addr;
+            bool nonzero = false;
+            for (int i = 0; i < ll->sll_halen && i < 6; ++i) {
+                if (ll->sll_addr[i]) nonzero = true;
+            }
+            if (ll->sll_halen == 6 && nonzero) {
+                snprintf(entry->mac, sizeof(entry->mac),
+                         "%02x:%02x:%02x:%02x:%02x:%02x",
+                         ll->sll_addr[0], ll->sll_addr[1], ll->sll_addr[2],
+                         ll->sll_addr[3], ll->sll_addr[4], ll->sll_addr[5]);
+            }
+        }
+    }
+    freeifaddrs(ifaddr);
+
+    for (size_t i = 0; i < count; ++i) {
+        const system_info_interface_t *entry = &list[i];
+        bool has_ipv6 = entry->ipv6[0] && !entry->ipv6_link_local;
+        const char *address = entry->ipv4[0] ? entry->ipv4
+                            : has_ipv6 ? entry->ipv6 : NULL;
+        if (!(entry->flags & IFF_UP) && !address) continue;
+
+        cJSON *iface = cJSON_CreateObject();
+        if (!iface) continue;
+        cJSON_AddStringToObject(iface, "name", entry->name);
+        if (address)
+            cJSON_AddStringToObject(iface, "address", address);
+        else
+            cJSON_AddNullToObject(iface, "address");
+        if (entry->ipv4[0] && has_ipv6)
+            cJSON_AddStringToObject(iface, "ipv6", entry->ipv6);
+        cJSON_AddStringToObject(iface, "mac", entry->mac[0] ? entry->mac : "Unavailable");
+        // IFF_RUNNING reflects operational state (carrier), not just admin-up
+        cJSON_AddBoolToObject(iface, "up", (entry->flags & IFF_RUNNING) != 0);
+        cJSON_AddStringToObject(iface, "capability", "available");
+        cJSON_AddItemToArray(interfaces, iface);
+    }
 }
 
 static void add_versions_to_json(cJSON *info) {
@@ -582,225 +680,6 @@ static int get_effective_cpu_cores(int *out_millicores) {
     log_debug("No cgroup CPU limit detected, using host cores: %d", host_cores);
     return host_cores;
 }
-
-#if 0 /* Superseded by the background system-health sampler. */
-/**
- * Get the effective memory limit for this process (in bytes).
- *
- * Checks cgroup v2 (memory.max) then cgroup v1 (memory.limit_in_bytes).
- * Falls back to sysinfo() totalram when not cgroup-constrained.
- */
-static unsigned long long get_effective_memory_total(void) {
-    // Host fallback
-    struct sysinfo si;
-    unsigned long long host_total = 0;
-    if (sysinfo(&si) == 0) {
-        host_total = (unsigned long long)si.totalram * si.mem_unit;
-    }
-
-    // ── cgroup v2: /sys/fs/cgroup/memory.max  ("max" or a number)
-    FILE *fp = fopen("/sys/fs/cgroup/memory.max", "r");
-    if (fp) {
-        char buf[64] = {0};
-        if (fgets(buf, sizeof(buf), fp)) {
-            fclose(fp);
-            if (strncmp(buf, "max", 3) != 0) {
-                unsigned long long limit = strtoull(buf, NULL, 10);
-                if (limit > 0 && limit < host_total) {
-                    log_debug("cgroup v2 memory.max: %llu bytes", limit);
-                    return limit;
-                }
-            }
-            // "max" or value >= host_total means effectively unlimited
-            log_debug("cgroup v2 memory.max: unlimited");
-            return host_total;
-        }
-        fclose(fp);
-    }
-
-    // ── cgroup v1: /sys/fs/cgroup/memory/memory.limit_in_bytes
-    unsigned long long limit = 0;
-    if (read_ull_from_file("/sys/fs/cgroup/memory/memory.limit_in_bytes", &limit)) {
-        // Very large values (~PAGE_COUNTER_MAX) mean unlimited
-        if (limit > 0 && limit < host_total) {
-            log_debug("cgroup v1 memory.limit_in_bytes: %llu bytes", limit);
-            return limit;
-        }
-    }
-
-    log_debug("No cgroup memory limit detected, using host total: %llu bytes", host_total);
-    return host_total;
-}
-
-/**
- * Get the current memory usage for the cgroup (in bytes).
- *
- * In a container the cgroup tracks memory for all processes in the pod,
- * which is more useful than a single process's VmRSS.
- * Falls back to sysinfo() used-ram on bare metal.
- */
-static unsigned long long get_effective_memory_used(void) {
-    // ── cgroup v2: /sys/fs/cgroup/memory.current
-    unsigned long long used = 0;
-    if (read_ull_from_file("/sys/fs/cgroup/memory.current", &used) && used > 0) {
-        log_debug("cgroup v2 memory.current: %llu bytes", used);
-        return used;
-    }
-
-    // ── cgroup v1: /sys/fs/cgroup/memory/memory.usage_in_bytes
-    if (read_ull_from_file("/sys/fs/cgroup/memory/memory.usage_in_bytes", &used) && used > 0) {
-        log_debug("cgroup v1 memory.usage_in_bytes: %llu bytes", used);
-        return used;
-    }
-
-    // Fall back to host-wide calculation
-    struct sysinfo si;
-    if (sysinfo(&si) == 0) {
-        used = ((unsigned long long)si.totalram - (unsigned long long)si.freeram) * si.mem_unit;
-    }
-    return used;
-}
-
-/**
- * Return true if a real CPU limit is set in cgroups (i.e. we are in a
- * constrained container), false if unlimited / bare-metal.
- */
-static bool has_cgroup_cpu_limit(void) {
-    // cgroup v2: /sys/fs/cgroup/cpu.max  – "max <period>" means unlimited
-    FILE *fp = fopen("/sys/fs/cgroup/cpu.max", "r");
-    if (fp) {
-        char quota_str[64] = {0};
-        char cpu_max_line[128] = {0};
-        bool parsed = false;
-        if (fgets(cpu_max_line, sizeof(cpu_max_line), fp)) {
-            const char *p = cpu_max_line;
-            while (*p == ' ' || *p == '\t') p++;
-            const char *tok_end = p;
-            while (*tok_end && *tok_end != ' ' && *tok_end != '\t' && *tok_end != '\n') tok_end++;
-            size_t tok_len = (size_t)(tok_end - p);
-            if (tok_len > 0 && tok_len < sizeof(quota_str)) {
-                memcpy(quota_str, p, tok_len);
-                quota_str[tok_len] = '\0';
-                parsed = true;
-            }
-        }
-        fclose(fp);
-        if (parsed) {
-            return (strcmp(quota_str, "max") != 0);
-        }
-    }
-    // cgroup v1: quota == -1 means unlimited
-    unsigned long long quota = 0;
-    if (read_ull_from_file("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", &quota)) {
-        return ((long long)quota > 0);
-    }
-    return false;
-}
-
-/**
- * Get container-scoped CPU usage percentage.
- *
- * Only uses cgroup cpu.stat / cpuacct.usage when an actual CPU limit is set
- * (i.e. inside a container with resource constraints).  On bare metal the
- * root cgroup tracks all cores combined, which would produce values like
- * 800% on an 8-core box — so we skip straight to /proc/stat there.
- *
- * Returns a value 0.0 – 100.0.
- */
-static double get_effective_cpu_usage(void) {
-    // Only use cgroup-scoped CPU accounting when a real limit is set;
-    // otherwise the root cgroup aggregates all cores and the percentage
-    // is meaningless (e.g. 234% on a bare-metal 8-core machine).
-    if (has_cgroup_cpu_limit()) {
-        // ── cgroup v2: /sys/fs/cgroup/cpu.stat  → usage_usec
-        FILE *fp = fopen("/sys/fs/cgroup/cpu.stat", "r");
-        if (fp) {
-            char line[128];
-            unsigned long long usage1 = 0;
-            while (fgets(line, sizeof(line), fp)) {
-                if (strncmp(line, "usage_usec", 10) == 0) {
-                    const char *ptr = line + 10;
-                    while (*ptr == ' ') ptr++;
-                    char *endptr;
-                    usage1 = strtoull(ptr, &endptr, 10);
-                    break;
-                }
-            }
-            fclose(fp);
-
-            if (usage1 > 0) {
-                // Sleep briefly and sample again
-                usleep(100000); // 100 ms
-                fp = fopen("/sys/fs/cgroup/cpu.stat", "r");
-                if (fp) {
-                    unsigned long long usage2 = 0;
-                    while (fgets(line, sizeof(line), fp)) {
-                        if (strncmp(line, "usage_usec", 10) == 0) {
-                            const char *ptr2 = line + 10;
-                            while (*ptr2 == ' ') ptr2++;
-                            char *endptr2;
-                            usage2 = strtoull(ptr2, &endptr2, 10);
-                            break;
-                        }
-                    }
-                    fclose(fp);
-                    if (usage2 > usage1) {
-                        // delta in microseconds over 100ms (100000 us)
-                        double delta_us = (double)(usage2 - usage1);
-                        double pct = (delta_us / 100000.0) * 100.0;
-                        log_debug("cgroup v2 cpu usage: %.1f%%", pct);
-                        return pct;
-                    }
-                }
-            }
-        }
-
-        // ── cgroup v1: /sys/fs/cgroup/cpuacct/cpuacct.usage (nanoseconds)
-        unsigned long long ns1 = 0;
-        if (read_ull_from_file("/sys/fs/cgroup/cpuacct/cpuacct.usage", &ns1) && ns1 > 0) {
-            usleep(100000);
-            unsigned long long ns2 = 0;
-            if (read_ull_from_file("/sys/fs/cgroup/cpuacct/cpuacct.usage", &ns2) && ns2 > ns1) {
-                double delta_ns = (double)(ns2 - ns1);
-                double pct = (delta_ns / 100000000.0) * 100.0; // 100ms = 1e8 ns
-                log_debug("cgroup v1 cpu usage: %.1f%%", pct);
-                return pct;
-            }
-        }
-    }
-
-    // ── Bare-metal / no CPU limit: /proc/stat  (gives proper 0–100%)
-    double cpu_usage = 0.0;
-    FILE *fp = fopen("/proc/stat", "r");
-    if (fp) {
-        char stat_line[256] = {0};
-        while (fgets(stat_line, sizeof(stat_line), fp)) {
-            if (strncmp(stat_line, "cpu ", 4) == 0) {
-                unsigned long user = 0, nice = 0, sys = 0, idle = 0, iowait = 0, irq = 0, softirq = 0;
-                char *p = stat_line + 4;
-                char *ep;
-                int fields = 0;
-                unsigned long *targets[] = {&user, &nice, &sys, &idle, &iowait, &irq, &softirq};
-                for (int i = 0; i < 7; i++) {
-                    while (*p == ' ') p++;
-                    *targets[i] = strtoul(p, &ep, 10);
-                    if (ep == p) break;
-                    p = ep;
-                    fields++;
-                }
-                if (fields == 7) {
-                    unsigned long total = user + nice + sys + idle + iowait + irq + softirq;
-                    unsigned long active = user + nice + sys + irq + softirq;
-                    cpu_usage = (double)active / (double)total * 100.0;
-                }
-                break;
-            }
-        }
-        fclose(fp);
-    }
-    return cpu_usage;
-}
-#endif
 
 /**
  * @brief Direct handler for GET /api/system/info
@@ -1135,29 +1014,10 @@ void handle_get_system_info(const http_request_t *req, http_response_t *res) {
     // Add runtime software/library versions for vulnerability auditing and support
     add_versions_to_json(info);
 
-    // Preserve the legacy network/interfaces shape while sourcing carrier state
-    // from the privacy-safe logical interface IDs in the health snapshot.
     cJSON *network = cJSON_CreateObject();
     cJSON *interfaces = cJSON_CreateArray();
     if (network && interfaces) {
-        for (size_t index = 0; index < health_snapshot.observation_count;
-             ++index) {
-            const system_health_observation_t *carrier =
-                &health_snapshot.observations[index];
-            if (strcmp(carrier->metric, "network.carrier") != 0) continue;
-            cJSON *iface = cJSON_CreateObject();
-            if (!iface) continue;
-            cJSON_AddStringToObject(iface, "name", carrier->resource_id);
-            cJSON_AddStringToObject(iface, "address", "Unavailable");
-            cJSON_AddStringToObject(iface, "mac", "Unavailable");
-            if (carrier->value_valid)
-                cJSON_AddBoolToObject(iface, "up", carrier->value != 0.0);
-            else
-                cJSON_AddNullToObject(iface, "up");
-            cJSON_AddStringToObject(iface, "capability",
-                                    health_capability(carrier));
-            cJSON_AddItemToArray(interfaces, iface);
-        }
+        add_network_interfaces_json(interfaces);
         cJSON_AddItemToObject(network, "interfaces", interfaces);
         cJSON_AddItemToObject(info, "network", network);
     } else {
@@ -1165,210 +1025,6 @@ void handle_get_system_info(const http_request_t *req, http_response_t *res) {
         cJSON_Delete(interfaces);
     }
 
-#if 0 /* Replaced by the completed system-health snapshot above. */
-    // Create network object
-    cJSON *network = cJSON_CreateObject();
-    if (network) {
-        // Create interfaces array
-        cJSON *interfaces = cJSON_CreateArray();
-        if (interfaces) {
-            // Get network interfaces with IP addresses using getifaddrs
-            struct ifaddrs *ifaddr, *ifa;
-
-            if (getifaddrs(&ifaddr) == 0) {
-                // Walk through linked list, maintaining head pointer so we can free list later
-                for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
-                    if (ifa->ifa_addr == NULL)
-                        continue;
-
-                    int family = ifa->ifa_addr->sa_family;
-
-                    // Skip loopback interface
-                    if (strcmp(ifa->ifa_name, "lo") == 0)
-                        continue;
-
-                    // Check if this is an IPv4 address
-                    if (family == AF_INET) {
-                        // Get IP address
-                        char host[NI_MAXHOST];
-                        int s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in),
-                                           host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST);
-                        if (s == 0) {
-                            // Check if we already have this interface in our array
-                            bool found = false;
-                            cJSON *existing_iface = NULL;
-
-                            for (int i = 0; i < cJSON_GetArraySize(interfaces); i++) {
-                                existing_iface = cJSON_GetArrayItem(interfaces, i);
-                                const cJSON *name_obj = cJSON_GetObjectItem(existing_iface, "name");
-                                if (name_obj && name_obj->valuestring && strcmp(name_obj->valuestring, ifa->ifa_name) == 0) {
-                                    found = true;
-                                    break;
-                                }
-                            }
-
-                            if (!found) {
-                                // Create new interface object
-                                cJSON *iface = cJSON_CreateObject();
-                                if (iface) {
-                                    cJSON_AddStringToObject(iface, "name", ifa->ifa_name);
-                                    cJSON_AddStringToObject(iface, "address", host);
-
-                                    // Get MAC address (simplified)
-                                    char mac[128] = "Unknown";
-                                    char mac_path[256];
-                                    snprintf(mac_path, sizeof(mac_path), "/sys/class/net/%s/address", ifa->ifa_name);
-                                    FILE *mac_file = fopen(mac_path, "r");
-                                    if (mac_file) {
-                                        if (fgets(mac, sizeof(mac), mac_file)) {
-                                            // Remove newline (strcspn result is bounded by strlen, safe)
-                                            mac[strcspn(mac, "\n")] = 0; // NOLINT(clang-analyzer-security.ArrayBound)
-                                        }
-                                        fclose(mac_file);
-                                    }
-
-                                    cJSON_AddStringToObject(iface, "mac", mac);
-                                    cJSON_AddBoolToObject(iface, "up", (ifa->ifa_flags & IFF_UP) != 0);
-
-                                    cJSON_AddItemToArray(interfaces, iface);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                freeifaddrs(ifaddr);
-            } else {
-                // Fallback to /proc/net/dev if getifaddrs fails
-                FILE *fp = fopen("/proc/net/dev", "r");
-                if (fp) {
-                    char line[256];
-                    // Skip two header lines; abort if either fails (empty/truncated file)
-                    bool headers_read = fgets(line, sizeof(line), fp) != NULL &&
-                                        fgets(line, sizeof(line), fp) != NULL;
-
-                    // Read interfaces
-                    while (headers_read && fgets(line, sizeof(line), fp)) {
-                        char *saveptr = NULL;
-                        char *name = strtok_r(line, ":", &saveptr);
-                        if (name) {
-                            // Trim whitespace
-                            while (*name == ' ') name++;
-
-                            // Skip loopback
-                            if (strcmp(name, "lo") != 0) {
-                                // Validate the interface name and copy only allowed characters
-                                // into a fixed IFNAMSIZ buffer (safe_name).  POSIX names are at
-                                // most IFNAMSIZ-1 chars and may only contain [a-zA-Z0-9._-].
-                                // Reject empty, oversized, or ".." containing names to prevent
-                                // path traversal in /sys/class/net/<name>/... paths.
-                                char safe_name[IFNAMSIZ] = {0};
-                                size_t iface_len = strlen(name);
-                                bool name_safe = (iface_len > 0 && iface_len < IFNAMSIZ);
-                                if (name_safe) {
-                                    for (size_t ni = 0; ni < iface_len; ni++) {
-                                        if (!isalnum((unsigned char)name[ni]) &&
-                                            name[ni] != '_' && name[ni] != '-' && name[ni] != '.') {
-                                            name_safe = false;
-                                            break;
-                                        }
-                                        safe_name[ni] = name[ni];
-                                    }
-                                    if (name_safe && strstr(safe_name, "..") != NULL) {
-                                        name_safe = false;
-                                    }
-                                }
-                                if (!name_safe) {
-                                    continue; /* skip interfaces with unsafe names */
-                                }
-                                cJSON *iface = cJSON_CreateObject();
-                                if (iface) {
-                                    cJSON_AddStringToObject(iface, "name", name);
-
-                                    // Try to get IPv4 address using ioctl (no shell needed)
-                                    char ip_addr[INET_ADDRSTRLEN] = "Unknown";
-                                    int ioc_sock = socket(AF_INET, SOCK_DGRAM, 0);
-                                    if (ioc_sock >= 0) {
-                                        struct ifreq ifr;
-                                        memset(&ifr, 0, sizeof(ifr));
-                                        safe_strcpy(ifr.ifr_name, safe_name, IFNAMSIZ, 0);
-                                        if (ioctl(ioc_sock, SIOCGIFADDR, &ifr) == 0) {
-                                            struct sockaddr_in *sin =
-                                                (struct sockaddr_in *)&ifr.ifr_addr;
-                                            if (inet_ntop(AF_INET, &sin->sin_addr,
-                                                          ip_addr, sizeof(ip_addr)) == NULL) {
-                                                safe_strcpy(ip_addr, "Unknown", sizeof(ip_addr), 0);
-                                            }
-                                        }
-                                        close(ioc_sock);
-                                    }
-
-                                    cJSON_AddStringToObject(iface, "address", ip_addr);
-
-                                    // Get MAC address
-                                    char mac[128] = "Unknown";
-                                    char mac_path[256];
-                                    snprintf(mac_path, sizeof(mac_path), "/sys/class/net/%s/address", safe_name);
-                                    // Resolve the path to prevent path traversal via symlinks
-                                    char resolved_mac_path[PATH_MAX];
-                                    FILE *mac_file = NULL;
-                                    if (realpath(mac_path, resolved_mac_path) != NULL &&
-                                        strncmp(resolved_mac_path, "/sys/", 5) == 0) {
-                                        mac_file = fopen(resolved_mac_path, "r");
-                                    }
-                                    if (mac_file) {
-                                        if (fgets(mac, sizeof(mac), mac_file)) {
-                                            // Remove newline (strcspn result is bounded by strlen, safe)
-                                            mac[strcspn(mac, "\n")] = 0; // NOLINT(clang-analyzer-security.ArrayBound)
-                                        }
-                                        fclose(mac_file);
-                                    }
-
-                                    cJSON_AddStringToObject(iface, "mac", mac);
-
-                                    // Check if interface is up
-                                    char flags_path[256];
-                                    snprintf(flags_path, sizeof(flags_path), "/sys/class/net/%s/flags", safe_name);
-                                    // Resolve the path to prevent path traversal via symlinks
-                                    char resolved_flags_path[PATH_MAX];
-                                    FILE *flags_file = NULL;
-                                    if (realpath(flags_path, resolved_flags_path) != NULL &&
-                                        strncmp(resolved_flags_path, "/sys/", 5) == 0) {
-                                        flags_file = fopen(resolved_flags_path, "r");
-                                    }
-                                    bool is_up = false;
-                                    if (flags_file) {
-                                        char flags_buf[32] = {0};
-                                        if (fgets(flags_buf, sizeof(flags_buf), flags_file)) {
-                                            char *flags_ep;
-                                            unsigned long flags_val = strtoul(flags_buf, &flags_ep, 16);
-                                            if (flags_ep != flags_buf) {
-                                                is_up = ((unsigned int)flags_val & 1U) != 0; // IFF_UP is 0x1
-                                            }
-                                        }
-                                        fclose(flags_file);
-                                    }
-
-                                    cJSON_AddBoolToObject(iface, "up", is_up);
-
-                                    cJSON_AddItemToArray(interfaces, iface);
-                                }
-                            }
-                        }
-                    }
-                    fclose(fp);
-                }
-            }
-
-            // Add interfaces array to network object
-            cJSON_AddItemToObject(network, "interfaces", interfaces);
-        }
-
-        // Add network object to info
-        cJSON_AddItemToObject(info, "network", network);
-    }
-
-#endif
     // Create streams object
     cJSON *streams_obj = cJSON_CreateObject();
     if (streams_obj) {

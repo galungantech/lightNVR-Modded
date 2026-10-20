@@ -120,15 +120,21 @@ function RecordingCard({
   const imgErrorCountRef = useRef(0);
   const hoverTimerRef = useRef(null); // debounce timer for hover
 
+  // A still-recording segment shows a live placeholder instead of a thumbnail:
+  // the MP4 index is not finalized until the segment completes, so the
+  // thumbnail extractor cannot serve it yet (#482).
+  const inProgress = !!recording.in_progress;
+
   /** Load (or reload) the mount-time (first-frame) thumbnail. */
   const loadThumbnail = useCallback(() => {
+    if (inProgress) return;
     const url = `/api/recordings/thumbnail/${recording.id}/0`;
     setLoadState('loading');
     imgErrorCountRef.current = 0;
     queueThumbnailLoad(url, Priority.HIGH)
       .then(() => setLoadState('loaded'))
       .catch(() => setLoadState('error'));
-  }, [recording.id]);
+  }, [inProgress, recording.id]);
 
   // Handle <img> element load errors — if the decoded image was evicted
   // from the browser cache between queueThumbnailLoad success and render,
@@ -172,7 +178,7 @@ function RecordingCard({
   // request queue and cause a stampede).
   // Skipped entirely when hoverFramesEnabled is false (#364 single-thumb mode).
   useEffect(() => {
-    if (!hoverFramesEnabled) return;
+    if (!hoverFramesEnabled || inProgress) return;
     if (isHovering && !preloadedRef.current) {
       preloadedRef.current = true;
       const promises = [1, 2].map(i => {
@@ -228,8 +234,19 @@ function RecordingCard({
       <div
         class="relative aspect-video bg-muted overflow-hidden"
         onClick={() => playRecording(recording)}
+        title={inProgress ? t('recordings.inProgressToast') : undefined}
       >
-        {loadState === 'loaded' ? (
+        {inProgress ? (
+          <div class="w-full h-full flex flex-col items-center justify-center gap-2 text-destructive">
+            <span class="relative flex h-3 w-3" aria-hidden="true">
+              <span class="absolute inline-flex h-full w-full rounded-full bg-destructive opacity-75 animate-ping" />
+              <span class="relative inline-flex rounded-full h-3 w-3 bg-destructive" />
+            </span>
+            <span class="text-xs font-medium tracking-wide uppercase">
+              {t('recordings.inProgressBadge')}
+            </span>
+          </div>
+        ) : loadState === 'loaded' ? (
           <img
             src={thumbnailUrl}
             alt={`${recording.stream} recording`}
@@ -241,18 +258,18 @@ function RecordingCard({
             <svg class="w-12 h-12 opacity-30 animate-pulse" fill="currentColor" viewBox="0 0 20 20">
               <path fillRule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clipRule="evenodd" />
             </svg>
-            <span class="text-xs mt-2 opacity-50">Loading...</span>
+            <span class="text-xs mt-2 opacity-50">{t('common.loading')}</span>
           </div>
         ) : (
           <div
             class="w-full h-full flex flex-col items-center justify-center text-muted-foreground bg-muted/50 cursor-pointer"
             onClick={(e) => { e.stopPropagation(); loadThumbnail(); }}
-            title="Click to retry"
+            title={t('recordings.clickToRetry')}
           >
             <svg class="w-12 h-12 opacity-40 text-destructive" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
             </svg>
-            <span class="text-xs mt-2 opacity-60">Tap to retry</span>
+            <span class="text-xs mt-2 opacity-60">{t('recordings.tapToRetry')}</span>
           </div>
         )}
 
@@ -275,11 +292,18 @@ function RecordingCard({
           </div>
         )}
 
-        {/* Duration badge */}
+        {/* Duration badge — live elapsed time for a still-recording segment (#482) */}
         {show('duration') && (
-          <div class="absolute bottom-2 right-2 px-1.5 py-0.5 bg-black/70 text-white text-xs rounded">
-            {formatUtils.formatDuration(recording.duration)}
-          </div>
+          inProgress ? (
+            <div class="absolute bottom-2 right-2 px-1.5 py-0.5 bg-black/70 text-white text-xs rounded flex items-center gap-1">
+              <span class="inline-block w-2 h-2 rounded-full bg-destructive animate-pulse" aria-hidden="true" />
+              {formatUtils.formatDuration(formatUtils.liveRecordingDuration(recording))}
+            </div>
+          ) : (
+            <div class="absolute bottom-2 right-2 px-1.5 py-0.5 bg-black/70 text-white text-xs rounded">
+              {formatUtils.formatDuration(recording.duration)}
+            </div>
+          )
         )}
 
         {/* Selection checkbox — only visible in selection mode */}
@@ -298,9 +322,18 @@ function RecordingCard({
           </div>
         )}
 
+        {/* In-progress badge (#482) */}
+        {inProgress && (
+          <div class="absolute top-2 right-2 px-1.5 py-0.5 bg-destructive/90 text-destructive-foreground text-xs rounded flex items-center gap-1"
+               title={t('recordings.inProgressToast')}>
+            <span class="inline-block w-2 h-2 rounded-full bg-white animate-pulse" aria-hidden="true" />
+            {t('recordings.inProgressBadge')}
+          </div>
+        )}
+
         {/* Protected badge */}
         {show('protected') && recording.protected && (
-          <div class="absolute top-2 right-2 px-1.5 py-0.5 bg-yellow-500/90 text-white text-xs rounded flex items-center gap-0.5">
+          <div class={`absolute top-2 ${inProgress ? 'right-[5.5rem]' : 'right-2'} px-1.5 py-0.5 bg-yellow-500/90 text-white text-xs rounded flex items-center gap-0.5`}>
             <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
               <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
             </svg>
@@ -315,7 +348,7 @@ function RecordingCard({
             <div class="mb-1">
               <div class="flex items-center justify-between gap-2">
                 <span class="font-medium text-sm truncate" title={recording.stream}>
-                  {recording.stream || 'Unknown'}
+                  {recording.stream || t('common.unknown')}
                 </span>
                 <span class="text-xs text-muted-foreground whitespace-nowrap">
                   {formatUtils.formatDateTime(recording.start_time_unix ?? recording.start_time)}
@@ -361,7 +394,7 @@ function RecordingCard({
                   ref={tagBtnRef}
                   class="p-0.5 rounded hover:bg-muted/70 transition-colors"
                   onClick={(e) => { e.stopPropagation(); setShowTagsOverlay(!showTagsOverlay); }}
-                  title="Manage tags"
+                  title={t('recordings.manageTags')}
                 >
                   <TagIcon className="w-3.5 h-3.5 text-muted-foreground" />
                 </button>
@@ -380,17 +413,17 @@ function RecordingCard({
           {show('actions') && (
             <div class="flex items-center gap-1 pt-1 border-t border-border">
               <button
-                class="p-1 rounded-full focus:outline-none"
+                class="p-1 rounded-full"
                 style={{ color: 'hsl(var(--primary))' }}
                 onClick={() => playRecording(recording)}
-                title="Play"
+                title={t('recordings.play')}
               >
                 <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
                   <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
                 </svg>
               </button>
               <button
-                class="p-1 rounded-full focus:outline-none"
+                class="p-1 rounded-full"
                 style={{ color: 'hsl(var(--success))' }}
                 onClick={() => downloadRecording(recording)}
                 title={`Download${recording.size ? ' (' + recording.size + ')' : ''}`}
@@ -400,17 +433,17 @@ function RecordingCard({
                 </svg>
               </button>
               <a
-                class="p-1 rounded-full focus:outline-none inline-flex"
+                class="p-1 rounded-full inline-flex"
                 style={{ color: 'hsl(var(--info))' }}
                 href={formatUtils.getTimelineUrl(recording.stream, recording.start_time_unix ?? recording.start_time)}
-                title="View in Timeline"
+                title={t('live.viewInTimeline')}
               >
                 <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
                   <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd" />
                 </svg>
               </a>
               <button
-                class="p-1 rounded-full focus:outline-none"
+                class="p-1 rounded-full"
                 style={{ color: recording.protected ? 'hsl(var(--warning))' : 'hsl(var(--muted-foreground))' }}
                 onClick={() => toggleProtection && toggleProtection(recording)}
                 title={recording.protected ? 'Unprotect' : 'Protect'}
@@ -425,7 +458,7 @@ function RecordingCard({
               </button>
               {canDelete && (
                 <button
-                  class="p-1 rounded-full focus:outline-none ml-auto"
+                  class="p-1 rounded-full ml-auto"
                   style={{ color: 'hsl(var(--danger))' }}
                   onClick={() => deleteRecording(recording)}
                   title={t('common.delete')}

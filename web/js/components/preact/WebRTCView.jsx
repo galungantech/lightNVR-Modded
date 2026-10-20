@@ -21,6 +21,8 @@ import { AlwaysFullscreenToggle } from './AlwaysFullscreenToggle.jsx';
 import { useAlwaysFullscreenOnTap } from './useAlwaysFullscreenOnTap.js';
 import { LiveDisplayModeToggle } from './LiveDisplayModeToggle.jsx';
 import { useLiveDisplayMode } from './useLiveDisplayMode.js';
+import { LiveSlideshowControl } from './LiveSlideshowControl.jsx';
+import { useLiveSlideshow } from './useLiveSlideshow.js';
 import { usePullToRefresh } from './usePullToRefresh.js';
 import { shouldShowGestureTip } from './mobileLiveGestures.js';
 import { fetchAllStreamSummaries } from '../../utils/stream-summaries.js';
@@ -553,6 +555,20 @@ export function WebRTCView({ audioDisabled = false, isAutoDisabled = false, isWe
     });
   }, [applyOperatorLayout, setOperatorSurface]);
 
+  // Auto-advance cameras (1x1) or grid pages on a timer. Paused while the
+  // operator is rearranging tiles, has one tile in native fullscreen, or is
+  // looking at the building plan instead of the grid.
+  const slideshow = useLiveSlideshow({
+    paused: reorderMode || !!fullscreenCellStream || operatorSurface !== 'grid',
+    isSingleStream,
+    orderedStreams,
+    selectedStream,
+    setSelectedStream,
+    currentPage,
+    setCurrentPage,
+    maxStreams,
+  });
+
   // Ensure current page is valid when orderedStreams or maxStreams changes
   useEffect(() => {
     if (orderedStreams.length === 0) return;
@@ -608,7 +624,7 @@ export function WebRTCView({ audioDisabled = false, isAutoDisabled = false, isWe
       console.log('Entering fullscreen mode for video cell');
       requestNativeFullscreen(cellElement).catch(err => {
         console.error(`Error attempting to enable fullscreen: ${err.message}`);
-        showStatusMessage(`Could not enable fullscreen mode: ${err.message}`);
+        showStatusMessage(t('live.couldNotEnableFullscreen', { message: err.message }));
       });
     } else {
       console.log('Exiting fullscreen mode');
@@ -656,28 +672,28 @@ export function WebRTCView({ audioDisabled = false, isAutoDisabled = false, isWe
             {!isAutoDisabled && (
               forcedTransport === null ? (
                 <span className="px-3 py-1.5 rounded text-sm font-medium bg-primary text-primary-foreground select-none">
-                  Auto
+                  {t('live.autoShort')}
                 </span>
               ) : (
                 <a
                   href={buildLiveViewHref('/index.html', window.location.search)}
-                  className="px-3 py-1.5 rounded text-sm font-medium transition-colors no-underline text-muted-foreground hover:bg-background hover:text-foreground focus:outline-none"
+                  className="px-3 py-1.5 rounded text-sm font-medium transition-colors no-underline text-muted-foreground hover:bg-background hover:text-foreground"
                 >
-                  Auto
+                  {t('live.autoShort')}
                 </a>
               )
             )}
 
             {forcedTransport === 'webrtc' ? (
               <span className="px-3 py-1.5 rounded text-sm font-medium bg-primary text-primary-foreground select-none">
-                WebRTC
+                {t('live.webrtcShort')}
               </span>
             ) : (
               <a
                 href={buildLiveViewHref('/index.html', window.location.search, 'webrtc')}
-                className="px-3 py-1.5 rounded text-sm font-medium transition-colors no-underline text-muted-foreground hover:bg-background hover:text-foreground focus:outline-none"
+                className="px-3 py-1.5 rounded text-sm font-medium transition-colors no-underline text-muted-foreground hover:bg-background hover:text-foreground"
               >
-                WebRTC
+                {t('live.webrtcShort')}
               </a>
             )}
 
@@ -690,7 +706,7 @@ export function WebRTCView({ audioDisabled = false, isAutoDisabled = false, isWe
               ) : (
                 <a
                   href={buildLiveViewHref('/hls.html', window.location.search)}
-                  className="px-3 py-1.5 rounded text-sm font-medium transition-colors no-underline text-muted-foreground hover:bg-background hover:text-foreground focus:outline-none"
+                  className="px-3 py-1.5 rounded text-sm font-medium transition-colors no-underline text-muted-foreground hover:bg-background hover:text-foreground"
                 >
                   {t('live.hlsShort')}
                 </a>
@@ -706,7 +722,7 @@ export function WebRTCView({ audioDisabled = false, isAutoDisabled = false, isWe
               ) : (
                 <a
                   href={buildLiveViewHref('/hls.html', window.location.search, 'mse')}
-                  className="px-3 py-1.5 rounded text-sm font-medium transition-colors no-underline text-muted-foreground hover:bg-background hover:text-foreground focus:outline-none"
+                  className="px-3 py-1.5 rounded text-sm font-medium transition-colors no-underline text-muted-foreground hover:bg-background hover:text-foreground"
                 >
                   {t('live.mseShort')}
                 </a>
@@ -721,7 +737,7 @@ export function WebRTCView({ audioDisabled = false, isAutoDisabled = false, isWe
             <button
               type="button"
               id="webrtc-favorites-filter"
-              className={`px-3 py-2 border rounded-md shadow-sm text-sm whitespace-nowrap focus:outline-none focus:ring-2 focus:ring-primary ${favoritesOnly ? 'bg-primary text-primary-foreground border-primary' : 'bg-background text-foreground border-border'}`}
+              className={`px-3 py-2 border rounded-md shadow-sm text-sm whitespace-nowrap focus:ring-2 focus:ring-primary ${favoritesOnly ? 'bg-primary text-primary-foreground border-primary' : 'bg-background text-foreground border-border'}`}
               aria-pressed={favoritesOnly}
               title={t('live.favoritesOnly')}
               onClick={() => { setFavoritesOnly((current) => !current); setCurrentPage(0); }}
@@ -734,7 +750,7 @@ export function WebRTCView({ audioDisabled = false, isAutoDisabled = false, isWe
               <label htmlFor="webrtc-collection-filter" className="text-sm whitespace-nowrap">{t('collections.filter')}:</label>
               <select
                 id="webrtc-collection-filter"
-                className="px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                className="px-3 py-2 border border-border rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                 value={collectionFilter}
                 disabled={isCollectionLoading}
                 onChange={(event) => { setCollectionFilter(event.currentTarget.value); setCurrentPage(0); }}
@@ -784,7 +800,7 @@ export function WebRTCView({ audioDisabled = false, isAutoDisabled = false, isWe
               <label htmlFor="stream-selector" className="text-sm whitespace-nowrap">{t('live.stream')}:</label>
               <select
                 id="stream-selector"
-                className="px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                className="px-3 py-2 border border-border rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
                 value={selectedStream}
                 onChange={(e) => setSelectedStream(e.target.value)}
               >
@@ -796,7 +812,7 @@ export function WebRTCView({ audioDisabled = false, isAutoDisabled = false, isWe
           )}
 
           <button
-            className={`p-2 rounded-full focus:outline-none focus:ring-2 focus:ring-primary ${showLabels ? 'bg-secondary hover:bg-secondary/80 text-secondary-foreground' : 'bg-primary/20 hover:bg-primary/30 text-primary'}`}
+            className={`p-2 rounded-full focus:ring-2 focus:ring-primary ${showLabels ? 'bg-secondary hover:bg-secondary/80 text-secondary-foreground' : 'bg-primary/20 hover:bg-primary/30 text-primary'}`}
             onClick={() => setShowLabels(v => !v)}
             title={showLabels ? t('live.hideStreamLabels') : t('live.showStreamLabels')}
           >
@@ -809,7 +825,7 @@ export function WebRTCView({ audioDisabled = false, isAutoDisabled = false, isWe
           </button>
 
           <button
-            className={`p-2 rounded-full focus:outline-none focus:ring-2 focus:ring-primary ${showControls ? 'bg-secondary hover:bg-secondary/80 text-secondary-foreground' : 'bg-primary/20 hover:bg-primary/30 text-primary'}`}
+            className={`p-2 rounded-full focus:ring-2 focus:ring-primary ${showControls ? 'bg-secondary hover:bg-secondary/80 text-secondary-foreground' : 'bg-primary/20 hover:bg-primary/30 text-primary'}`}
             onClick={() => setShowControls(v => !v)}
             title={showControls ? t('live.hideStreamControls') : t('live.showStreamControls')}
           >
@@ -829,7 +845,7 @@ export function WebRTCView({ audioDisabled = false, isAutoDisabled = false, isWe
           </button>
 
           <button
-            className={`p-2 rounded-full focus:outline-none focus:ring-2 focus:ring-primary ${showDetections ? 'bg-secondary hover:bg-secondary/80 text-secondary-foreground' : 'bg-primary/20 hover:bg-primary/30 text-primary'}`}
+            className={`p-2 rounded-full focus:ring-2 focus:ring-primary ${showDetections ? 'bg-secondary hover:bg-secondary/80 text-secondary-foreground' : 'bg-primary/20 hover:bg-primary/30 text-primary'}`}
             onClick={() => setShowDetections(v => !v)}
             title={showDetections ? t('live.hideAllDetectionOverlays') : t('live.showAllDetectionOverlays')}
           >
@@ -854,9 +870,19 @@ export function WebRTCView({ audioDisabled = false, isAutoDisabled = false, isWe
             />
           )}
 
+          {slideshow.canCycle && (
+            <LiveSlideshowControl
+              enabled={slideshow.enabled}
+              interval={slideshow.interval}
+              isSingleStream={isSingleStream}
+              onToggle={slideshow.setEnabled}
+              onIntervalChange={slideshow.setInterval}
+            />
+          )}
+
           {orderedStreams.length > 1 && (
             <button
-              className={`p-2 rounded-full focus:outline-none focus:ring-2 focus:ring-primary ${reorderMode ? 'bg-primary text-primary-foreground hover:bg-primary/90' : 'bg-secondary hover:bg-secondary/80 text-secondary-foreground'}`}
+              className={`p-2 rounded-full focus:ring-2 focus:ring-primary ${reorderMode ? 'bg-primary text-primary-foreground hover:bg-primary/90' : 'bg-secondary hover:bg-secondary/80 text-secondary-foreground'}`}
               onClick={toggleReorderMode}
               title={reorderMode ? t('live.exitReorderMode') : t('live.dragToReorderCameras')}
             >
@@ -872,7 +898,7 @@ export function WebRTCView({ audioDisabled = false, isAutoDisabled = false, isWe
 
           {reorderMode && (
             <button
-              className="p-2 rounded-full bg-secondary hover:bg-secondary/80 text-secondary-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+              className="p-2 rounded-full bg-secondary hover:bg-secondary/80 text-secondary-foreground focus:ring-2 focus:ring-primary"
               onClick={resetOrder}
               title={t('live.resetCameraOrder')}
             >
@@ -887,7 +913,7 @@ export function WebRTCView({ audioDisabled = false, isAutoDisabled = false, isWe
 
           <button
             id="fullscreen-btn"
-            className="p-2 rounded-full bg-secondary hover:bg-secondary/80 text-secondary-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+            className="p-2 rounded-full bg-secondary hover:bg-secondary/80 text-secondary-foreground focus:ring-2 focus:ring-primary"
             onClick={() => toggleFullscreen()}
             title={t('live.toggleFullscreen')}
           >
@@ -1069,7 +1095,7 @@ export function WebRTCView({ audioDisabled = false, isAutoDisabled = false, isWe
         {!isSingleStream && orderedStreams.length > maxStreams ? (
           <div className="pagination-controls flex justify-center items-center space-x-4 mt-4">
             <button
-              className="btn-primary focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-50 disabled:cursor-not-allowed"
+              className="btn-primary focus:ring-2 focus:ring-primary disabled:opacity-50 disabled:cursor-not-allowed"
               onClick={() => {
                 console.log('Changing to previous page');
                 setCurrentPage(Math.max(0, currentPage - 1));
@@ -1084,7 +1110,7 @@ export function WebRTCView({ audioDisabled = false, isAutoDisabled = false, isWe
             </span>
 
             <button
-              className="btn-primary focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-50 disabled:cursor-not-allowed"
+              className="btn-primary focus:ring-2 focus:ring-primary disabled:opacity-50 disabled:cursor-not-allowed"
               onClick={() => {
                 console.log('Changing to next page');
                 const totalPages = Math.ceil(orderedStreams.length / maxStreams);

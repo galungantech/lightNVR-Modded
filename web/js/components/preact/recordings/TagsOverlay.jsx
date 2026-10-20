@@ -6,6 +6,7 @@
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { recordingsAPI } from './recordingsAPI.jsx';
 import { showStatusMessage } from '../ToastContainer.jsx';
+import { useI18n } from '../../../i18n.js';
 
 /**
  * Tag icon SVG (label/tag shape)
@@ -29,7 +30,7 @@ function TagChip({ tag, onRemove, readOnly = false }) {
       {!readOnly && onRemove && (
         <button
           type="button"
-          class="hover:text-destructive focus:outline-none ml-0.5"
+          class="hover:text-destructive ml-0.5"
           onClick={(e) => { e.stopPropagation(); onRemove(tag); }}
           title={`Remove tag "${tag}"`}
         >
@@ -44,6 +45,7 @@ function TagChip({ tag, onRemove, readOnly = false }) {
  * Single-recording tag overlay
  */
 export function TagsOverlay({ recording, onClose, onTagsChanged }) {
+  const { t } = useI18n();
   const [tags, setTags] = useState(recording.tags || []);
   const [inputValue, setInputValue] = useState('');
   const [allTags, setAllTags] = useState([]);
@@ -86,7 +88,7 @@ export function TagsOverlay({ recording, onClose, onTagsChanged }) {
     try {
       await recordingsAPI.setRecordingTags(recording.id, newTags);
       if (onTagsChanged) onTagsChanged(recording.id, newTags);
-      showStatusMessage(`Tag "${trimmed}" added`);
+      showStatusMessage(t('recordings.tagAdded', { tag: trimmed }));
     } catch { /* error shown by API */ }
     setSaving(false);
   }, [tags, recording.id, onTagsChanged]);
@@ -98,7 +100,7 @@ export function TagsOverlay({ recording, onClose, onTagsChanged }) {
     try {
       await recordingsAPI.setRecordingTags(recording.id, newTags);
       if (onTagsChanged) onTagsChanged(recording.id, newTags);
-      showStatusMessage(`Tag "${tag}" removed`);
+      showStatusMessage(t('recordings.tagRemoved', { tag }));
     } catch { /* error shown by API */ }
     setSaving(false);
   }, [tags, recording.id, onTagsChanged]);
@@ -120,14 +122,14 @@ export function TagsOverlay({ recording, onClose, onTagsChanged }) {
     >
       <div class="flex items-center justify-between mb-2">
         <span class="text-sm font-medium flex items-center gap-1">
-          <TagIcon className="w-3.5 h-3.5" /> Recording Tags
+          <TagIcon className="w-3.5 h-3.5" /> {t('recordings.recordingTags')}
         </span>
         <button class="text-muted-foreground hover:text-foreground text-xs" onClick={onClose}>✕</button>
       </div>
 
       {/* Current tags */}
       <div class="flex flex-wrap gap-1 mb-2 min-h-[24px]">
-        {tags.length === 0 && <span class="text-xs text-muted-foreground italic">No tags</span>}
+        {tags.length === 0 && <span class="text-xs text-muted-foreground italic">{t('recordings.noTags')}</span>}
         {tags.map(tag => <TagChip key={tag} tag={tag} onRemove={removeTag} />)}
       </div>
 
@@ -136,8 +138,8 @@ export function TagsOverlay({ recording, onClose, onTagsChanged }) {
         <input
           ref={inputRef}
           type="text"
-          class="w-full text-sm px-2 py-1.5 border border-input rounded-md bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
-          placeholder="Add a tag..."
+          class="w-full text-sm px-2 py-1.5 border border-input rounded-md bg-background text-foreground placeholder:text-muted-foreground focus:ring-1 focus:ring-primary"
+          placeholder={t('recordings.addTagPlaceholder')}
           value={inputValue}
           onInput={(e) => { setInputValue(e.target.value); setShowSuggestions(true); }}
           onFocus={() => setShowSuggestions(true)}
@@ -171,6 +173,7 @@ export function TagsOverlay({ recording, onClose, onTagsChanged }) {
  *  - unchecked (no selected recordings have the tag)
  */
 export function BulkTagsOverlay({ recordings, selectedRecordings, onClose, onTagsChanged }) {
+  const { t } = useI18n();
   const [allTags, setAllTags] = useState([]);
   const [tagStates, setTagStates] = useState({}); // tag -> 'all' | 'some' | 'none'
   const [inputValue, setInputValue] = useState('');
@@ -223,12 +226,12 @@ export function BulkTagsOverlay({ recordings, selectedRecordings, onClose, onTag
         // Remove from all
         await recordingsAPI.batchUpdateRecordingTags(selectedIds, [], [tag]);
         setTagStates(prev => ({ ...prev, [tag]: 'none' }));
-        showStatusMessage(`Tag "${tag}" removed from ${selectedIds.length} recordings`);
+        showStatusMessage(t('recordings.tagRemovedFromRecordings', { tag, count: selectedIds.length }));
       } else {
         // 'none' or 'some' -> add to all
         await recordingsAPI.batchUpdateRecordingTags(selectedIds, [tag], []);
         setTagStates(prev => ({ ...prev, [tag]: 'all' }));
-        showStatusMessage(`Tag "${tag}" added to ${selectedIds.length} recordings`);
+        showStatusMessage(t('recordings.tagAddedToRecordings', { tag, count: selectedIds.length }));
       }
       if (onTagsChanged) onTagsChanged();
     } catch { /* error shown by API */ }
@@ -245,7 +248,7 @@ export function BulkTagsOverlay({ recordings, selectedRecordings, onClose, onTag
       if (!allTags.includes(trimmed)) setAllTags(prev => [...prev, trimmed].sort());
       setInputValue('');
       setShowSuggestions(false);
-      showStatusMessage(`Tag "${trimmed}" added to ${selectedIds.length} recordings`);
+      showStatusMessage(t('recordings.tagAddedToRecordings', { tag: trimmed, count: selectedIds.length }));
       if (onTagsChanged) onTagsChanged();
     } catch { /* error shown by API */ }
     setSaving(false);
@@ -268,14 +271,14 @@ export function BulkTagsOverlay({ recordings, selectedRecordings, onClose, onTag
     >
       <div class="flex items-center justify-between mb-2">
         <span class="text-sm font-medium flex items-center gap-1">
-          <TagIcon className="w-3.5 h-3.5" /> Recording Tags ({selectedIds.length} recordings)
+          <TagIcon className="w-3.5 h-3.5" /> {t('recordings.recordingTagsCount', { count: selectedIds.length })}
         </span>
         <button class="text-muted-foreground hover:text-foreground text-xs" onClick={onClose}>✕</button>
       </div>
 
       {/* Tag list with tri-state checkboxes */}
       <div class="max-h-48 overflow-y-auto mb-2 space-y-0.5">
-        {knownTags.length === 0 && <span class="text-xs text-muted-foreground italic">No tags yet</span>}
+        {knownTags.length === 0 && <span class="text-xs text-muted-foreground italic">{t('recordings.noTagsYet')}</span>}
         {knownTags.map(tag => {
           const state = tagStates[tag];
           return (
@@ -300,8 +303,8 @@ export function BulkTagsOverlay({ recordings, selectedRecordings, onClose, onTag
         <input
           ref={inputRef}
           type="text"
-          class="w-full text-sm px-2 py-1.5 border border-input rounded-md bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
-          placeholder="Add new tag..."
+          class="w-full text-sm px-2 py-1.5 border border-input rounded-md bg-background text-foreground placeholder:text-muted-foreground focus:ring-1 focus:ring-primary"
+          placeholder={t('recordings.addNewTagPlaceholder')}
           value={inputValue}
           onInput={(e) => { setInputValue(e.target.value); setShowSuggestions(true); }}
           onFocus={() => setShowSuggestions(true)}
