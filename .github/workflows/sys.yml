@@ -7,7 +7,7 @@ on:
         description: "Branch tujuan"
         required: true
         type: string
-        default: 'lightNVR'
+        default: '0.43.2'
 
 permissions:
   contents: write
