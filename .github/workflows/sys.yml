@@ -41,7 +41,7 @@ jobs:
         id: check
         run: |
           LOCAL=$(git rev-parse HEAD)
-          UPSTREAM=$(git rev-parse upstream/0.43.3)
+          UPSTREAM=$(git rev-parse upstream/lightnvr)
           echo "LOCAL=$LOCAL"
           echo "UPSTREAM=$UPSTREAM"
           if [ "$LOCAL" = "$UPSTREAM" ]; then
