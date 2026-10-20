@@ -7,7 +7,7 @@ on:
         description: "Branch tujuan"
         required: true
         type: string
-        default: 'upstream'
+        default: 'lightNVR'
 
 permissions:
   contents: write
@@ -31,7 +31,7 @@ jobs:
       - name: Add upstream
         run: |
           git remote remove upstream || true
-          git remote add upstream https://github.com/opensensor/lightNVR.git
+          git remote add upstream https://github.com/galungantech/lightNVR.git
           git fetch upstream --tags
           git fetch origin
 
@@ -39,7 +39,7 @@ jobs:
         id: check
         run: |
           LOCAL=$(git rev-parse HEAD)
-          UPSTREAM=$(git rev-parse upstream/main)
+          UPSTREAM=$(git rev-parse upstream/0.43.3)
           echo "LOCAL=$LOCAL"
           echo "UPSTREAM=$UPSTREAM"
           if [ "$LOCAL" = "$UPSTREAM" ]; then
@@ -52,7 +52,7 @@ jobs:
         if: steps.check.outputs.has_updates == 'true'
         run: |
           git checkout ${{ github.event.inputs.target_branch }}
-          git reset --hard upstream/main
+          git reset --hard upstream/0.43.3
 
       - name: Push changes
         if: steps.check.outputs.has_updates == 'true'
