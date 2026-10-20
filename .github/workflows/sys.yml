@@ -6,10 +6,8 @@ on:
       target_branch:
         description: "Branch tujuan"
         required: true
-        type: choice
-        options:
-          - sync-main
-        default: sync-main
+        type: string
+        default: 'sync-main'
 
 permissions:
   contents: write
