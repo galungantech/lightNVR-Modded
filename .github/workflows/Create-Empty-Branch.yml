@@ -16,12 +16,12 @@ jobs:
   create-branch:
     runs-on: ubuntu-latest
     steps:
-      # 1. Checkout repository utama
+      # 1. Checkout repository utama (cukup depth 1 karena tidak butuh history)
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
+          fetch-depth: 1
 
       # 2. Setup identitas Git
       - name: Setup Git
@@ -32,13 +32,13 @@ jobs:
       # 3. Membuat Orphan Branch (Branch Kosong) dan Push ke GitHub
       - name: Create Empty Branch
         run: |
-          # Membuat branch tanpa history commit
+          # Membuat branch baru tanpa riwayat commit sebelumnya
           git checkout --orphan ${{ github.event.inputs.branch_name }}
           
-          # Membersihkan semua file bawaan
+          # Membersihkan semua file bawaan hasil checkout
           git rm -rf .
           
-          # Membuat file README wajib sebagai penanda awal
+          # Membuat file README sebagai penanda awal
           echo "# Branch Kosong: ${{ github.event.inputs.branch_name }}" > README.md
           
           # Commit dan Push ke GitHub
