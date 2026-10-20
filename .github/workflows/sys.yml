@@ -54,7 +54,7 @@ jobs:
         if: steps.check.outputs.has_updates == 'true'
         run: |
           git checkout ${{ github.event.inputs.target_branch }}
-          git reset --hard upstream/sync-main
+          git reset --hard upstream/lightnvr
 
       - name: Push changes
         if: steps.check.outputs.has_updates == 'true'
