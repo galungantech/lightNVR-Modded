@@ -55,7 +55,7 @@ jobs:
         run: |
           git fetch upstream
           git checkout ${{ github.event.inputs.target_branch }}
-          git reset --hard upstream/main
+          git reset --hard upstream/0.43.3
 
       - name: Push changes
         if: steps.check.outputs.has_updates == 'true'
