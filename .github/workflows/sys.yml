@@ -39,7 +39,7 @@ jobs:
         id: check
         run: |
           LOCAL=$(git rev-parse HEAD)
-          UPSTREAM=$(git rev-parse upstream/0.43.3)
+          UPSTREAM=$(git rev-parse upstream/0.43.2)
           echo "LOCAL=$LOCAL"
           echo "UPSTREAM=$UPSTREAM"
           if [ "$LOCAL" = "$UPSTREAM" ]; then
@@ -52,7 +52,7 @@ jobs:
         if: steps.check.outputs.has_updates == 'true'
         run: |
           git checkout ${{ github.event.inputs.target_branch }}
-          git reset --hard upstream/0.43.3
+          git reset --hard upstream/0.43.2
 
       - name: Push changes
         if: steps.check.outputs.has_updates == 'true'
