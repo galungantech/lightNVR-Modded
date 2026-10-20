@@ -34,14 +34,14 @@ jobs:
         run: |
           git remote remove upstream || true
           git remote add upstream https://github.com/galungantech/lightNVR.git
-          git fetch upstream
+          git fetch upstream --tags
           git fetch origin
 
       - name: Check updates
         id: check
         run: |
           LOCAL=$(git rev-parse HEAD)
-          UPSTREAM=$(git rev-parse upstream/main)
+          UPSTREAM=$(git rev-parse upstream/0.43.3)
           echo "LOCAL=$LOCAL"
           echo "UPSTREAM=$UPSTREAM"
           if [ "$LOCAL" = "$UPSTREAM" ]; then
@@ -53,7 +53,6 @@ jobs:
       - name: Sync with upstream
         if: steps.check.outputs.has_updates == 'true'
         run: |
-          git fetch upstream
           git checkout ${{ github.event.inputs.target_branch }}
           git reset --hard upstream/0.43.3
 
