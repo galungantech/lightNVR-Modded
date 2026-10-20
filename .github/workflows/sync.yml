@@ -31,7 +31,7 @@ jobs:
       - name: Add upstream
         run: |
           git remote remove upstream || true
-          git remote add upstream https://github.com/galungantech/lightNVR.git
+          git remote add upstream https://github.com/opensensor/lightNVR.git
           git fetch upstream
           git fetch origin
 
@@ -39,7 +39,7 @@ jobs:
         id: check
         run: |
           LOCAL=$(git rev-parse HEAD)
-          UPSTREAM=$(git rev-parse upstream/0.43.2)
+          UPSTREAM=$(git rev-parse upstream/main)
           echo "LOCAL=$LOCAL"
           echo "UPSTREAM=$UPSTREAM"
           if [ "$LOCAL" = "$UPSTREAM" ]; then
@@ -52,7 +52,7 @@ jobs:
         if: steps.check.outputs.has_updates == 'true'
         run: |
           git checkout ${{ github.event.inputs.target_branch }}
-          git reset --hard upstream/0.43.2
+          git reset --hard upstream/main
 
       - name: Push changes
         if: steps.check.outputs.has_updates == 'true'
