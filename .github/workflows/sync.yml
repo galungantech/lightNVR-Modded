@@ -1,0 +1,134 @@
+name: Sync Fork Final
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: "Branch tujuan"
+        required: true
+        type: choice
+        options:
+          - main-modded
+        default: main-modded
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.target_branch }}
+          token: ${{ secrets.PAT_WORKFLOW }}
+          fetch-depth: 0
+
+      - name: Setup Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream
+        run: |
+          git remote remove upstream || true
+          git remote add upstream https://github.com/galungantech/lightNVR-Modded.git
+          git fetch upstream
+          git fetch origin
+
+      - name: Save current commit
+        id: before
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Check updates
+        id: check
+        run: |
+          LOCAL=$(git rev-parse HEAD)
+          UPSTREAM=$(git rev-parse upstream/main)
+
+          echo "LOCAL=$LOCAL"
+          echo "UPSTREAM=$UPSTREAM"
+
+          if [ "$LOCAL" = "$UPSTREAM" ]; then
+            echo "has_updates=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_updates=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Sync with upstream
+        if: steps.check.outputs.has_updates == 'true'
+        run: |
+          git fetch upstream
+          git checkout ${{ github.event.inputs.target_branch }}
+          git reset --hard upstream/0.36.7
+      
+      - name: Push changes
+        if: steps.check.outputs.has_updates == 'true'
+        run: |
+          git push origin HEAD:${{ github.event.inputs.target_branch }} --force
+
+      # =========================================================
+      # TELEGRAM
+      # =========================================================
+      - name: Notify Telegram
+        if: always()
+        run: |
+          REPO_URL="https://github.com/${{ github.repository }}"
+          BRANCH="${{ github.event.inputs.target_branch }}"
+
+          if [ "${{ job.status }}" != "success" ]; then
+
+            MSG=$(printf "❌ *Sync Fork Gagal*")
+
+          elif [ "${{ steps.check.outputs.has_updates }}" = "false" ]; then
+
+            MSG=$(printf "🛎️ *Sync Fork Selesai*\n\nTidak ada update dari upstream.")
+
+          else
+
+            FILES=$(git diff --name-status \
+              ${{ steps.before.outputs.sha }} HEAD \
+              | grep -v "^.github/workflows/" || true)
+
+            MSG=$(printf "🛎️ *Sync Fork Berhasil*\n")
+
+            CURRENT_FOLDER=""
+
+            while read -r status path; do
+
+              [ -z "$path" ] && continue
+
+              FOLDER=$(dirname "$path")
+              FILE=$(basename "$path")
+
+              [ "$FOLDER" = "." ] && FOLDER="root"
+
+              case "$status" in
+                A*) ICON="🆕" ;;
+                M*) ICON="✏️" ;;
+                D*) ICON="❌" ;;
+                R*) ICON="🔄" ;;
+                *)  ICON="📄" ;;
+              esac
+
+              if [ "$FOLDER" != "$CURRENT_FOLDER" ]; then
+                MSG+=$'\n\n'
+                MSG+="📁 $FOLDER/"
+                CURRENT_FOLDER="$FOLDER"
+              fi
+
+              MSG+=$'\n'
+              MSG+="$ICON [$FILE]($REPO_URL/blob/$BRANCH/$path)"
+
+            done <<< "$FILES"
+
+          fi
+
+          curl -s -X POST \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d parse_mode="Markdown" \
+            --data-urlencode "text=$MSG"

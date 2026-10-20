@@ -1,0 +1,78 @@
+name: Sync Upstream
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout destination repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_WORKFLOW }}
+          fetch-depth: 0
+
+      - name: Setup Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync with Upstream
+        run: |
+          git remote add upstream https://github.com/opensensor/lightNVR.git || true
+          git fetch upstream main
+          
+          # Gunakan merge strategis agar tidak mengotori file sistem/workflow
+          # -X ours: Jika ada konflik, ambil versi kita. 
+          # --no-commit: Kita commit secara manual agar terkontrol.
+          git merge upstream/main --no-commit --no-ff -X ours || echo "Merge selesai dengan penyesuaian."
+          
+          # Hapus sisa marker jika ada (tindakan preventif)
+          find . -type f -not -path '*/.*' -exec sed -i '/<<<<<<< HEAD/d; /=======/d; />>>>>>>/d; /|||||||/d' {} + 2>/dev/null || true
+          
+          git add -A
+          git commit -m "Sync from upstream: $(date +'%Y-%m-%d %H:%M:%S')" || echo "No changes to commit"
+
+      - name: Push to Repository
+        run: |
+          git push origin main
+
+      - name: Notify to Telegram
+        if: always()
+        run: |
+          REPO_URL="https://github.com/${{ github.repository }}"
+          BRANCH="main"
+          
+          # Mengambil daftar file yang berubah saja (Lebih akurat dari git diff HEAD^ HEAD)
+          FILES=$(git diff --name-status HEAD^ HEAD | grep -v ".github/workflows/" || true)
+
+          if [ -n "$FILES" ]; then
+            CHANGED=$(echo "$FILES" | while read status path; do
+              FILENAME=$(basename "$path")
+              ENCODED_PATH=$(echo "$path" | sed 's/ /%20/g')
+              
+              case "$status" in
+                A*) ICON="🆕"; NOTE=" [New]" ;;
+                M*) ICON="✏️"; NOTE=" [Modified]" ;;
+                D*) ICON="❌"; NOTE=" [Deleted]" ;;
+                *)  ICON="📄"; NOTE=" [Updated]" ;;
+              esac
+              
+              # Escape karakter khusus untuk Markdown Telegram agar tidak error
+              SAFE_NAME=$(echo "$FILENAME" | sed 's/[[*()_`]/\\&/g')
+              echo "- $ICON [$SAFE_NAME]($REPO_URL/blob/$BRANCH/$ENCODED_PATH)$NOTE"
+            done)
+            
+            MSG=$(printf "🛎️ *Sync dari upstream selesai*\n\n*Status File:*\n%s" "$CHANGED")
+          else
+            MSG=$(printf "🛎️ *Sync dari upstream selesai*\n\nTidak ada Update.")
+          fi
+
+          # KIRIM SATU KALI SAJA dengan data-urlencode
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            --data-urlencode "text=$MSG" \
+            -d parse_mode="Markdown"

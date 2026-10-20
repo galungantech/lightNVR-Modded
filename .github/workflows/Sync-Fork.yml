@@ -1,0 +1,134 @@
+name: Sync Fork
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: "Pilih branch tujuan sync"
+        required: true
+        type: choice
+        options:
+          - sync-main # Sudah diperbaiki dari sycn-main
+        default: "sync-main"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      # =========================================================
+      # CHECKOUT (Menggunakan input branch secara dinamis)
+      # =========================================================
+      - name: Checkout destination repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.target_branch }}
+          token: ${{ secrets.PAT_WORKFLOW }}
+          fetch-depth: 0
+
+      # =========================================================
+      # SETUP GIT
+      # =========================================================
+      - name: Setup Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # =========================================================
+      # ADD UPSTREAM
+      # =========================================================
+      - name: Add upstream and fetch
+        run: |
+          git remote remove upstream || true
+          git remote add upstream https://github.com/rivandraa/lightNVR.git
+          git fetch upstream
+
+      # =========================================================
+      # SAVE CURRENT SHA
+      # =========================================================
+      - name: Save current commit
+        id: before
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      # =========================================================
+      # CHECK UPDATES
+      # =========================================================
+      - name: Check updates
+        id: check
+        run: |
+          BEFORE=$(git rev-parse HEAD)
+          UPSTREAM=$(git rev-parse upstream/main)
+          
+          if [ "$BEFORE" = "$UPSTREAM" ]; then
+            echo "has_updates=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_updates=true" >> $GITHUB_OUTPUT
+          fi
+
+      # =========================================================
+      # SYNC UPSTREAM (MIRROR)
+      # =========================================================
+      - name: Sync upstream
+        if: steps.check.outputs.has_updates == 'true'
+        run: |
+          git reset --hard upstream/main
+
+      # =========================================================
+      # PUSH CHANGES (Lebih aman, tanpa ekspos token di URL)
+      # =========================================================
+      - name: Push changes
+        if: steps.check.outputs.has_updates == 'true'
+        run: |
+          git push --force origin ${{ github.event.inputs.target_branch }}
+
+      # =========================================================
+      # TELEGRAM
+      # =========================================================
+      - name: Notify Telegram
+        if: always()
+        run: |
+          REPO_URL="https://github.com/${{ github.repository }}"
+          BRANCH="sycn-main"
+          
+          if [ "${{ job.status }}" != "success" ]; then
+            MSG=$(printf "❌ *Sync Upstream Gagal*")
+          elif [ "${{ steps.check.outputs.has_updates }}" = "false" ]; then
+            MSG=$(printf "🛎️ *Sync Selesai*\n\nTidak ada update dari upstream.")
+          else
+            # Mengambil list diff dengan benar
+            FILES=$(git diff --name-status ${{ steps.before.outputs.sha }} upstream/main | grep -v "^.github/workflows/" || true)
+            MSG=$(printf "🛎️ *Sync Upstream Berhasil*\n")
+            CURRENT_FOLDER=""
+            
+            while read -r status path; do
+              [ -z "$path" ] && continue
+              FOLDER=$(dirname "$path")
+              FILE=$(basename "$path")
+              [ "$FOLDER" = "." ] && FOLDER="root"
+              
+              case "$status" in
+                A*) ICON="🆕" ;;
+                M*) ICON="✏️" ;;
+                D*) ICON="❌" ;;
+                R*) ICON="🔄" ;;
+                *)  ICON="📄" ;;
+              esac # <-- SUDAH DIPERBAIKI MENJADI ESAC
+              
+              if [ "$FOLDER" != "$CURRENT_FOLDER" ]; then
+                MSG+=$'\n'
+                MSG+="📁 $FOLDER/ :"$'\n'
+                CURRENT_FOLDER="$FOLDER"
+              fi
+              MSG+="$ICON [$FILE]($REPO_URL/blob/$BRANCH/$path)"$'\n'
+            done <<< "$FILES"
+          fi
+          
+          curl -s -X POST \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            --data-urlencode "text=$MSG" \
+            -d parse_mode="Markdown"

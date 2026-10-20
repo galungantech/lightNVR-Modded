@@ -486,7 +486,17 @@ void handle_users_create(const http_request_t *req, http_response_t *res) {
 }
 
 /**
- * @brief Backend-agnostic handler for PUT /api/auth/users/:id
+ * Handle updates to a user's account at PUT /api/auth/users/:id.
+ *
+ * Enforces authentication and permissions: admins may update any user; non-admins may only update their own
+ * account and only the `username` and `email` fields. Validates inputs (username length 3–32, password length >= 8,
+ * role within 0–3). Accepts `allowed_tags` and `allowed_login_cidrs` as strings or JSON `null` (null removes the restriction);
+ * `allowed_login_cidrs` is validated for correct CIDR/IP entries. When a non-empty password is changed or a user is
+ * deactivated (`is_active` set to false), all sessions for that user are invalidated. Produces appropriate JSON error
+ * responses for invalid input, permission failures, not-found, conflicts (username exists), and internal errors.
+ *
+ * @param req HTTP request (path must contain the target user id)
+ * @param res HTTP response to populate with JSON result or error
  */
 void handle_users_update(const http_request_t *req, http_response_t *res) {
     log_info("Handling PUT /api/auth/users/:id request");
@@ -846,7 +856,24 @@ void handle_users_generate_api_key(const http_request_t *req, http_response_t *r
 }
 
 /**
- * @brief Backend-agnostic handler for PUT /api/auth/users/:id/password
+ * Handle password change requests for a specific user.
+ *
+ * Processes PUT /api/auth/users/:id/password requests: authenticates the requester,
+ * enforces permission rules (admins may change any password; non-admins may change only their own and must provide the current password),
+ * validates the provided `new_password` (must be at least 8 characters), performs the password change, invalidates all sessions for the target user on success,
+ * and returns a JSON object indicating success.
+ *
+ * @param req HTTP request containing the authenticated session, target user id in the path, and a JSON body with fields:
+ *            - `new_password` (string, required)
+ *            - `old_password` (string, required for non-admins)
+ * @param res HTTP response populated with an appropriate JSON error or a success object `{ "success": true }`.
+ *
+ * Observable error responses:
+ * - 400 Bad Request: missing/invalid path or JSON or required fields, or password length validation failure.
+ * - 401 Unauthorized: requester not authenticated or provided current password is incorrect (when required).
+ * - 403 Forbidden: requester lacks permission to change the target user's password, or password changes are locked for the target user.
+ * - 404 Not Found: target user does not exist.
+ * - 500 Internal Server Error: failure to update the password or other server-side error.
  */
 void handle_users_change_password(const http_request_t *req, http_response_t *res) {
     log_info("Handling PUT /api/auth/users/:id/password request");

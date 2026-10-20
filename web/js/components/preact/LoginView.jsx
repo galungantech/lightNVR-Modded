@@ -35,8 +35,14 @@ function safeRedirectPath(url) {
 }
 
 /**
- * LoginView component
- * @returns {JSX.Element} LoginView component
+ * Render the login page and manage the full authentication flow.
+ *
+ * This component renders username/password and optional TOTP forms, fetches login configuration,
+ * clears any stale server-side session on mount, initiates login and TOTP verification requests,
+ * and performs safe same-origin redirects on successful authentication. It also exposes UI state
+ * for error messages, loading, force-MFA, and remember-device functionality.
+ *
+ * @returns {JSX.Element} The rendered login view element.
  */
 export function LoginView() {
   const [username, setUsername] = useState('');
@@ -75,6 +81,15 @@ export function LoginView() {
 
   // Fetch login config to determine if force MFA is enabled
   useEffect(() => {
+    /**
+     * Load the login configuration from the server and apply it to component state.
+     *
+     * Fetches the `/api/auth/login/config` endpoint and, if the response is OK,
+     * updates `setForceMfaEnabled`, `setRememberDeviceEnabled`, and
+     * `setTrustedDeviceDays` with the server-provided values (using sensible defaults
+     * when fields are absent). Network or parsing errors are logged as a warning
+     * and do not modify state.
+     */
     async function fetchLoginConfig() {
       try {
         const response = await fetch('/api/auth/login/config');

@@ -2134,7 +2134,6 @@ export function WebRTCVideoCell({
             zIndex: 10,
             pointerEvents: 'none'
           }}
-          title={t('live.mseLowLatencyStreaming')}
         >
           WebRTC
         </div>

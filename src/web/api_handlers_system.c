@@ -381,7 +381,7 @@ static void add_versions_to_json(cJSON *info) {
     } else {
         snprintf(details, sizeof(details), "Build date %s", LIGHTNVR_BUILD_DATE);
     }
-    add_version_entry(items, "LightNVR", "Application", LIGHTNVR_VERSION_STRING, details);
+    add_version_entry(items, "LightNVR-Modded", "Application", LIGHTNVR_VERSION_STRING, details);
 
     struct utsname system_info;
     if (uname(&system_info) == 0) {
