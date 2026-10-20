@@ -7,7 +7,7 @@ on:
         description: "Branch tujuan"
         required: true
         type: string
-        default: 'sync-main'
+        default: 'upstream'
 
 permissions:
   contents: write
@@ -52,7 +52,7 @@ jobs:
         if: steps.check.outputs.has_updates == 'true'
         run: |
           git checkout ${{ github.event.inputs.target_branch }}
-          git reset --hard upstream/upstream
+          git reset --hard upstream/main
 
       - name: Push changes
         if: steps.check.outputs.has_updates == 'true'
