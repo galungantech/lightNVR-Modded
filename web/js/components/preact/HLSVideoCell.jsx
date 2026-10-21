@@ -882,15 +882,6 @@ export function HLSVideoCell({
             }`}
           />
           {stream.name}
-          <span style={{
-            fontSize: '10px',
-            padding: '1px 4px',
-            borderRadius: '3px',
-            backgroundColor: hlsMode === 'go2rtc' ? 'rgba(0, 150, 255, 0.7)' : 'rgba(100, 100, 100, 0.7)',
-            color: 'white'
-          }}>
-            {hlsMode === 'go2rtc' ? 'go2rtc' : 'HLS'}
-          </span>
         </div>
       )}
 
@@ -1366,7 +1357,6 @@ export function HLSVideoCell({
             zIndex: 10,
             pointerEvents: 'none'
           }}
-          title={t('live.mseLowLatencyStreaming')}
         >
           HLS
         </div>
