@@ -176,7 +176,7 @@ export function PTZControls({
   const [saving, setSaving] = useState(false);
 
   // =========================
-  // DRAG STATE
+  // DRAG STATE & FUNCTIONS
   // =========================
   const panelRef = useRef(null);
 
@@ -187,10 +187,88 @@ export function PTZControls({
 
   const dragData = useRef({
     dragging: false,
-    offsetX: 0,
-    offsetY: 0
+    startX: 0,
+    startY: 0,
+    initialX: 10,
+    initialY: 65
   });
 
+  const clampPosition = useCallback((x, y) => {
+    const panel = panelRef.current;
+    if (!panel) return { x, y };
+
+    const parent = panel.parentElement;
+    if (!parent) return { x, y };
+
+    const parentRect = parent.getBoundingClientRect();
+    const panelRect = panel.getBoundingClientRect();
+
+    const maxX = parentRect.width - panelRect.width;
+    const maxY = parentRect.height - panelRect.height;
+
+    return {
+      x: Math.max(0, Math.min(x, maxX)),
+      y: Math.max(0, Math.min(y, maxY))
+    };
+  }, []);
+
+  const startDrag = useCallback((e) => {
+    const panel = panelRef.current;
+    if (!panel) return;
+
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+
+    dragData.current = {
+      dragging: true,
+      startX: clientX,
+      startY: clientY,
+      initialX: position.x,
+      initialY: position.y
+    };
+
+    if (e.cancelable) {
+      e.preventDefault();
+    }
+  }, [position]);
+
+  useEffect(() => {
+    const onDrag = (e) => {
+      if (!dragData.current.dragging) return;
+
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+
+      // Karena CSS menggunakan 'right' dan 'bottom':
+      // Menggeser ke kiri -> deltaX positif -> 'right' bertambah
+      // Menggeser ke atas -> deltaY positif -> 'bottom' bertambah
+      const deltaX = dragData.current.startX - clientX;
+      const deltaY = dragData.current.startY - clientY;
+
+      const newX = dragData.current.initialX + deltaX;
+      const newY = dragData.current.initialY + deltaY;
+
+      const clamped = clampPosition(newX, newY);
+      setPosition(clamped);
+    };
+
+    const stopDrag = () => {
+      dragData.current.dragging = false;
+    };
+
+    window.addEventListener('mousemove', onDrag);
+    window.addEventListener('mouseup', stopDrag);
+    window.addEventListener('touchmove', onDrag, { passive: false });
+    window.addEventListener('touchend', stopDrag);
+
+    return () => {
+      window.removeEventListener('mousemove', onDrag);
+      window.removeEventListener('mouseup', stopDrag);
+      window.removeEventListener('touchmove', onDrag);
+      window.removeEventListener('touchend', stopDrag);
+    };
+  }, [clampPosition]);
+  
   // =========================
   // LOAD PRESETS
   // =========================
