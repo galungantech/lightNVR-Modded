@@ -40,6 +40,16 @@ const ptzApi = {
       body: JSON.stringify({ token })
     });
     return response.json();
+  },
+
+  async deletePreset(streamName, token) {
+    const response = await fetch(`/api/streams/${encodeURIComponent(streamName)}/ptz/delete-preset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token })
+    });
+    if (!response.ok) throw new Error('Failed to delete preset');
+    return response.json();
   }
 };
 
@@ -131,6 +141,7 @@ export function PTZControls({
 
   const [speed, setSpeed] = useState(0.5);
   const [presets, setPresets] = useState([]);
+  const [selectedPreset, setSelectedPreset] = useState('');
   const [isMoving, setIsMoving] = useState(false);
   const [error, setError] = useState(null);
   const [capabilities, setCapabilities] = useState(null);
@@ -240,6 +251,7 @@ export function PTZControls({
     setCapabilities(null);
     setCanManage(true);
     setPresets([]);
+    setSelectedPreset('');
     setPresetName('');
     setShowPresetForm(false);
     setConfirmSetHome(false);
@@ -279,6 +291,21 @@ export function PTZControls({
       setSaving(false);
     }
   }, [stream?.name, presetName, saving, t, handleActionFailure]);
+
+  const handleDeletePreset = useCallback(async () => {
+    if (!stream?.name || !selectedPreset || saving) return;
+    setSaving(true);
+    try {
+      await ptzApi.deletePreset(stream.name, selectedPreset);
+      setPresets(prev => prev.filter(p => p.token !== selectedPreset));
+      setSelectedPreset('');
+      showSuccessToast(t('live.ptzPresetDeleted') || 'Preset deleted');
+    } catch (err) {
+      handleActionFailure(err, t('live.ptzPresetDeleteFailed') || 'Failed to delete preset');
+    } finally {
+      setSaving(false);
+    }
+  }, [stream?.name, selectedPreset, saving, t, handleActionFailure]);
 
   const handleSetHome = useCallback(async () => {
     if (!stream?.name || saving) return;
@@ -546,12 +573,17 @@ export function PTZControls({
 
       {/* Presets */}
       {presets.length > 0 && (
-        <div style={{ marginTop: '2px' }}>
+        <div style={{ display: 'flex', gap: '4px', marginTop: '2px', width: '100%' }}>
           <select
             aria-label={t('live.goToPreset')}
-            onChange={(e) => e.target.value && handlePreset(e.target.value)}
+            value={selectedPreset}
+            onChange={(e) => {
+              const token = e.target.value;
+              setSelectedPreset(token);
+              if (token) handlePreset(token);
+            }}
             style={{
-              width: '100%',
+              flex: 1,
               padding: '4px',
               borderRadius: '4px',
               border: 'none',
@@ -563,11 +595,38 @@ export function PTZControls({
           >
             <option value="">{t('live.goToPreset')}</option>
             {presets.map(preset => (
-              <option key={preset.token} value={preset.token}>
+              <option key={preset.token} value={preset.token} style={{ backgroundColor: '#1e293b', color: 'white' }}>
                 {preset.name || t('live.presetNumber', { token: preset.token })}
               </option>
             ))}
           </select>
+
+          {canManage && selectedPreset && (
+            <button
+              type="button"
+              onClick={handleDeletePreset}
+              disabled={saving}
+              title={t('common.delete') || 'Delete Preset'}
+              style={{
+                width: '24px',
+                height: '24px',
+                borderRadius: '4px',
+                border: 'none',
+                backgroundColor: 'rgba(239, 68, 68, 0.7)',
+                color: 'white',
+                cursor: saving ? 'not-allowed' : 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                flexShrink: 0
+              }}
+            >
+              <svg width="12" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+              </svg>
+            </button>
+          )}
         </div>
       )}
 
