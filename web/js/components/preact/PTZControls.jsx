@@ -106,7 +106,7 @@ function DirectionButton({
         height: '30px',
         borderRadius: '50%',
         border: 'none',
-        backgroundColor: 'rgba(59, 130, 246, 0.6)',
+        backgroundColor: 'rgba(59, 130, 246, 0.4)',
         color: 'white',
         cursor: disabled ? 'not-allowed' : 'pointer',
         display: 'flex',
@@ -343,7 +343,7 @@ export function PTZControls({
         position: 'absolute',
         right: `${position.x}px`,
         bottom: `${position.y}px`,
-        backgroundColor: 'rgba(0, 0, 0, 0.25)',
+        backgroundColor: 'rgba(0, 0, 0, 0.15)',
         backdropFilter: 'blur(4px)',
         borderRadius: '8px',
         padding: '6px 8px',
@@ -451,7 +451,7 @@ export function PTZControls({
             height: '30px',
             borderRadius: '50%',
             border: 'none',
-            backgroundColor: 'rgba(107, 114, 128, 0.8)',
+            backgroundColor: 'rgba(107, 114, 128, 0.4)',
             cursor: 'pointer',
             display: 'flex',
             alignItems: 'center',
@@ -573,31 +573,86 @@ export function PTZControls({
 
       {canManage && capabilities?.has_presets && (
         showPresetForm ? (
-          <form onSubmit={handleSavePreset} style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-            <label htmlFor="ptz-preset-name" style={{ color: 'white', fontSize: '10px' }}>
-              {t('live.ptzPresetName')}
+          <form onSubmit={handleSavePreset} style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: '100%', marginTop: '2px' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', width: '100%' }}>
+              <label htmlFor="ptz-preset-name" style={{ color: 'white', fontSize: '10px' }}>
+                {t('live.ptzPresetName')}
+              </label>
               <input
                 id="ptz-preset-name"
                 type="text"
-                aria-label={t('live.ptzPresetName')}
                 value={presetName}
                 onInput={(event) => setPresetName(event.currentTarget.value)}
                 maxLength={64}
                 required
-                style={{ padding: '4px', borderRadius: '4px', fontSize: '10px' }}
+                style={{
+                  width: '100%',
+                  padding: '4px 6px',
+                  borderRadius: '4px',
+                  border: '1px solid rgba(255, 255, 255, 0.2)',
+                  backgroundColor: 'rgba(0, 0, 0, 0.5)',
+                  color: 'white',
+                  fontSize: '10px',
+                  boxSizing: 'border-box'
+                }}
               />
-            </label>
+            </div>
             <div style={{ display: 'flex', gap: '4px' }}>
-              <button type="submit" disabled={saving || !presetName.trim()} aria-label={t('live.ptzSavePreset')} style={{ fontSize: '10px', padding: '2px 4px' }}>
+              <button 
+                type="submit" 
+                disabled={saving || !presetName.trim()} 
+                aria-label={t('live.ptzSavePreset')} 
+                style={{ 
+                  flex: 1, 
+                  fontSize: '10px', 
+                  padding: '4px 6px', 
+                  borderRadius: '4px', 
+                  border: 'none', 
+                  backgroundColor: '#2563eb', 
+                  color: 'white', 
+                  cursor: saving || !presetName.trim() ? 'not-allowed' : 'pointer',
+                  opacity: saving || !presetName.trim() ? 0.5 : 1
+                }}
+              >
                 {t('live.ptzSavePreset')}
               </button>
-              <button type="button" disabled={saving} onClick={() => setShowPresetForm(false)} aria-label={t('common.cancel')} style={{ fontSize: '10px', padding: '2px 4px' }}>
+              <button 
+                type="button" 
+                disabled={saving} 
+                onClick={() => setShowPresetForm(false)} 
+                aria-label={t('common.cancel')} 
+                style={{ 
+                  flex: 1, 
+                  fontSize: '10px', 
+                  padding: '4px 6px', 
+                  borderRadius: '4px', 
+                  border: 'none', 
+                  backgroundColor: 'rgba(107, 114, 128, 0.6)', 
+                  color: 'white', 
+                  cursor: saving ? 'not-allowed' : 'pointer' 
+                }}
+              >
                 {t('common.cancel')}
               </button>
             </div>
           </form>
         ) : (
-          <button type="button" onClick={() => { setConfirmSetHome(false); setShowPresetForm(true); }} aria-label={t('live.ptzSaveCurrentPosition')} style={{ fontSize: '10px', padding: '2px 4px' }}>
+          <button 
+            type="button" 
+            onClick={() => { setConfirmSetHome(false); setShowPresetForm(true); }} 
+            aria-label={t('live.ptzSaveCurrentPosition')} 
+            style={{ 
+              width: '100%', 
+              fontSize: '10px', 
+              padding: '4px 6px', 
+              borderRadius: '4px', 
+              border: 'none', 
+              backgroundColor: 'rgba(59, 130, 246, 0.4)', 
+              color: 'white', 
+              cursor: 'pointer',
+              marginTop: '2px'
+            }}
+          >
             {t('live.ptzSaveCurrentPosition')}
           </button>
         )
