@@ -938,7 +938,7 @@ void handle_ptz_remove_preset(const http_request_t *req, http_response_t *res) {
     }
 
     const char *profile_token = get_profile_token(&config);
-    rc = onvif_ptz_delete_preset(ptz_url, profile_token, config.onvif_username, config.onvif_password, preset_token);
+    rc = onvif_ptz_remove_preset(ptz_url, profile_token, config.onvif_username, config.onvif_password, preset_token);
 
     if (rc != 0) {
         audit_ptz_operation(req, &auth, "remove_preset", "failure", "device_operation_failed");
