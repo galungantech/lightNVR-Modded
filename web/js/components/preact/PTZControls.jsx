@@ -1,6 +1,6 @@
 /**
  * PTZ Controls Component
- * Pan-Tilt-Zoom controls for PTZ-enabled cameras (Glassmorphism UI)
+ * Pan-Tilt-Zoom controls for PTZ-enabled cameras (Ultra-Clear Glassmorphic UI)
  */
 
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
@@ -54,7 +54,7 @@ const ptzApi = {
 };
 
 /**
- * Direction button component - Glassmorphism style
+ * Direction button component - Transparent Glass style
  */
 function DirectionButton({
   direction,
@@ -112,20 +112,19 @@ function DirectionButton({
       onTouchCancel={onMouseUp}
       disabled={disabled}
       style={{
-        width: '30px',
-        height: '30px',
+        width: '32px',
+        height: '32px',
         borderRadius: '50%',
         border: '1px solid rgba(255, 255, 255, 0.25)',
-        backgroundColor: 'rgba(255, 255, 255, 0.12)',
+        backgroundColor: 'rgba(0, 0, 0, 0.25)',
         color: 'white',
         cursor: disabled ? 'not-allowed' : 'pointer',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        transition: 'all 0.2s ease',
+        transition: 'all 0.15s ease',
         opacity: disabled ? 0.4 : 1,
-        userSelect: 'none',
-        boxShadow: '0 2px 8px rgba(0, 0, 0, 0.15)'
+        userSelect: 'none'
       }}
     >
       {icons[direction]}
@@ -371,20 +370,18 @@ export function PTZControls({
         position: 'absolute',
         right: `${position.x}px`,
         bottom: `${position.y}px`,
-        backgroundColor: 'rgba(255, 255, 255, 0.08)',
-        backdropFilter: 'blur(12px)',
-        WebkitBackdropFilter: 'blur(12px)',
-        borderRadius: '12px',
-        border: '1px solid rgba(255, 255, 255, 0.18)',
+        backgroundColor: 'rgba(0, 0, 0, 0.18)',
+        backdropFilter: 'blur(3px)',
+        WebkitBackdropFilter: 'blur(3px)',
+        borderRadius: '16px',
+        border: '1px solid rgba(255, 255, 255, 0.25)',
         boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.3)',
-        padding: '6px 8px',
+        padding: '10px 12px',
         zIndex: 10,
         display: 'flex',
         flexDirection: 'column',
-        gap: '4px',
-        minWidth: '130px',
-        maxHeight: 'calc(100% - 20px)',
-        overflowY: 'auto',
+        gap: '8px',
+        minWidth: '140px',
         touchAction: 'none',
         userSelect: 'none',
         pointerEvents: 'auto'
@@ -400,17 +397,19 @@ export function PTZControls({
           alignItems: 'center',
           marginBottom: '2px',
           cursor: 'move',
-          padding: '2px 4px',
-          backgroundColor: 'rgba(255, 255, 255, 0.08)',
-          borderRadius: '6px'
+          padding: '4px 6px',
+          backgroundColor: 'rgba(0, 0, 0, 0.2)',
+          borderRadius: '8px',
+          border: '1px solid rgba(255, 255, 255, 0.1)'
         }}
       >
         <span
           style={{
-            color: 'white',
+            color: '#ffffff',
             fontSize: '11px',
-            fontWeight: 'bold',
-            textShadow: '0 1px 2px rgba(0,0,0,0.5)'
+            fontWeight: '600',
+            letterSpacing: '0.3px',
+            textShadow: '0 1px 3px rgba(0,0,0,0.9)'
           }}
         >
           {t('live.ptzControl')}
@@ -425,12 +424,11 @@ export function PTZControls({
               background: 'none',
               border: 'none',
               cursor: 'pointer',
-              padding: '0 2px',
+              padding: '2px',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              touchAction: 'manipulation',
-              zIndex: 9999
+              touchAction: 'manipulation'
             }}
           >
             <svg
@@ -452,8 +450,8 @@ export function PTZControls({
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(3, 30px)',
-          gap: '3px',
+          gridTemplateColumns: 'repeat(3, 32px)',
+          gap: '4px',
           justifyContent: 'center'
         }}
       >
@@ -479,16 +477,15 @@ export function PTZControls({
           onClick={handleHome}
           aria-label={t('live.goToHomePosition')}
           style={{
-            width: '30px',
-            height: '30px',
+            width: '32px',
+            height: '32px',
             borderRadius: '50%',
             border: '1px solid rgba(255, 255, 255, 0.25)',
-            backgroundColor: 'rgba(255, 255, 255, 0.1)',
+            backgroundColor: 'rgba(0, 0, 0, 0.25)',
             cursor: 'pointer',
             display: 'flex',
             alignItems: 'center',
-            justifyContent: 'center',
-            boxShadow: '0 2px 8px rgba(0,0,0,0.15)'
+            justifyContent: 'center'
           }}
           title={t('live.goToHomePosition')}
         >
@@ -519,7 +516,8 @@ export function PTZControls({
         style={{
           display: 'flex',
           justifyContent: 'center',
-          gap: '6px',
+          alignItems: 'center',
+          gap: '8px',
           marginTop: '2px'
         }}
       >
@@ -532,10 +530,10 @@ export function PTZControls({
 
         <span
           style={{
-            color: 'white',
+            color: '#ffffff',
             fontSize: '10px',
-            alignSelf: 'center',
-            textShadow: '0 1px 2px rgba(0,0,0,0.5)'
+            fontWeight: '600',
+            textShadow: '0 1px 3px rgba(0,0,0,0.9)'
           }}
         >
           {t('live.zoom')}
@@ -554,11 +552,12 @@ export function PTZControls({
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: '4px',
-          marginTop: '2px'
+          gap: '6px',
+          marginTop: '2px',
+          padding: '2px 4px'
         }}
       >
-        <span style={{ color: 'white', fontSize: '10px', textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>
+        <span style={{ color: '#ffffff', fontSize: '10px', fontWeight: '600', textShadow: '0 1px 3px rgba(0,0,0,0.9)' }}>
           {t('live.speedLabel')}
         </span>
 
@@ -570,10 +569,10 @@ export function PTZControls({
           step="0.1"
           value={speed}
           onChange={(e) => setSpeed(parseFloat(e.target.value))}
-          style={{ flex: 1, height: '4px' }}
+          style={{ flex: 1, height: '4px', accentColor: '#3b82f6', cursor: 'pointer' }}
         />
 
-        <span style={{ color: 'white', fontSize: '10px', width: '24px', textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>
+        <span style={{ color: '#ffffff', fontSize: '10px', width: '26px', textAlign: 'right', fontWeight: '600', textShadow: '0 1px 3px rgba(0,0,0,0.9)' }}>
           {Math.round(speed * 100)}%
         </span>
       </div>
@@ -591,19 +590,19 @@ export function PTZControls({
             }}
             style={{
               flex: 1,
-              padding: '4px',
-              borderRadius: '6px',
-              border: '1px solid rgba(255, 255, 255, 0.2)',
-              backgroundColor: 'rgba(255, 255, 255, 0.1)',
+              padding: '5px 8px',
+              borderRadius: '8px',
+              border: '1px solid rgba(255, 255, 255, 0.25)',
+              backgroundColor: 'rgba(0, 0, 0, 0.25)',
               color: 'white',
               fontSize: '10px',
               cursor: 'pointer',
-              backdropFilter: 'blur(4px)'
+              outline: 'none'
             }}
           >
-            <option value="" style={{ backgroundColor: '#1e293b', color: 'white' }}>{t('live.goToPreset')}</option>
+            <option value="" style={{ backgroundColor: '#0f172a', color: 'white' }}>{t('live.goToPreset')}</option>
             {presets.map(preset => (
-              <option key={preset.token} value={preset.token} style={{ backgroundColor: '#1e293b', color: 'white' }}>
+              <option key={preset.token} value={preset.token} style={{ backgroundColor: '#0f172a', color: 'white' }}>
                 {preset.name || t('live.presetNumber', { token: preset.token })}
               </option>
             ))}
@@ -616,11 +615,11 @@ export function PTZControls({
               disabled={saving}
               title={t('common.delete') || 'Hapus Preset'}
               style={{
-                width: '24px',
-                height: '24px',
-                borderRadius: '6px',
-                border: '1px solid rgba(239, 68, 68, 0.4)',
-                backgroundColor: 'rgba(239, 68, 68, 0.25)',
+                width: '26px',
+                height: '26px',
+                borderRadius: '8px',
+                border: '1px solid rgba(239, 68, 68, 0.5)',
+                backgroundColor: 'rgba(239, 68, 68, 0.3)',
                 color: 'white',
                 cursor: saving ? 'not-allowed' : 'pointer',
                 display: 'flex',
@@ -640,9 +639,9 @@ export function PTZControls({
 
       {canManage && capabilities?.has_presets && (
         showPresetForm ? (
-          <form onSubmit={handleSavePreset} style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: '100%', marginTop: '2px' }}>
+          <form onSubmit={handleSavePreset} style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%', marginTop: '2px' }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', width: '100%' }}>
-              <label htmlFor="ptz-preset-name" style={{ color: 'white', fontSize: '10px', textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>
+              <label htmlFor="ptz-preset-name" style={{ color: '#ffffff', fontSize: '10px', fontWeight: '600', textShadow: '0 1px 3px rgba(0,0,0,0.9)' }}>
                 {t('live.ptzPresetName')}
               </label>
               <input
@@ -654,13 +653,14 @@ export function PTZControls({
                 required
                 style={{
                   width: '100%',
-                  padding: '4px 6px',
-                  borderRadius: '6px',
+                  padding: '5px 8px',
+                  borderRadius: '8px',
                   border: '1px solid rgba(255, 255, 255, 0.25)',
-                  backgroundColor: 'rgba(0, 0, 0, 0.2)',
+                  backgroundColor: 'rgba(0, 0, 0, 0.3)',
                   color: 'white',
                   fontSize: '10px',
-                  boxSizing: 'border-box'
+                  boxSizing: 'border-box',
+                  outline: 'none'
                 }}
               />
             </div>
@@ -672,10 +672,10 @@ export function PTZControls({
                 style={{ 
                   flex: 1, 
                   fontSize: '10px', 
-                  padding: '4px 6px', 
-                  borderRadius: '6px', 
-                  border: '1px solid rgba(255, 255, 255, 0.2)', 
-                  backgroundColor: 'rgba(37, 99, 235, 0.5)', 
+                  padding: '5px 8px', 
+                  borderRadius: '8px', 
+                  border: '1px solid rgba(59, 130, 246, 0.5)', 
+                  backgroundColor: 'rgba(37, 99, 235, 0.6)', 
                   color: 'white', 
                   cursor: saving || !presetName.trim() ? 'not-allowed' : 'pointer',
                   opacity: saving || !presetName.trim() ? 0.5 : 1
@@ -691,10 +691,10 @@ export function PTZControls({
                 style={{ 
                   flex: 1, 
                   fontSize: '10px', 
-                  padding: '4px 6px', 
-                  borderRadius: '6px', 
+                  padding: '5px 8px', 
+                  borderRadius: '8px', 
                   border: '1px solid rgba(255, 255, 255, 0.2)', 
-                  backgroundColor: 'rgba(255, 255, 255, 0.15)', 
+                  backgroundColor: 'rgba(255, 255, 255, 0.1)', 
                   color: 'white', 
                   cursor: saving ? 'not-allowed' : 'pointer' 
                 }}
@@ -711,14 +711,14 @@ export function PTZControls({
             style={{ 
               width: '100%', 
               fontSize: '10px', 
-              padding: '4px 6px', 
-              borderRadius: '6px', 
-              border: '1px solid rgba(255, 255, 255, 0.2)', 
-              backgroundColor: 'rgba(255, 255, 255, 0.1)', 
+              padding: '6px 8px', 
+              borderRadius: '8px', 
+              border: '1px solid rgba(255, 255, 255, 0.25)', 
+              backgroundColor: 'rgba(0, 0, 0, 0.25)', 
               color: 'white', 
               cursor: 'pointer',
               marginTop: '2px',
-              backdropFilter: 'blur(4px)'
+              transition: 'background-color 0.15s ease'
             }}
           >
             {t('live.ptzSaveCurrentPosition')}
@@ -728,13 +728,13 @@ export function PTZControls({
 
       {canManage && capabilities?.has_home_position && (
         confirmSetHome ? (
-          <div style={{ color: 'white', fontSize: '10px' }}>
+          <div style={{ color: '#ffffff', fontSize: '10px' }}>
             <span>{t('live.ptzConfirmSetHome')}</span>
-            <div style={{ display: 'flex', gap: '4px', marginTop: '2px' }}>
-              <button type="button" disabled={saving} onClick={handleSetHome} aria-label={t('live.ptzSetHome')} style={{ flex: 1, fontSize: '10px', padding: '2px 4px', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.2)', backgroundColor: 'rgba(37,99,235,0.5)', color: 'white' }}>
+            <div style={{ display: 'flex', gap: '4px', marginTop: '4px' }}>
+              <button type="button" disabled={saving} onClick={handleSetHome} aria-label={t('live.ptzSetHome')} style={{ flex: 1, fontSize: '10px', padding: '4px 6px', borderRadius: '6px', border: '1px solid rgba(59, 130, 246, 0.5)', backgroundColor: 'rgba(37,99,235,0.6)', color: 'white' }}>
                 {t('live.ptzSetHome')}
               </button>
-              <button type="button" disabled={saving} onClick={() => setConfirmSetHome(false)} aria-label={t('common.cancel')} style={{ flex: 1, fontSize: '10px', padding: '2px 4px', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.2)', backgroundColor: 'rgba(255,255,255,0.15)', color: 'white' }}>
+              <button type="button" disabled={saving} onClick={() => setConfirmSetHome(false)} aria-label={t('common.cancel')} style={{ flex: 1, fontSize: '10px', padding: '4px 6px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', backgroundColor: 'rgba(255,255,255,0.1)', color: 'white' }}>
                 {t('common.cancel')}
               </button>
             </div>
@@ -747,14 +747,14 @@ export function PTZControls({
             style={{ 
               width: '100%', 
               fontSize: '10px', 
-              padding: '4px 6px', 
-              borderRadius: '6px', 
-              border: '1px solid rgba(255, 255, 255, 0.2)', 
-              backgroundColor: 'rgba(255, 255, 255, 0.1)', 
+              padding: '6px 8px', 
+              borderRadius: '8px', 
+              border: '1px solid rgba(255, 255, 255, 0.25)', 
+              backgroundColor: 'rgba(0, 0, 0, 0.25)', 
               color: 'white', 
               cursor: 'pointer',
               marginTop: '2px',
-              backdropFilter: 'blur(4px)'
+              transition: 'background-color 0.15s ease'
             }}
           >
             {t('live.ptzSetCurrentPositionHome')}
@@ -764,7 +764,7 @@ export function PTZControls({
 
       {/* Error message */}
       {error && (
-        <div style={{ color: '#ef4444', fontSize: '10px', textAlign: 'center', textShadow: '0 1px 2px rgba(0,0,0,0.8)' }}>
+        <div style={{ color: '#f87171', fontSize: '10px', textAlign: 'center', textShadow: '0 1px 3px rgba(0,0,0,0.9)' }}>
           {error}
         </div>
       )}
