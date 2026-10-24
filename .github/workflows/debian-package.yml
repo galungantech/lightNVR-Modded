@@ -19,31 +19,31 @@ jobs:
       matrix:
         include:
           # Debian sid (unstable) builds
-          - runner: ubuntu-latest
-            platform: linux/amd64
-            deb_arch: amd64
-            debian_suite: sid
-          - runner: ubuntu-24.04-arm
-            platform: linux/arm64
-            deb_arch: arm64
-            debian_suite: sid
-          - runner: ubuntu-latest
-            platform: linux/arm/v7
-            deb_arch: armhf
-            debian_suite: sid
+          #- runner: ubuntu-latest
+            #platform: linux/amd64
+            #deb_arch: amd64
+            #debian_suite: sid
+          #- runner: ubuntu-24.04-arm
+            #platform: linux/arm64
+            #deb_arch: arm64
+            #debian_suite: sid
+          #- runner: ubuntu-latest
+            #platform: linux/arm/v7
+            #deb_arch: armhf
+            #debian_suite: sid
           # Debian trixie (13/stable) builds
-          - runner: ubuntu-latest
-            platform: linux/amd64
-            deb_arch: amd64
-            debian_suite: trixie
+          #- runner: ubuntu-latest
+            #platform: linux/amd64
+            #deb_arch: amd64
+            #debian_suite: trixie
           - runner: ubuntu-24.04-arm
             platform: linux/arm64
             deb_arch: arm64
             debian_suite: trixie
-          - runner: ubuntu-latest
-            platform: linux/arm/v7
-            deb_arch: armhf
-            debian_suite: trixie
+          #- runner: ubuntu-latest
+            #platform: linux/arm/v7
+            #deb_arch: armhf
+            #debian_suite: trixie
 
     steps:
       - name: Checkout
@@ -83,7 +83,7 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           DEB_ARCH="${{ matrix.deb_arch }}"
           DEBIAN_SUITE="${{ matrix.debian_suite }}"
-          PKG_NAME="lightnvr_${VERSION}_${DEBIAN_SUITE}_${DEB_ARCH}"
+          PKG_NAME="lightnvr-modded_${VERSION}_${DEBIAN_SUITE}_${DEB_ARCH}"
           PKG_DIR="$(pwd)/pkg/${PKG_NAME}"
 
           # ── Directory structure ──────────────────────────────────────────────
