@@ -151,15 +151,15 @@ export function PTZControls({
   const [confirmSetHome, setConfirmSetHome] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  // Default posisi pojok kiri bawah (x: 10, y: 10)
+  const DEFAULT_POSITION = { x: 10, y: 10 };
+
   // =========================
   // DRAG STATE & FUNCTIONS
   // =========================
   const panelRef = useRef(null);
 
-  const [position, setPosition] = useState({
-    x: 10,
-    y: 10
-  });
+  const [position, setPosition] = useState(DEFAULT_POSITION);
 
   const dragData = useRef({
     dragging: false,
@@ -168,6 +168,14 @@ export function PTZControls({
     initialX: 10,
     initialY: 10
   });
+
+  // Mencegah scroll wheel melakukan zoom pada layar utama
+  const handleWheel = useCallback((e) => {
+    e.stopPropagation();
+    if (e.cancelable) {
+      e.preventDefault();
+    }
+  }, []);
 
   const clampPosition = useCallback((x, y) => {
     const panel = panelRef.current;
@@ -185,6 +193,18 @@ export function PTZControls({
     return {
       x: Math.max(0, Math.min(x, maxX)),
       y: Math.max(0, Math.min(y, maxY))
+    };
+  }, []);
+
+  // Reset ke posisi default saat fullscreen berubah atau UI dibuka/tutup
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setPosition(DEFAULT_POSITION);
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
     };
   }, []);
 
@@ -215,7 +235,8 @@ export function PTZControls({
       const clientX = e.touches ? e.touches[0].clientX : e.clientX;
       const clientY = e.touches ? e.touches[0].clientY : e.clientY;
 
-      const deltaX = dragData.current.startX - clientX;
+      // Geser dari kiri (deltaX negatif jika geser ke kanan)
+      const deltaX = clientX - dragData.current.startX;
       const deltaY = dragData.current.startY - clientY;
 
       const newX = dragData.current.initialX + deltaX;
@@ -255,6 +276,7 @@ export function PTZControls({
     setPresetName('');
     setShowPresetForm(false);
     setConfirmSetHome(false);
+    setPosition(DEFAULT_POSITION); // Reset posisi ke pojok kiri bawah saat stream dipasang
     getPtzCapabilities(stream.name)
       .then(data => { if (active) setCapabilities(data); })
       .catch(err => console.error('Failed to get PTZ capabilities:', err));
@@ -366,9 +388,10 @@ export function PTZControls({
     <div
       ref={panelRef}
       className="ptz-controls"
+      onWheel={handleWheel}
       style={{
         position: 'absolute',
-        right: `${position.x}px`,
+        left: `${position.x}px`,
         bottom: `${position.y}px`,
         backgroundColor: 'rgba(0, 0, 0, 0.18)',
         backdropFilter: 'blur(3px)',
@@ -393,7 +416,7 @@ export function PTZControls({
         onTouchStart={startDrag}
         style={{
           display: 'flex',
-          justifyContent: 'space-between',
+          justify: 'space-between',
           alignItems: 'center',
           marginBottom: '2px',
           cursor: 'move',
@@ -515,7 +538,7 @@ export function PTZControls({
       <div
         style={{
           display: 'flex',
-          justifyContent: 'center',
+          justify: 'center',
           alignItems: 'center',
           gap: '8px',
           marginTop: '2px'
