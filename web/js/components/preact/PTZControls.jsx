@@ -1,6 +1,6 @@
 /**
  * PTZ Controls Component
- * Pan-Tilt-Zoom controls for PTZ-enabled cameras (Solid Crisp Glass UI)
+ * Pan-Tilt-Zoom controls for PTZ-enabled cameras (Crystal Clear UI with Glass Backdrop)
  */
 
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
@@ -54,7 +54,7 @@ const ptzApi = {
 };
 
 /**
- * Direction button component - Crisp Solid Style
+ * Direction button component - Crisp Glass style
  */
 function DirectionButton({
   direction,
@@ -152,6 +152,9 @@ export function PTZControls({
   const [confirmSetHome, setConfirmSetHome] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  // =========================
+  // DRAG STATE & FUNCTIONS
+  // =========================
   const panelRef = useRef(null);
 
   const [position, setPosition] = useState({
@@ -167,6 +170,7 @@ export function PTZControls({
     initialY: 10
   });
 
+  // Mencegah scroll wheel menembus ke video CCTV
   const handleWheel = useCallback((e) => {
     e.stopPropagation();
   }, []);
@@ -190,6 +194,7 @@ export function PTZControls({
     };
   }, []);
 
+  // Menjaga UI tetap di dalam layar saat keluar Fullscreen / Resize window
   useEffect(() => {
     const handleResize = () => {
       setPosition(prevPos => clampPosition(prevPos.x, prevPos.y));
@@ -258,6 +263,9 @@ export function PTZControls({
     };
   }, [clampPosition]);
 
+  // =========================
+  // LOAD PRESETS
+  // =========================
   useEffect(() => {
     if (!stream?.name || !stream?.ptz_enabled) return;
     let active = true;
@@ -401,7 +409,7 @@ export function PTZControls({
         isolation: 'isolate'
       }}
     >
-      {/* SOLID DARK GLASS BACKDROP LAYER */}
+      {/* SEPARATED GLASS BACKDROP LAYER */}
       <div
         style={{
           position: 'absolute',
@@ -421,7 +429,7 @@ export function PTZControls({
         onTouchStart={startDrag}
         style={{
           display: 'flex',
-          justify: 'space-between',
+          justifyContent: 'space-between',
           alignItems: 'center',
           marginBottom: '2px',
           cursor: 'move',
@@ -436,7 +444,8 @@ export function PTZControls({
             color: '#ffffff',
             fontSize: '11px',
             fontWeight: '600',
-            letterSpacing: '0.3px'
+            letterSpacing: '0.3px',
+            WebkitFontSmoothing: 'antialiased'
           }}
         >
           {t('live.ptzControl')}
@@ -563,7 +572,8 @@ export function PTZControls({
             color: '#ffffff',
             fontSize: '11px',
             alignSelf: 'center',
-            fontWeight: '600'
+            fontWeight: '600',
+            WebkitFontSmoothing: 'antialiased'
           }}
         >
           {t('live.zoom')}
@@ -586,7 +596,7 @@ export function PTZControls({
           marginTop: '2px'
         }}
       >
-        <span style={{ color: '#ffffff', fontSize: '10px', fontWeight: '600' }}>
+        <span style={{ color: '#ffffff', fontSize: '10px', fontWeight: '600', WebkitFontSmoothing: 'antialiased' }}>
           {t('live.speedLabel')}
         </span>
 
@@ -601,7 +611,7 @@ export function PTZControls({
           style={{ flex: 1, height: '4px', accentColor: '#3b82f6', cursor: 'pointer' }}
         />
 
-        <span style={{ color: '#ffffff', fontSize: '10px', width: '26px', textAlign: 'right', fontWeight: '600' }}>
+        <span style={{ color: '#ffffff', fontSize: '10px', width: '26px', textAlign: 'right', fontWeight: '600', WebkitFontSmoothing: 'antialiased' }}>
           {Math.round(speed * 100)}%
         </span>
       </div>
@@ -627,7 +637,8 @@ export function PTZControls({
               fontSize: '10px',
               fontWeight: '500',
               cursor: 'pointer',
-              outline: 'none'
+              outline: 'none',
+              WebkitFontSmoothing: 'antialiased'
             }}
           >
             <option value="" style={{ backgroundColor: '#0f172a', color: 'white' }}>{t('live.goToPreset')}</option>
