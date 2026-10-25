@@ -438,8 +438,8 @@ export function PTZControls({
           <button
             type="button"
             onClick={onClose}
-            onMouseDown={(e) => e.stopPropagation()} // Mencegah drag saat diklik di PC
-            onTouchStart={(e) => e.stopPropagation()} // Mencegah drag saat ditekan di HP agar bisa diklik
+            onMouseDown={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
             aria-label={t('common.close')}
             style={{
               background: 'none',
@@ -533,7 +533,7 @@ export function PTZControls({
         <div></div>
       </div>
 
-      {/* Zoom controls - Posisinya ditengah */}
+      {/* Zoom controls */}
       <div
         style={{
           display: 'flex',
@@ -600,9 +600,9 @@ export function PTZControls({
         </span>
       </div>
 
-      {/* Presets - Tombol Delete Diperbarui Sesuai Gambar */}
+      {/* Presets */}
       {presets.length > 0 && (
-        <div style={{ display: 'flex', gap: '6px', marginTop: '4px', width: '100%', height: '30px' }}>
+        <div style={{ display: 'flex', gap: '6px', marginTop: '4px', width: '100%', height: '32px' }}>
           <select
             aria-label={t('live.goToPreset')}
             value={selectedPreset}
@@ -640,10 +640,10 @@ export function PTZControls({
               title={t('common.delete') || 'Hapus Preset'}
               style={{
                 width: '32px',
-                height: '100%', // Samakan tinggi dengan select dropdown
+                height: '100%',
                 borderRadius: '8px',
                 border: '1px solid rgba(220, 38, 38, 0.3)',
-                backgroundColor: 'rgba(127, 29, 29, 0.85)', // Warna merah gelap sesuai gambar
+                backgroundColor: 'rgba(127, 29, 29, 0.85)',
                 color: 'white',
                 cursor: saving ? 'not-allowed' : 'pointer',
                 display: 'flex',
