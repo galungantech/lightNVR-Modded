@@ -438,8 +438,8 @@ export function PTZControls({
           <button
             type="button"
             onClick={onClose}
-            onMouseDown={(e) => e.stopPropagation()}
-            onTouchStart={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()} // Mencegah drag saat diklik di PC
+            onTouchStart={(e) => e.stopPropagation()} // Mencegah drag saat ditekan di HP agar bisa diklik
             aria-label={t('common.close')}
             style={{
               background: 'none',
@@ -533,11 +533,11 @@ export function PTZControls({
         <div></div>
       </div>
 
-      {/* Zoom controls */}
+      {/* Zoom controls - Posisinya dikembalikan ke tengah */}
       <div
         style={{
           display: 'flex',
-          justifyContent: 'center',
+          justifyContent: 'center', // Ini yang sebelumnya terhapus
           alignItems: 'center',
           gap: '8px',
           marginTop: '2px',
@@ -602,7 +602,15 @@ export function PTZControls({
 
       {/* Presets */}
       {presets.length > 0 && (
-        <div style={{ display: 'flex', gap: '6px', marginTop: '4px', width: '100%', height: '32px' }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'stretch',
+            gap: '4px',
+            marginTop: '2px',
+            width: '100%'
+          }}
+        >
           <select
             aria-label={t('live.goToPreset')}
             value={selectedPreset}
@@ -613,7 +621,8 @@ export function PTZControls({
             }}
             style={{
               flex: 1,
-              padding: '0 8px',
+              minWidth: 0,
+              padding: '5px 8px',
               borderRadius: '8px',
               border: '1px solid rgba(255, 255, 255, 0.25)',
               backgroundColor: 'rgba(0, 0, 0, 0.35)',
@@ -621,17 +630,27 @@ export function PTZControls({
               fontSize: '10px',
               cursor: 'pointer',
               outline: 'none',
-              height: '100%'
+              boxSizing: 'border-box'
             }}
           >
-            <option value="" style={{ backgroundColor: '#0f172a', color: 'white' }}>{t('live.goToPreset')}</option>
+            <option
+              value=""
+              style={{ backgroundColor: '#0f172a', color: 'white' }}
+            >
+              {t('live.goToPreset')}
+            </option>
+      
             {presets.map(preset => (
-              <option key={preset.token} value={preset.token} style={{ backgroundColor: '#0f172a', color: 'white' }}>
+              <option
+                key={preset.token}
+                value={preset.token}
+                style={{ backgroundColor: '#0f172a', color: 'white' }}
+              >
                 {preset.name || t('live.presetNumber', { token: preset.token })}
               </option>
             ))}
           </select>
-
+      
           {canManage && selectedPreset && (
             <button
               type="button"
@@ -640,19 +659,30 @@ export function PTZControls({
               title={t('common.delete') || 'Hapus Preset'}
               style={{
                 width: '32px',
-                height: '100%',
+                minWidth: '32px',
+                alignSelf: 'stretch',
                 borderRadius: '8px',
-                border: '1px solid rgba(220, 38, 38, 0.3)',
-                backgroundColor: 'rgba(127, 29, 29, 0.85)',
+                border: '1px solid rgba(239, 68, 68, 0.5)',
+                backgroundColor: 'rgba(239, 68, 68, 0.4)',
                 color: 'white',
                 cursor: saving ? 'not-allowed' : 'pointer',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                flexShrink: 0
+                flexShrink: 0,
+                padding: '0',
+                boxSizing: 'border-box',
+                opacity: saving ? 0.5 : 1
               }}
             >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <svg
+                width="12"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="white"
+                strokeWidth="2"
+              >
                 <polyline points="3 6 5 6 21 6"></polyline>
                 <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
               </svg>
@@ -660,7 +690,7 @@ export function PTZControls({
           )}
         </div>
       )}
-
+      
       {canManage && capabilities?.has_presets && (
         showPresetForm ? (
           <form onSubmit={handleSavePreset} style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%', marginTop: '2px' }}>
@@ -741,7 +771,7 @@ export function PTZControls({
               backgroundColor: 'rgba(0, 0, 0, 0.35)', 
               color: 'white', 
               cursor: 'pointer',
-              marginTop: '4px',
+              marginTop: '2px',
               transition: 'background-color 0.15s ease'
             }}
           >
@@ -777,7 +807,7 @@ export function PTZControls({
               backgroundColor: 'rgba(0, 0, 0, 0.35)', 
               color: 'white', 
               cursor: 'pointer',
-              marginTop: '4px',
+              marginTop: '2px',
               transition: 'background-color 0.15s ease'
             }}
           >
