@@ -533,11 +533,11 @@ export function PTZControls({
         <div></div>
       </div>
 
-      {/* Zoom controls - Posisinya dikembalikan ke tengah */}
+      {/* Zoom controls - Posisinya ditengah */}
       <div
         style={{
           display: 'flex',
-          justifyContent: 'center', // Ini yang sebelumnya terhapus
+          justifyContent: 'center',
           alignItems: 'center',
           gap: '8px',
           marginTop: '2px',
@@ -600,9 +600,9 @@ export function PTZControls({
         </span>
       </div>
 
-      {/* Presets */}
+      {/* Presets - Tombol Delete Diperbarui Sesuai Gambar */}
       {presets.length > 0 && (
-        <div style={{ display: 'flex', gap: '4px', marginTop: '2px', width: '100%' }}>
+        <div style={{ display: 'flex', gap: '6px', marginTop: '4px', width: '100%', height: '30px' }}>
           <select
             aria-label={t('live.goToPreset')}
             value={selectedPreset}
@@ -613,14 +613,15 @@ export function PTZControls({
             }}
             style={{
               flex: 1,
-              padding: '5px 8px',
+              padding: '0 8px',
               borderRadius: '8px',
               border: '1px solid rgba(255, 255, 255, 0.25)',
               backgroundColor: 'rgba(0, 0, 0, 0.35)',
               color: 'white',
               fontSize: '10px',
               cursor: 'pointer',
-              outline: 'none'
+              outline: 'none',
+              height: '100%'
             }}
           >
             <option value="" style={{ backgroundColor: '#0f172a', color: 'white' }}>{t('live.goToPreset')}</option>
@@ -638,11 +639,11 @@ export function PTZControls({
               disabled={saving}
               title={t('common.delete') || 'Hapus Preset'}
               style={{
-                width: '26px',
-                height: '26px',
+                width: '32px',
+                height: '100%', // Samakan tinggi dengan select dropdown
                 borderRadius: '8px',
-                border: '1px solid rgba(239, 68, 68, 0.5)',
-                backgroundColor: 'rgba(239, 68, 68, 0.4)',
+                border: '1px solid rgba(220, 38, 38, 0.3)',
+                backgroundColor: 'rgba(127, 29, 29, 0.85)', // Warna merah gelap sesuai gambar
                 color: 'white',
                 cursor: saving ? 'not-allowed' : 'pointer',
                 display: 'flex',
@@ -651,7 +652,7 @@ export function PTZControls({
                 flexShrink: 0
               }}
             >
-              <svg width="12" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="3 6 5 6 21 6"></polyline>
                 <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
               </svg>
@@ -740,7 +741,7 @@ export function PTZControls({
               backgroundColor: 'rgba(0, 0, 0, 0.35)', 
               color: 'white', 
               cursor: 'pointer',
-              marginTop: '2px',
+              marginTop: '4px',
               transition: 'background-color 0.15s ease'
             }}
           >
@@ -776,7 +777,7 @@ export function PTZControls({
               backgroundColor: 'rgba(0, 0, 0, 0.35)', 
               color: 'white', 
               cursor: 'pointer',
-              marginTop: '2px',
+              marginTop: '4px',
               transition: 'background-color 0.15s ease'
             }}
           >
