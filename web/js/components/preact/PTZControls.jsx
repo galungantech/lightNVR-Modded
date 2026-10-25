@@ -405,20 +405,21 @@ export function PTZControls({
         pointerEvents: 'auto'
       }}
     >
-      {/* HEADER DRAG - Teks & Tombol X disatu pill yang sama seperti gambar */}
+      {/* HEADER DRAG - Latar melintang lebar penuh, teks kiri & tombol X kanan */}
       <div
         onMouseDown={startDrag}
         onTouchStart={startDrag}
         style={{
           display: 'flex',
+          justify: 'space-between',
           alignItems: 'center',
-          gap: '8px',
           cursor: 'move',
           padding: '6px 10px',
           backgroundColor: 'rgba(0, 0, 0, 0.3)',
           borderRadius: '8px',
           border: '1px solid rgba(255, 255, 255, 0.1)',
-          width: 'fit-content'
+          width: '100%',
+          boxSizing: 'border-box'
         }}
       >
         <span
@@ -529,14 +530,15 @@ export function PTZControls({
         <div></div>
       </div>
 
-      {/* Zoom controls - Posisinya persis seperti gambar */}
+      {/* Zoom controls - Tengah persis di bawah d-pad */}
       <div
         style={{
           display: 'flex',
+          justifyContent: 'center',
           alignItems: 'center',
           gap: '8px',
           marginTop: '2px',
-          paddingLeft: '4px'
+          width: '100%'
         }}
       >
         <DirectionButton
