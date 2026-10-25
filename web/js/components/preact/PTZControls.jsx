@@ -1,6 +1,6 @@
 /**
  * PTZ Controls Component
- * Pan-Tilt-Zoom controls for PTZ-enabled cameras (Ultra-Clear Glassmorphic UI)
+ * Pan-Tilt-Zoom controls for PTZ-enabled cameras
  */
 
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
@@ -54,7 +54,7 @@ const ptzApi = {
 };
 
 /**
- * Direction button component - Transparent Glass style
+ * Direction button component
  */
 function DirectionButton({
   direction,
@@ -116,7 +116,7 @@ function DirectionButton({
         height: '32px',
         borderRadius: '50%',
         border: '1px solid rgba(255, 255, 255, 0.25)',
-        backgroundColor: 'rgba(0, 0, 0, 0.25)',
+        backgroundColor: 'rgba(0, 0, 0, 0.35)',
         color: 'white',
         cursor: disabled ? 'not-allowed' : 'pointer',
         display: 'flex',
@@ -151,15 +151,13 @@ export function PTZControls({
   const [confirmSetHome, setConfirmSetHome] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  const DEFAULT_POSITION = { x: 10, y: 10 };
+
   // =========================
   // DRAG STATE & FUNCTIONS
   // =========================
   const panelRef = useRef(null);
-
-  const [position, setPosition] = useState({
-    x: 10,
-    y: 10
-  });
+  const [position, setPosition] = useState(DEFAULT_POSITION);
 
   const dragData = useRef({
     dragging: false,
@@ -168,6 +166,13 @@ export function PTZControls({
     initialX: 10,
     initialY: 10
   });
+
+  const handleWheel = useCallback((e) => {
+    e.stopPropagation();
+    if (e.cancelable) {
+      e.preventDefault();
+    }
+  }, []);
 
   const clampPosition = useCallback((x, y) => {
     const panel = panelRef.current;
@@ -185,6 +190,17 @@ export function PTZControls({
     return {
       x: Math.max(0, Math.min(x, maxX)),
       y: Math.max(0, Math.min(y, maxY))
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setPosition(DEFAULT_POSITION);
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
     };
   }, []);
 
@@ -215,7 +231,7 @@ export function PTZControls({
       const clientX = e.touches ? e.touches[0].clientX : e.clientX;
       const clientY = e.touches ? e.touches[0].clientY : e.clientY;
 
-      const deltaX = dragData.current.startX - clientX;
+      const deltaX = clientX - dragData.current.startX;
       const deltaY = dragData.current.startY - clientY;
 
       const newX = dragData.current.initialX + deltaX;
@@ -255,6 +271,7 @@ export function PTZControls({
     setPresetName('');
     setShowPresetForm(false);
     setConfirmSetHome(false);
+    setPosition(DEFAULT_POSITION);
     getPtzCapabilities(stream.name)
       .then(data => { if (active) setCapabilities(data); })
       .catch(err => console.error('Failed to get PTZ capabilities:', err));
@@ -366,16 +383,17 @@ export function PTZControls({
     <div
       ref={panelRef}
       className="ptz-controls"
+      onWheel={handleWheel}
       style={{
         position: 'absolute',
-        right: `${position.x}px`,
+        left: `${position.x}px`,
         bottom: `${position.y}px`,
-        backgroundColor: 'rgba(0, 0, 0, 0.18)',
-        backdropFilter: 'blur(3px)',
-        WebkitBackdropFilter: 'blur(3px)',
+        backgroundColor: 'rgba(0, 0, 0, 0.38)',
+        backdropFilter: 'blur(6px)',
+        WebkitBackdropFilter: 'blur(6px)',
         borderRadius: '16px',
         border: '1px solid rgba(255, 255, 255, 0.25)',
-        boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.3)',
+        boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.4)',
         padding: '10px 12px',
         zIndex: 10,
         display: 'flex',
@@ -393,14 +411,14 @@ export function PTZControls({
         onTouchStart={startDrag}
         style={{
           display: 'flex',
-          justifyContent: 'space-between',
           alignItems: 'center',
-          marginBottom: '2px',
           cursor: 'move',
-          padding: '4px 6px',
-          backgroundColor: 'rgba(0, 0, 0, 0.2)',
+          padding: '6px 10px',
+          backgroundColor: 'rgba(0, 0, 0, 0.3)',
           borderRadius: '8px',
-          border: '1px solid rgba(255, 255, 255, 0.1)'
+          border: '1px solid rgba(255, 255, 255, 0.1)',
+          width: '100%',
+          boxSizing: 'border-box'
         }}
       >
         <span
@@ -409,7 +427,8 @@ export function PTZControls({
             fontSize: '11px',
             fontWeight: '600',
             letterSpacing: '0.3px',
-            textShadow: '0 1px 3px rgba(0,0,0,0.9)'
+            textShadow: '0 1px 3px rgba(0,0,0,0.9)',
+            marginRight: 'auto'
           }}
         >
           {t('live.ptzControl')}
@@ -419,25 +438,28 @@ export function PTZControls({
           <button
             type="button"
             onClick={onClose}
+            onMouseDown={(e) => e.stopPropagation()} // Mencegah drag saat diklik di PC
+            onTouchStart={(e) => e.stopPropagation()} // Mencegah drag saat ditekan di HP agar bisa diklik
             aria-label={t('common.close')}
             style={{
               background: 'none',
               border: 'none',
               cursor: 'pointer',
-              padding: '2px',
+              padding: '4px',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              touchAction: 'manipulation'
+              touchAction: 'manipulation',
+              marginLeft: '8px'
             }}
           >
             <svg
-              width="14"
-              height="14"
+              width="12"
+              height="12"
               viewBox="0 0 24 24"
               fill="none"
               stroke="white"
-              strokeWidth="2"
+              strokeWidth="2.5"
             >
               <line x1="18" y1="6" x2="6" y2="18" />
               <line x1="6" y1="6" x2="18" y2="18" />
@@ -481,7 +503,7 @@ export function PTZControls({
             height: '32px',
             borderRadius: '50%',
             border: '1px solid rgba(255, 255, 255, 0.25)',
-            backgroundColor: 'rgba(0, 0, 0, 0.25)',
+            backgroundColor: 'rgba(0, 0, 0, 0.35)',
             cursor: 'pointer',
             display: 'flex',
             alignItems: 'center',
@@ -511,14 +533,15 @@ export function PTZControls({
         <div></div>
       </div>
 
-      {/* Zoom controls */}
+      {/* Zoom controls - Posisinya dikembalikan ke tengah */}
       <div
         style={{
           display: 'flex',
-          justifyContent: 'center',
+          justifyContent: 'center', // Ini yang sebelumnya terhapus
           alignItems: 'center',
           gap: '8px',
-          marginTop: '2px'
+          marginTop: '2px',
+          width: '100%'
         }}
       >
         <DirectionButton
@@ -531,7 +554,7 @@ export function PTZControls({
         <span
           style={{
             color: '#ffffff',
-            fontSize: '10px',
+            fontSize: '11px',
             fontWeight: '600',
             textShadow: '0 1px 3px rgba(0,0,0,0.9)'
           }}
@@ -593,7 +616,7 @@ export function PTZControls({
               padding: '5px 8px',
               borderRadius: '8px',
               border: '1px solid rgba(255, 255, 255, 0.25)',
-              backgroundColor: 'rgba(0, 0, 0, 0.25)',
+              backgroundColor: 'rgba(0, 0, 0, 0.35)',
               color: 'white',
               fontSize: '10px',
               cursor: 'pointer',
@@ -619,7 +642,7 @@ export function PTZControls({
                 height: '26px',
                 borderRadius: '8px',
                 border: '1px solid rgba(239, 68, 68, 0.5)',
-                backgroundColor: 'rgba(239, 68, 68, 0.3)',
+                backgroundColor: 'rgba(239, 68, 68, 0.4)',
                 color: 'white',
                 cursor: saving ? 'not-allowed' : 'pointer',
                 display: 'flex',
@@ -656,7 +679,7 @@ export function PTZControls({
                   padding: '5px 8px',
                   borderRadius: '8px',
                   border: '1px solid rgba(255, 255, 255, 0.25)',
-                  backgroundColor: 'rgba(0, 0, 0, 0.3)',
+                  backgroundColor: 'rgba(0, 0, 0, 0.4)',
                   color: 'white',
                   fontSize: '10px',
                   boxSizing: 'border-box',
@@ -675,7 +698,7 @@ export function PTZControls({
                   padding: '5px 8px', 
                   borderRadius: '8px', 
                   border: '1px solid rgba(59, 130, 246, 0.5)', 
-                  backgroundColor: 'rgba(37, 99, 235, 0.6)', 
+                  backgroundColor: 'rgba(37, 99, 235, 0.7)', 
                   color: 'white', 
                   cursor: saving || !presetName.trim() ? 'not-allowed' : 'pointer',
                   opacity: saving || !presetName.trim() ? 0.5 : 1
@@ -694,7 +717,7 @@ export function PTZControls({
                   padding: '5px 8px', 
                   borderRadius: '8px', 
                   border: '1px solid rgba(255, 255, 255, 0.2)', 
-                  backgroundColor: 'rgba(255, 255, 255, 0.1)', 
+                  backgroundColor: 'rgba(255, 255, 255, 0.15)', 
                   color: 'white', 
                   cursor: saving ? 'not-allowed' : 'pointer' 
                 }}
@@ -714,7 +737,7 @@ export function PTZControls({
               padding: '6px 8px', 
               borderRadius: '8px', 
               border: '1px solid rgba(255, 255, 255, 0.25)', 
-              backgroundColor: 'rgba(0, 0, 0, 0.25)', 
+              backgroundColor: 'rgba(0, 0, 0, 0.35)', 
               color: 'white', 
               cursor: 'pointer',
               marginTop: '2px',
@@ -731,10 +754,10 @@ export function PTZControls({
           <div style={{ color: '#ffffff', fontSize: '10px' }}>
             <span>{t('live.ptzConfirmSetHome')}</span>
             <div style={{ display: 'flex', gap: '4px', marginTop: '4px' }}>
-              <button type="button" disabled={saving} onClick={handleSetHome} aria-label={t('live.ptzSetHome')} style={{ flex: 1, fontSize: '10px', padding: '4px 6px', borderRadius: '6px', border: '1px solid rgba(59, 130, 246, 0.5)', backgroundColor: 'rgba(37,99,235,0.6)', color: 'white' }}>
+              <button type="button" disabled={saving} onClick={handleSetHome} aria-label={t('live.ptzSetHome')} style={{ flex: 1, fontSize: '10px', padding: '4px 6px', borderRadius: '6px', border: '1px solid rgba(59, 130, 246, 0.5)', backgroundColor: 'rgba(37,99,235,0.7)', color: 'white' }}>
                 {t('live.ptzSetHome')}
               </button>
-              <button type="button" disabled={saving} onClick={() => setConfirmSetHome(false)} aria-label={t('common.cancel')} style={{ flex: 1, fontSize: '10px', padding: '4px 6px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', backgroundColor: 'rgba(255,255,255,0.1)', color: 'white' }}>
+              <button type="button" disabled={saving} onClick={() => setConfirmSetHome(false)} aria-label={t('common.cancel')} style={{ flex: 1, fontSize: '10px', padding: '4px 6px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', backgroundColor: 'rgba(255,255,255,0.15)', color: 'white' }}>
                 {t('common.cancel')}
               </button>
             </div>
@@ -750,7 +773,7 @@ export function PTZControls({
               padding: '6px 8px', 
               borderRadius: '8px', 
               border: '1px solid rgba(255, 255, 255, 0.25)', 
-              backgroundColor: 'rgba(0, 0, 0, 0.25)', 
+              backgroundColor: 'rgba(0, 0, 0, 0.35)', 
               color: 'white', 
               cursor: 'pointer',
               marginTop: '2px',
