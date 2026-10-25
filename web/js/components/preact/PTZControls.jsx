@@ -405,7 +405,7 @@ export function PTZControls({
         pointerEvents: 'auto'
       }}
     >
-      {/* HEADER DRAG - Kapsul hitam melintang penuh, teks di kiri & tombol X di kanan */}
+      {/* HEADER DRAG */}
       <div
         onMouseDown={startDrag}
         onTouchStart={startDrag}
@@ -438,12 +438,14 @@ export function PTZControls({
           <button
             type="button"
             onClick={onClose}
+            onMouseDown={(e) => e.stopPropagation()} // Mencegah drag saat diklik di PC
+            onTouchStart={(e) => e.stopPropagation()} // Mencegah drag saat ditekan di HP agar bisa diklik
             aria-label={t('common.close')}
             style={{
               background: 'none',
               border: 'none',
               cursor: 'pointer',
-              padding: '0',
+              padding: '4px',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
@@ -531,11 +533,11 @@ export function PTZControls({
         <div></div>
       </div>
 
-      {/* Zoom controls - Tengah persis di bawah d-pad */}
+      {/* Zoom controls - Posisinya dikembalikan ke tengah */}
       <div
         style={{
           display: 'flex',
-          justify: 'center',
+          justifyContent: 'center', // Ini yang sebelumnya terhapus
           alignItems: 'center',
           gap: '8px',
           marginTop: '2px',
