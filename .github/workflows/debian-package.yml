@@ -51,12 +51,18 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Extract version from tag
+      - name: Determine package version
         id: version
         run: |
-          TAG="${{ github.ref_name }}"
-          VERSION="${TAG#v}"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            # Manual branch builds validate fixes without moving release tags.
+            VERSION=$(sed -n 's/^project(LightNVR VERSION \([0-9][0-9.]*\) .*/\1/p' CMakeLists.txt)
+          fi
+          test -n "$VERSION"
+          dpkg --validate-version "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         if: matrix.platform == 'linux/arm/v7'
@@ -210,12 +216,12 @@ jobs:
           # ── Suite-specific FFmpeg dependency names ─────────────────────────
           case "${DEBIAN_SUITE}" in
             sid)
-              FFMPEG_DEPS="libavcodec62 | libavcodec-extra, libavformat62, libavutil60, libswscale9"
+              FFMPEG_DEPS="libavcodec62 | libavcodec-extra, libavformat62, libavutil60, libswscale9, libavfilter11"
               LLHTTP_DEP="libllhttp9.3"
               SUITE_NOTE="Note: This package targets Debian sid (unstable)."
               ;;
             trixie)
-              FFMPEG_DEPS="libavcodec61 | libavcodec-extra, libavformat61, libavutil59, libswscale8"
+              FFMPEG_DEPS="libavcodec61 | libavcodec-extra, libavformat61, libavutil59, libswscale8, libavfilter10"
               LLHTTP_DEP="libllhttp9.2"
               SUITE_NOTE="Note: This package targets Debian 13 trixie (stable)."
               ;;

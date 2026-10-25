@@ -230,7 +230,8 @@ Powerful object detection using modern ONNX and TFLite models with zone-aware fi
 
    Prerequisites (in addition to `build-essential`, `cmake`, `pkg-config`):
    - **FFmpeg ≥ 7.1** (`libavcodec ≥ 61`, `libavformat ≥ 61`, `libavutil ≥ 59`,
-     `libswscale ≥ 8`, `libswresample ≥ 5`). Debian 12 (bookworm) and Ubuntu
+     `libswscale ≥ 8`, `libswresample ≥ 5`; optional `libavfilter ≥ 10` for
+     per-stream voice enhancement). Debian 12 (bookworm) and Ubuntu
      22.04 ship FFmpeg 5.x/6.x, which is too old — build FFmpeg from source or
      use a newer distro release (Debian 13 / Ubuntu 24.04+ ship a compatible
      version).
@@ -426,16 +427,20 @@ docker run -d \
   -p 8554:8554 \
   -p 8555:8555 \
   -p 8555:8555/udp \
-  -p 1984:1984 \
-  -v ./config:/etc/lightnvr \
-  -v ./data:/var/lib/lightnvr/data \
+  --security-opt no-new-privileges --cap-drop ALL \
+  -v lightnvr-config:/etc/lightnvr \
+  -v lightnvr-database:/var/lib/lightnvr/data/database \
+  -v lightnvr-recordings:/var/lib/lightnvr/data/recordings \
+  -v lightnvr-models:/var/lib/lightnvr/data/models \
   -e TZ=America/New_York \
   ghcr.io/opensensor/lightnvr:latest
 ```
 
 #### Volume Mounts Explained
 
-The container uses two volume mounts for persistence:
+The example uses named volumes for config, database, recordings, and models. Existing bind mounts must be owned by UID:GID `10001:10001`; see the [migration notes](docs/DOCKER.md#security-migration-non-root-runtime-and-private-go2rtc-api) before upgrading. WebRTC uses LightNVR’s authenticated HTTP proxy; MSE requires an authenticated [WebSocket reverse-proxy route](docs/REVERSE_PROXY.md).
+
+Persistent paths:
 
 - **`/etc/lightnvr`** - Configuration files
   - `lightnvr.ini` - Main configuration
@@ -453,7 +458,7 @@ The container uses two volume mounts for persistence:
 - **8080** - Web UI (HTTP)
 - **8554** - RTSP streaming
 - **8555** - WebRTC (TCP/UDP)
-- **1984** - go2rtc API
+- **1984** - internal go2rtc API, bound to loopback; do not publish
 
 #### Environment Variables
 

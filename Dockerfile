@@ -27,7 +27,7 @@ RUN if [ "$TARGETARCH/$TARGETVARIANT" = "arm/v7" ]; then \
       test -n "$GCC_MAJOR" && \
       apt-get install -y --no-install-recommends \
         "libstdc++-${GCC_MAJOR}-dev" \
-        libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+        libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev \
         libcurl4-openssl-dev libmbedtls-dev libcjson-dev \
         libmosquitto-dev libyaml-dev && \
       if [ "$DEB_BUILD" = "true" ]; then \
@@ -104,7 +104,7 @@ RUN if [ "$TARGETARCH/$TARGETVARIANT" = "arm/v7" ]; then \
       rm /tmp/armv7-toolchain-check; \
     else \
       apt-get install -y --no-install-recommends \
-        libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+        libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev \
         libcurl4-openssl-dev libmbedtls-dev libcjson-dev \
         libmosquitto-dev libyaml-dev; \
     fi && \
@@ -276,9 +276,8 @@ RUN mkdir -p /bin /etc/lightnvr/go2rtc && \
     # Create basic configuration file
     echo "# go2rtc configuration file" > /etc/lightnvr/go2rtc/go2rtc.yaml && \
     echo "api:" >> /etc/lightnvr/go2rtc/go2rtc.yaml && \
-    echo "  listen: :1984" >> /etc/lightnvr/go2rtc/go2rtc.yaml && \
+    echo "  listen: 127.0.0.1:1984" >> /etc/lightnvr/go2rtc/go2rtc.yaml && \
     echo "  base_path: /go2rtc" >> /etc/lightnvr/go2rtc/go2rtc.yaml && \
-    echo '  origin: "*"' >> /etc/lightnvr/go2rtc/go2rtc.yaml && \
     echo "" >> /etc/lightnvr/go2rtc/go2rtc.yaml && \
     echo "webrtc:" >> /etc/lightnvr/go2rtc/go2rtc.yaml && \
     echo "  ice_servers:" >> /etc/lightnvr/go2rtc/go2rtc.yaml && \
@@ -357,6 +356,28 @@ RUN file /bin/lightnvr /bin/go2rtc && \
     fi
 
 # Stage 2: Minimal runtime image
+# Build the security codec separately until Debian sid ships its fixed package.
+# This target follows the final target architecture; no compiler enters runtime.
+FROM debian:${DEBIAN_SUITE}-slim AS brotli-security
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake curl ca-certificates
+WORKDIR /brotli-build
+RUN curl -fsSL https://github.com/google/brotli/archive/refs/tags/v1.2.1.tar.gz -o source.tar.gz \
+ && echo '98d35d11a78dc453aebb7d10c3748f3f73ff78c8267c0dc697b8631f67bf7e8f  source.tar.gz' | sha256sum -c - \
+ && tar xzf source.tar.gz \
+ && multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH)" \
+ && cmake -S brotli-1.2.1 -B out -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+      -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR="lib/$multiarch" \
+ && cmake --build out -j2 \
+ && ctest --test-dir out --output-on-failure -j2 \
+ && DESTDIR=/stage cmake --install out \
+ && mkdir -p /package/DEBIAN "/package/usr/lib/$multiarch" \
+ && cp -a /stage/usr/lib/"$multiarch"/libbrotli*.so.* "/package/usr/lib/$multiarch/" \
+ && printf '%s\n' 'Package: libbrotli1' 'Version: 1.2.1-0opensensor1' \
+      "Architecture: $(dpkg --print-architecture)" 'Multi-Arch: same' 'Section: libs' \
+      'Priority: optional' 'Maintainer: OpenSensor Operations' 'Depends: libc6 (>= 2.29)' \
+      'Description: Brotli 1.2.1 security runtime' > /package/DEBIAN/control \
+ && dpkg-deb --build --root-owner-group /package /brotli-security.deb
+
 FROM debian:${DEBIAN_SUITE}-slim AS runtime
 
 ARG DEBIAN_SUITE
@@ -387,6 +408,11 @@ RUN mkdir -p \
     chmod -R 755 /var/lib/lightnvr /var/log/lightnvr /var/run/lightnvr
 
 # Copy binaries from builder
+COPY --from=brotli-security /brotli-security.deb /tmp/brotli-security.deb
+RUN dpkg -i /tmp/brotli-security.deb && ldconfig \
+    && curl --version | grep 'brotli/1.2.1' \
+    && rm /tmp/brotli-security.deb
+
 COPY --from=builder /bin/lightnvr /bin/lightnvr
 COPY --from=builder /bin/lightnvr-ffmpeg-guard /bin/lightnvr-ffmpeg-guard
 COPY --from=builder /bin/go2rtc /bin/go2rtc
@@ -415,12 +441,22 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 COPY docker-start.sh /bin/start.sh
 RUN chmod +x /bin/start.sh
 
+# Run the recorder and its managed go2rtc child without root privileges.
+RUN groupadd --gid 10001 lightnvr && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin lightnvr && \
+    mkdir -p /var/lib/lightnvr/data/recordings /var/lib/lightnvr/data/database \
+      /var/lib/lightnvr/data/models /var/log/lightnvr /var/run/lightnvr && \
+    chmod -R go-w /var/lib/lightnvr /var/log/lightnvr /var/run/lightnvr && \
+    chown -R 10001:10001 /etc/lightnvr /var/lib/lightnvr/data \
+      /var/log/lightnvr /var/run/lightnvr
+
+USER 10001:10001
+
 # Define volumes for persistent data only
 # Note: Do NOT mount /var/lib/lightnvr directly as it will overwrite web assets
-VOLUME ["/etc/lightnvr", "/var/lib/lightnvr/data"]
+VOLUME ["/etc/lightnvr", "/var/lib/lightnvr/data/database", "/var/lib/lightnvr/data/recordings", "/var/lib/lightnvr/data/models"]
 
 # Expose ports
-EXPOSE 8080 8554 8555 8555/udp 1984
+EXPOSE 8080 8554 8555 8555/udp
 
 # Environment variables for configuration
 ENV GO2RTC_CONFIG_PERSIST=true \
