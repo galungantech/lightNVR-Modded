@@ -602,7 +602,15 @@ export function PTZControls({
 
       {/* Presets */}
       {presets.length > 0 && (
-        <div style={{ display: 'flex', gap: '4px', marginTop: '2px', width: '100%' }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'stretch',
+            gap: '4px',
+            marginTop: '2px',
+            width: '100%'
+          }}
+        >
           <select
             aria-label={t('live.goToPreset')}
             value={selectedPreset}
@@ -613,6 +621,7 @@ export function PTZControls({
             }}
             style={{
               flex: 1,
+              minWidth: 0,
               padding: '5px 8px',
               borderRadius: '8px',
               border: '1px solid rgba(255, 255, 255, 0.25)',
@@ -620,17 +629,28 @@ export function PTZControls({
               color: 'white',
               fontSize: '10px',
               cursor: 'pointer',
-              outline: 'none'
+              outline: 'none',
+              boxSizing: 'border-box'
             }}
           >
-            <option value="" style={{ backgroundColor: '#0f172a', color: 'white' }}>{t('live.goToPreset')}</option>
+            <option
+              value=""
+              style={{ backgroundColor: '#0f172a', color: 'white' }}
+            >
+              {t('live.goToPreset')}
+            </option>
+      
             {presets.map(preset => (
-              <option key={preset.token} value={preset.token} style={{ backgroundColor: '#0f172a', color: 'white' }}>
+              <option
+                key={preset.token}
+                value={preset.token}
+                style={{ backgroundColor: '#0f172a', color: 'white' }}
+              >
                 {preset.name || t('live.presetNumber', { token: preset.token })}
               </option>
             ))}
           </select>
-
+      
           {canManage && selectedPreset && (
             <button
               type="button"
@@ -638,8 +658,9 @@ export function PTZControls({
               disabled={saving}
               title={t('common.delete') || 'Hapus Preset'}
               style={{
-                width: '26px',
-                height: '26px',
+                width: '32px',
+                minWidth: '32px',
+                alignSelf: 'stretch',
                 borderRadius: '8px',
                 border: '1px solid rgba(239, 68, 68, 0.5)',
                 backgroundColor: 'rgba(239, 68, 68, 0.4)',
@@ -648,10 +669,20 @@ export function PTZControls({
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                flexShrink: 0
+                flexShrink: 0,
+                padding: '0',
+                boxSizing: 'border-box',
+                opacity: saving ? 0.5 : 1
               }}
             >
-              <svg width="12" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
+              <svg
+                width="12"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="white"
+                strokeWidth="2"
+              >
                 <polyline points="3 6 5 6 21 6"></polyline>
                 <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
               </svg>
@@ -659,7 +690,7 @@ export function PTZControls({
           )}
         </div>
       )}
-
+      
       {canManage && capabilities?.has_presets && (
         showPresetForm ? (
           <form onSubmit={handleSavePreset} style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%', marginTop: '2px' }}>
