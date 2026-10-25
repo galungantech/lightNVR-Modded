@@ -1,6 +1,6 @@
 /**
  * PTZ Controls Component
- * Pan-Tilt-Zoom controls for PTZ-enabled cameras (Ultra-Clear Glassmorphic UI)
+ * Pan-Tilt-Zoom controls for PTZ-enabled cameras
  */
 
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
@@ -54,7 +54,7 @@ const ptzApi = {
 };
 
 /**
- * Direction button component - Transparent Glass style
+ * Direction button component
  */
 function DirectionButton({
   direction,
@@ -151,14 +151,12 @@ export function PTZControls({
   const [confirmSetHome, setConfirmSetHome] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // Default posisi pojok kiri bawah (x: 10, y: 10)
   const DEFAULT_POSITION = { x: 10, y: 10 };
 
   // =========================
   // DRAG STATE & FUNCTIONS
   // =========================
   const panelRef = useRef(null);
-
   const [position, setPosition] = useState(DEFAULT_POSITION);
 
   const dragData = useRef({
@@ -169,7 +167,6 @@ export function PTZControls({
     initialY: 10
   });
 
-  // Mencegah scroll wheel melakukan zoom pada layar utama
   const handleWheel = useCallback((e) => {
     e.stopPropagation();
     if (e.cancelable) {
@@ -196,7 +193,6 @@ export function PTZControls({
     };
   }, []);
 
-  // Reset ke posisi default saat fullscreen berubah
   useEffect(() => {
     const handleFullscreenChange = () => {
       setPosition(DEFAULT_POSITION);
@@ -409,20 +405,20 @@ export function PTZControls({
         pointerEvents: 'auto'
       }}
     >
-      {/* HEADER DRAG */}
+      {/* HEADER DRAG - Teks & Tombol X disatu pill yang sama seperti gambar */}
       <div
         onMouseDown={startDrag}
         onTouchStart={startDrag}
         style={{
           display: 'flex',
-          justify: 'space-between',
           alignItems: 'center',
-          marginBottom: '2px',
+          gap: '8px',
           cursor: 'move',
-          padding: '4px 6px',
-          backgroundColor: 'rgba(0, 0, 0, 0.25)',
+          padding: '6px 10px',
+          backgroundColor: 'rgba(0, 0, 0, 0.3)',
           borderRadius: '8px',
-          border: '1px solid rgba(255, 255, 255, 0.1)'
+          border: '1px solid rgba(255, 255, 255, 0.1)',
+          width: 'fit-content'
         }}
       >
         <span
@@ -446,7 +442,7 @@ export function PTZControls({
               background: 'none',
               border: 'none',
               cursor: 'pointer',
-              padding: '2px',
+              padding: '0',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
@@ -454,12 +450,12 @@ export function PTZControls({
             }}
           >
             <svg
-              width="14"
-              height="14"
+              width="12"
+              height="12"
               viewBox="0 0 24 24"
               fill="none"
               stroke="white"
-              strokeWidth="2"
+              strokeWidth="2.5"
             >
               <line x1="18" y1="6" x2="6" y2="18" />
               <line x1="6" y1="6" x2="18" y2="18" />
@@ -533,14 +529,14 @@ export function PTZControls({
         <div></div>
       </div>
 
-      {/* Zoom controls */}
+      {/* Zoom controls - Posisinya persis seperti gambar */}
       <div
         style={{
           display: 'flex',
-          justify: 'center',
           alignItems: 'center',
           gap: '8px',
-          marginTop: '2px'
+          marginTop: '2px',
+          paddingLeft: '4px'
         }}
       >
         <DirectionButton
@@ -553,7 +549,7 @@ export function PTZControls({
         <span
           style={{
             color: '#ffffff',
-            fontSize: '10px',
+            fontSize: '11px',
             fontWeight: '600',
             textShadow: '0 1px 3px rgba(0,0,0,0.9)'
           }}
