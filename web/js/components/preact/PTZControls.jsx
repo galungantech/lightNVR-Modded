@@ -405,13 +405,12 @@ export function PTZControls({
         pointerEvents: 'auto'
       }}
     >
-      {/* HEADER DRAG - Latar melintang lebar penuh, teks kiri & tombol X kanan */}
+      {/* HEADER DRAG - Kapsul hitam melintang penuh, teks di kiri & tombol X di kanan */}
       <div
         onMouseDown={startDrag}
         onTouchStart={startDrag}
         style={{
           display: 'flex',
-          justify: 'space-between',
           alignItems: 'center',
           cursor: 'move',
           padding: '6px 10px',
@@ -428,7 +427,8 @@ export function PTZControls({
             fontSize: '11px',
             fontWeight: '600',
             letterSpacing: '0.3px',
-            textShadow: '0 1px 3px rgba(0,0,0,0.9)'
+            textShadow: '0 1px 3px rgba(0,0,0,0.9)',
+            marginRight: 'auto'
           }}
         >
           {t('live.ptzControl')}
@@ -447,7 +447,8 @@ export function PTZControls({
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              touchAction: 'manipulation'
+              touchAction: 'manipulation',
+              marginLeft: '8px'
             }}
           >
             <svg
@@ -534,7 +535,7 @@ export function PTZControls({
       <div
         style={{
           display: 'flex',
-          justifyContent: 'center',
+          justify: 'center',
           alignItems: 'center',
           gap: '8px',
           marginTop: '2px',
