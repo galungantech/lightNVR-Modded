@@ -7,7 +7,7 @@ if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.0")
     set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
 endif()
 
-project(LightNVR VERSION 0.44.1 LANGUAGES C CXX)
+project(LightNVR VERSION 0.44.3 LANGUAGES C CXX)
 
 # Set C/C++ standards
 set(CMAKE_C_STANDARD 11)
@@ -461,6 +461,7 @@ set(LIBUV_SERVER_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/web/libuv_api_handlers.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/web/thumbnail_thread.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/web/go2rtc_proxy_thread.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/web/go2rtc_websocket.c"
 )
 
 
