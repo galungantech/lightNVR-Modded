@@ -641,6 +641,8 @@
   "live.ptzMoveFailed": "Falha no movimento",
   "live.ptzHomeFailed": "Falha ao ir para a posição inicial",
   "live.ptzPresetFailed": "Falha no preset",
+  "live.ptzPresetDeleted": "Predefinição eliminada com sucesso",
+  "live.ptzPresetDeleteFailed": "Falha ao eliminar a predefinição",
   "live.goToHomePosition": "Ir para a posição inicial",
   "live.zoom": "Zoom",
   "live.speedLabel": "Velocidade:",
