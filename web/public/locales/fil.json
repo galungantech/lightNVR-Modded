@@ -211,6 +211,8 @@
   "live.ptzMoveFailed": "Hindi maigalaw",
   "live.ptzHomeFailed": "Hindi makabalik sa home position",
   "live.ptzPresetFailed": "Hindi mailapat ang preset",
+  "live.ptzPresetDeleted": "Matagumpay na na-delete ang preset",
+  "live.ptzPresetDeleteFailed": "Hindi na-delete ang preset",
   "live.goToHomePosition": "Pumunta sa Home Position",
   "live.zoom": "Zoom",
   "live.speedLabel": "Bilis:",
