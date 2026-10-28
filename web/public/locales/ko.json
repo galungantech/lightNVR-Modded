@@ -557,6 +557,8 @@
   "live.ptzMoveFailed": "이동 실패",
   "live.ptzHomeFailed": "홈 위치 이동 실패",
   "live.ptzPresetFailed": "프리셋 이동 실패",
+  "live.ptzPresetDeleted": "프리셋이 성공적으로 삭제되었습니다.",
+  "live.ptzPresetDeleteFailed": "프리셋 삭제에 실패했습니다.",
   "live.goToHomePosition": "홈 위치로 이동",
   "live.zoom": "줌",
   "live.speedLabel": "속도:",
