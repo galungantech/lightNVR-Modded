@@ -557,6 +557,8 @@
   "live.ptzMoveFailed": "移動に失敗しました",
   "live.ptzHomeFailed": "ホーム失敗",
   "live.ptzPresetFailed": "プリセットに失敗しました",
+  "live.ptzPresetDeleted": "プリセットが正常に削除されました",
+  "live.ptzPresetDeleteFailed": "プリセットの削除に失敗しました",
   "live.goToHomePosition": "ホームポジションへ移動",
   "live.zoom": "ズーム",
   "live.speedLabel": "スピード：",
