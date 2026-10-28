@@ -641,6 +641,8 @@
   "live.ptzMoveFailed": "Le déplacement a échoué",
   "live.ptzHomeFailed": "Échec de la maison",
   "live.ptzPresetFailed": "Échec du préréglage",
+  "live.ptzPresetDeleted": "Préréglage supprimé avec succès",
+  "live.ptzPresetDeleteFailed": "Échec de la suppression du préréglage",
   "live.goToHomePosition": "Aller à la position d'origine",
   "live.zoom": "Zoom",
   "live.speedLabel": "Vitesse:",
