@@ -641,6 +641,8 @@
   "live.ptzMoveFailed": "Verplaatsen mislukt",
   "live.ptzHomeFailed": "Thuis mislukt",
   "live.ptzPresetFailed": "Voorinstelling mislukt",
+  "live.ptzPresetDeleted": "Preset succesvol verwijderd",
+  "live.ptzPresetDeleteFailed": "Verwijderen van preset mislukt",
   "live.goToHomePosition": "Ga naar thuispositie",
   "live.zoom": "Zoomen",
   "live.speedLabel": "Snelheid:",
