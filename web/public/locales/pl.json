@@ -641,6 +641,8 @@
   "live.ptzMoveFailed": "Przeniesienie nie powiodło się",
   "live.ptzHomeFailed": "Dom nie powiódł się",
   "live.ptzPresetFailed": "Ustawienie wstępne nie powiodło się",
+  "live.ptzPresetDeleted": "Preset został pomyślnie usunięty",
+  "live.ptzPresetDeleteFailed": "Nie udało się usunąć presetów",
   "live.goToHomePosition": "Przejdź do pozycji wyjściowej",
   "live.zoom": "Powiększ",
   "live.speedLabel": "Prędkość:",
