@@ -1,0 +1,48 @@
+name: Create Clean Patch Branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: 'Masukkan nama branch patch'
+        required: true
+        type: string
+        default: 'patch-branch'
+
+permissions:
+  contents: write
+
+jobs:
+  create-patch-branch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Create Empty Branch for Patch
+        run: |
+          # 1. Buat orphan branch (kosong tanpa file & tanpa histori lama)
+          git checkout --orphan ${{ github.event.inputs.branch_name }}
+          
+          # 2. Hapus semua file bawaan yang terbawa saat checkout
+          git rm -rf .
+          
+          # 3. [Opsional] Jika Anda ingin mengambil patch/file tertentu dari main:
+          # Contoh: Mengambil folder/file khusus dari branch main ke branch kosong ini
+          # git checkout origin/main -- path/ke/file-patch.js
+          
+          # 4. Jika benar-benar ingin kosong total dulu:
+          echo "# Patch Branch" > README.md
+          git add README.md
+          git commit -m "chore: initial empty patch branch"
+          
+          # 5. Push ke GitHub
+          git push origin ${{ github.event.inputs.branch_name }}
