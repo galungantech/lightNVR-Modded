@@ -9,7 +9,7 @@
  * Clears client-side auth storage and attempts to remove legacy/non-HttpOnly auth cookies. Note that HttpOnly cookies (e.g., a server-set session cookie) cannot be cleared from client-side code and must be cleared server-side.
  * @param {string} reason - Short description of why authentication failed; used for logging and diagnostics. Defaults to "Session expired".
  */
-function handleAuthenticationFailure(reason = 'Session expired') {
+export function handleAuthenticationFailure(reason = 'Session expired') {
   console.warn(`Authentication failure: ${reason}`);
 
   // Clear all auth-related storage
