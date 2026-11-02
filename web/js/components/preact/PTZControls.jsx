@@ -12,7 +12,7 @@ import {
 } from './ptzActions.js';
 
 /**
- * Direction button component
+ * Direction button component dengan ikon SVG modern & efek visual
  */
 function DirectionButton({
   direction,
@@ -23,38 +23,38 @@ function DirectionButton({
 }) {
   const icons = {
     up: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="white">
-        <path d="M12 5L5 14H19L12 5Z" />
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M18 15l-6-6-6 6" />
       </svg>
     ),
     down: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="white">
-        <path d="M12 19L5 10H19L12 19Z" />
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M6 9l6 6 6-6" />
       </svg>
     ),
     left: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="white">
-        <path d="M5 12L14 5V19L5 12Z" />
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M15 18l-6-6 6-6" />
       </svg>
     ),
     right: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="white">
-        <path d="M19 12L10 5V19L19 12Z" />
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M9 18l6-6-6-6" />
       </svg>
     ),
     'zoom-in': (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
-        <circle cx="11" cy="11" r="7" />
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="11" cy="11" r="8" />
+        <line x1="21" y1="21" x2="16.65" y2="16.65" />
         <line x1="11" y1="8" x2="11" y2="14" />
         <line x1="8" y1="11" x2="14" y2="11" />
-        <line x1="16.5" y1="16.5" x2="21" y2="21" />
       </svg>
     ),
     'zoom-out': (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
-        <circle cx="11" cy="11" r="7" />
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="11" cy="11" r="8" />
+        <line x1="21" y1="21" x2="16.65" y2="16.65" />
         <line x1="8" y1="11" x2="14" y2="11" />
-        <line x1="16.5" y1="16.5" x2="21" y2="21" />
       </svg>
     )
   };
@@ -73,16 +73,18 @@ function DirectionButton({
         width: '32px',
         height: '32px',
         borderRadius: '50%',
-        border: '1px solid rgba(255, 255, 255, 0.25)',
-        backgroundColor: 'rgba(0, 0, 0, 0.35)',
-        color: 'white',
+        border: '1px solid rgba(255, 255, 255, 0.2)',
+        backgroundColor: 'rgba(255, 255, 255, 0.08)',
+        color: '#ffffff',
         cursor: disabled ? 'not-allowed' : 'pointer',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        transition: 'all 0.15s ease',
-        opacity: disabled ? 0.4 : 1,
-        userSelect: 'none'
+        transition: 'all 0.15s ease-in-out',
+        opacity: disabled ? 0.35 : 1,
+        userSelect: 'none',
+        boxShadow: '0 2px 4px rgba(0, 0, 0, 0.2)',
+        backdropFilter: 'blur(4px)'
       }}
     >
       {icons[direction]}
@@ -217,7 +219,7 @@ export function PTZControls({
   }, [clampPosition]);
 
   // =========================
-  // LOAD PRESETS
+  // LOAD PRESETS & CAPABILITIES
   // =========================
   useEffect(() => {
     if (!stream?.name || !stream?.ptz_enabled) return;
@@ -377,14 +379,23 @@ export function PTZControls({
           display: 'flex',
           alignItems: 'center',
           cursor: 'move',
-          padding: '6px 10px',
-          backgroundColor: 'rgba(0, 0, 0, 0.3)',
+          padding: '6px 8px',
+          backgroundColor: 'rgba(0, 0, 0, 0.35)',
           borderRadius: '8px',
-          border: '1px solid rgba(255, 255, 255, 0.1)',
+          border: '1px solid rgba(255, 255, 255, 0.12)',
           width: '100%',
           boxSizing: 'border-box'
         }}
       >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="rgba(255,255,255,0.6)" style={{ marginRight: '6px', flexShrink: 0 }}>
+          <circle cx="9" cy="5" r="1.5" />
+          <circle cx="9" cy="12" r="1.5" />
+          <circle cx="9" cy="19" r="1.5" />
+          <circle cx="15" cy="5" r="1.5" />
+          <circle cx="15" cy="12" r="1.5" />
+          <circle cx="15" cy="19" r="1.5" />
+        </svg>
+
         <span
           style={{
             color: '#ffffff',
@@ -409,22 +420,16 @@ export function PTZControls({
               background: 'none',
               border: 'none',
               cursor: 'pointer',
-              padding: '4px',
+              padding: '2px',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              touchAction: 'manipulation',
-              marginLeft: '8px'
+              marginLeft: '6px',
+              color: 'rgba(255, 255, 255, 0.7)',
+              touchAction: 'manipulation'
             }}
           >
-            <svg
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="white"
-              strokeWidth="2.5"
-            >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <line x1="18" y1="6" x2="6" y2="18" />
               <line x1="6" y1="6" x2="18" y2="18" />
             </svg>
@@ -455,21 +460,25 @@ export function PTZControls({
           type="button"
           onClick={handleHome}
           aria-label={t('live.goToHomePosition')}
+          title={t('live.goToHomePosition')}
           style={{
             width: '32px',
             height: '32px',
             borderRadius: '50%',
-            border: '1px solid rgba(255, 255, 255, 0.25)',
-            backgroundColor: 'rgba(0, 0, 0, 0.35)',
+            border: '1px solid rgba(59, 130, 246, 0.4)',
+            backgroundColor: 'rgba(37, 99, 235, 0.25)',
+            color: '#60a5fa',
             cursor: 'pointer',
             display: 'flex',
             alignItems: 'center',
-            justifyContent: 'center'
+            justifyContent: 'center',
+            transition: 'all 0.15s ease',
+            boxShadow: '0 2px 4px rgba(0, 0, 0, 0.2)'
           }}
-          title={t('live.goToHomePosition')}
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="white">
-            <path d="M12 3L3 10H6V21H10V15H14V21H18V10H21L12 3Z" />
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+            <polyline points="9 22 9 12 15 12 15 22" />
           </svg>
         </button>
 
@@ -722,17 +731,26 @@ export function PTZControls({
             style={{ 
               width: '100%', 
               fontSize: '10px', 
-              padding: '6px 8px', 
+              fontWeight: '500',
+              padding: '6px 10px', 
               borderRadius: '8px', 
-              border: '1px solid rgba(255, 255, 255, 0.25)', 
-              backgroundColor: 'rgba(0, 0, 0, 0.35)', 
+              border: '1px solid rgba(255, 255, 255, 0.15)', 
+              backgroundColor: 'rgba(255, 255, 255, 0.08)', 
               color: 'white', 
               cursor: 'pointer',
               marginTop: '2px',
-              transition: 'background-color 0.15s ease'
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '6px',
+              transition: 'all 0.15s ease'
             }}
           >
-            {t('live.ptzSaveCurrentPosition')}
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            <span>{t('live.ptzSaveCurrentPosition')}</span>
           </button>
         )
       )}
@@ -758,17 +776,26 @@ export function PTZControls({
             style={{ 
               width: '100%', 
               fontSize: '10px', 
-              padding: '6px 8px', 
+              fontWeight: '500',
+              padding: '6px 10px', 
               borderRadius: '8px', 
-              border: '1px solid rgba(255, 255, 255, 0.25)', 
-              backgroundColor: 'rgba(0, 0, 0, 0.35)', 
+              border: '1px solid rgba(255, 255, 255, 0.15)', 
+              backgroundColor: 'rgba(255, 255, 255, 0.08)', 
               color: 'white', 
               cursor: 'pointer',
               marginTop: '2px',
-              transition: 'background-color 0.15s ease'
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '6px',
+              transition: 'all 0.15s ease'
             }}
           >
-            {t('live.ptzSetCurrentPositionHome')}
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+              <circle cx="12" cy="10" r="3" />
+            </svg>
+            <span>{t('live.ptzSetCurrentPositionHome')}</span>
           </button>
         )
       )}
