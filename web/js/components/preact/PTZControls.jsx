@@ -23,27 +23,27 @@ function DirectionButton({
 }) {
   const icons = {
     up: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
         <path d="M18 15l-6-6-6 6" />
       </svg>
     ),
     down: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
         <path d="M6 9l6 6 6-6" />
       </svg>
     ),
     left: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
         <path d="M15 18l-6-6 6-6" />
       </svg>
     ),
     right: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
         <path d="M9 18l6-6-6-6" />
       </svg>
     ),
     'zoom-in': (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <circle cx="11" cy="11" r="8" />
         <line x1="21" y1="21" x2="16.65" y2="16.65" />
         <line x1="11" y1="8" x2="11" y2="14" />
@@ -51,7 +51,7 @@ function DirectionButton({
       </svg>
     ),
     'zoom-out': (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <circle cx="11" cy="11" r="8" />
         <line x1="21" y1="21" x2="16.65" y2="16.65" />
         <line x1="8" y1="11" x2="14" y2="11" />
@@ -71,20 +71,20 @@ function DirectionButton({
       onTouchCancel={onMouseUp}
       disabled={disabled}
       style={{
-        width: '36px',
-        height: '36px',
+        width: '32px',
+        height: '32px',
         borderRadius: '50%',
-        border: '1px solid rgba(255, 255, 255, 0.18)',
+        border: '1px solid rgba(255, 255, 255, 0.2)',
         backgroundColor: 'rgba(255, 255, 255, 0.08)',
         color: '#ffffff',
         cursor: disabled ? 'not-allowed' : 'pointer',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        transition: 'all 0.15s ease',
+        transition: 'all 0.15s ease-in-out',
         opacity: disabled ? 0.35 : 1,
         userSelect: 'none',
-        boxShadow: '0 2px 6px rgba(0, 0, 0, 0.25)',
+        boxShadow: '0 2px 4px rgba(0, 0, 0, 0.2)',
         backdropFilter: 'blur(4px)',
         margin: 'auto'
       }}
@@ -356,19 +356,18 @@ export function PTZControls({
         position: 'absolute',
         left: `${position.x}px`,
         bottom: `${position.y}px`,
-        backgroundColor: 'rgba(15, 23, 42, 0.75)',
-        backdropFilter: 'blur(12px)',
-        WebkitBackdropFilter: 'blur(12px)',
-        borderRadius: '18px',
-        border: '1px solid rgba(255, 255, 255, 0.15)',
-        boxShadow: '0 12px 32px 0 rgba(0, 0, 0, 0.5)',
-        padding: '12px',
+        backgroundColor: 'rgba(0, 0, 0, 0.38)',
+        backdropFilter: 'blur(6px)',
+        WebkitBackdropFilter: 'blur(6px)',
+        borderRadius: '16px',
+        border: '1px solid rgba(255, 255, 255, 0.25)',
+        boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.4)',
+        padding: '10px 12px',
         zIndex: 10,
         display: 'flex',
         flexDirection: 'column',
-        gap: '10px',
-        width: '150px',
-        boxSizing: 'border-box',
+        gap: '8px',
+        minWidth: '140px',
         touchAction: 'none',
         userSelect: 'none',
         pointerEvents: 'auto'
@@ -382,10 +381,10 @@ export function PTZControls({
           display: 'flex',
           alignItems: 'center',
           cursor: 'move',
-          padding: '5px 8px',
-          backgroundColor: 'rgba(255, 255, 255, 0.06)',
+          padding: '6px 8px',
+          backgroundColor: 'rgba(0, 0, 0, 0.35)',
           borderRadius: '8px',
-          border: '1px solid rgba(255, 255, 255, 0.08)',
+          border: '1px solid rgba(255, 255, 255, 0.12)',
           width: '100%',
           boxSizing: 'border-box'
         }}
@@ -427,7 +426,7 @@ export function PTZControls({
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              marginLeft: '4px',
+              marginLeft: '6px',
               color: 'rgba(255, 255, 255, 0.7)',
               touchAction: 'manipulation'
             }}
@@ -440,17 +439,16 @@ export function PTZControls({
         )}
       </div>
 
-      {/* Direction pad (Grid 3x3 Presisi) */}
+      {/* Direction pad (Kembali ke ukuran 32px simetris) */}
       <div 
         dir="ltr" 
         style={{ 
           display: 'grid', 
-          gridTemplateColumns: 'repeat(3, 36px)', 
-          gridTemplateRows: 'repeat(3, 36px)',
-          gap: '6px', 
+          gridTemplateColumns: 'repeat(3, 32px)', 
+          gridTemplateRows: 'repeat(3, 32px)',
+          gap: '4px', 
           justifyContent: 'center',
-          alignItems: 'center',
-          margin: '2px auto'
+          alignItems: 'center'
         }}
       >
         <div></div>
@@ -469,29 +467,29 @@ export function PTZControls({
           onMouseLeave={handleMoveStop}
         />
 
-        {/* HOME BUTTON (Ukuran & Jarak Simetris Dengan D-Pad) */}
+        {/* HOME BUTTON (Simetris 32px x 32px dengan D-Pad) */}
         <button
           type="button"
           onClick={handleHome}
           aria-label={t('live.goToHomePosition')}
           title={t('live.goToHomePosition')}
           style={{
-            width: '36px',
-            height: '36px',
+            width: '32px',
+            height: '32px',
             borderRadius: '50%',
-            border: '1px solid rgba(59, 130, 246, 0.5)',
-            backgroundColor: 'rgba(37, 99, 235, 0.3)',
+            border: '1px solid rgba(59, 130, 246, 0.4)',
+            backgroundColor: 'rgba(37, 99, 235, 0.25)',
             color: '#60a5fa',
             cursor: 'pointer',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
             transition: 'all 0.15s ease',
-            boxShadow: '0 0 8px rgba(37, 99, 235, 0.3)',
+            boxShadow: '0 2px 4px rgba(0, 0, 0, 0.2)',
             margin: 'auto'
           }}
         >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
             <polyline points="9 22 9 12 15 12 15 22" />
           </svg>
@@ -518,12 +516,11 @@ export function PTZControls({
       <div
         style={{
           display: 'flex',
-          justifyContent: 'space-between',
+          justifyContent: 'center',
           alignItems: 'center',
-          gap: '4px',
-          width: '100%',
-          padding: '0 4px',
-          boxSizing: 'border-box'
+          gap: '8px',
+          marginTop: '2px',
+          width: '100%'
         }}
       >
         <DirectionButton
@@ -558,10 +555,11 @@ export function PTZControls({
           display: 'flex',
           alignItems: 'center',
           gap: '6px',
-          padding: '2px 2px'
+          marginTop: '2px',
+          padding: '2px 4px'
         }}
       >
-        <span style={{ color: 'rgba(255, 255, 255, 0.8)', fontSize: '10px', fontWeight: '500' }}>
+        <span style={{ color: '#ffffff', fontSize: '10px', fontWeight: '600', textShadow: '0 1px 3px rgba(0,0,0,0.9)' }}>
           {t('live.speedLabel')}
         </span>
 
@@ -576,7 +574,7 @@ export function PTZControls({
           style={{ flex: 1, height: '4px', accentColor: '#3b82f6', cursor: 'pointer' }}
         />
 
-        <span style={{ color: '#ffffff', fontSize: '10px', width: '24px', textAlign: 'right', fontWeight: '600' }}>
+        <span style={{ color: '#ffffff', fontSize: '10px', width: '26px', textAlign: 'right', fontWeight: '600', textShadow: '0 1px 3px rgba(0,0,0,0.9)' }}>
           {Math.round(speed * 100)}%
         </span>
       </div>
@@ -588,6 +586,7 @@ export function PTZControls({
             display: 'flex',
             alignItems: 'stretch',
             gap: '4px',
+            marginTop: '2px',
             width: '100%'
           }}
         >
@@ -604,8 +603,8 @@ export function PTZControls({
               minWidth: 0,
               padding: '5px 8px',
               borderRadius: '8px',
-              border: '1px solid rgba(255, 255, 255, 0.2)',
-              backgroundColor: 'rgba(0, 0, 0, 0.4)',
+              border: '1px solid rgba(255, 255, 255, 0.25)',
+              backgroundColor: 'rgba(0, 0, 0, 0.35)',
               color: 'white',
               fontSize: '10px',
               cursor: 'pointer',
@@ -638,12 +637,12 @@ export function PTZControls({
               disabled={saving}
               title={t('common.delete') || 'Hapus Preset'}
               style={{
-                width: '30px',
-                minWidth: '30px',
+                width: '32px',
+                minWidth: '32px',
                 alignSelf: 'stretch',
                 borderRadius: '8px',
                 border: '1px solid rgba(239, 68, 68, 0.5)',
-                backgroundColor: 'rgba(239, 68, 68, 0.35)',
+                backgroundColor: 'rgba(239, 68, 68, 0.4)',
                 color: 'white',
                 cursor: saving ? 'not-allowed' : 'pointer',
                 display: 'flex',
@@ -673,9 +672,9 @@ export function PTZControls({
       
       {canManage && capabilities?.has_presets && (
         showPresetForm ? (
-          <form onSubmit={handleSavePreset} style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%' }}>
+          <form onSubmit={handleSavePreset} style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%', marginTop: '2px' }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', width: '100%' }}>
-              <label htmlFor="ptz-preset-name" style={{ color: '#ffffff', fontSize: '10px', fontWeight: '600' }}>
+              <label htmlFor="ptz-preset-name" style={{ color: '#ffffff', fontSize: '10px', fontWeight: '600', textShadow: '0 1px 3px rgba(0,0,0,0.9)' }}>
                 {t('live.ptzPresetName')}
               </label>
               <input
@@ -706,10 +705,10 @@ export function PTZControls({
                 style={{ 
                   flex: 1, 
                   fontSize: '10px', 
-                  padding: '5px 6px', 
+                  padding: '5px 8px', 
                   borderRadius: '8px', 
                   border: '1px solid rgba(59, 130, 246, 0.5)', 
-                  backgroundColor: 'rgba(37, 99, 235, 0.75)', 
+                  backgroundColor: 'rgba(37, 99, 235, 0.7)', 
                   color: 'white', 
                   cursor: saving || !presetName.trim() ? 'not-allowed' : 'pointer',
                   opacity: saving || !presetName.trim() ? 0.5 : 1
@@ -725,10 +724,10 @@ export function PTZControls({
                 style={{ 
                   flex: 1, 
                   fontSize: '10px', 
-                  padding: '5px 6px', 
+                  padding: '5px 8px', 
                   borderRadius: '8px', 
                   border: '1px solid rgba(255, 255, 255, 0.2)', 
-                  backgroundColor: 'rgba(255, 255, 255, 0.12)', 
+                  backgroundColor: 'rgba(255, 255, 255, 0.15)', 
                   color: 'white', 
                   cursor: saving ? 'not-allowed' : 'pointer' 
                 }}
@@ -746,12 +745,13 @@ export function PTZControls({
               width: '100%', 
               fontSize: '10px', 
               fontWeight: '500',
-              padding: '6px 8px', 
+              padding: '6px 10px', 
               borderRadius: '8px', 
               border: '1px solid rgba(255, 255, 255, 0.15)', 
               backgroundColor: 'rgba(255, 255, 255, 0.08)', 
               color: 'white', 
               cursor: 'pointer',
+              marginTop: '2px',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
@@ -790,12 +790,13 @@ export function PTZControls({
               width: '100%', 
               fontSize: '10px', 
               fontWeight: '500',
-              padding: '6px 8px', 
+              padding: '6px 10px', 
               borderRadius: '8px', 
               border: '1px solid rgba(255, 255, 255, 0.15)', 
               backgroundColor: 'rgba(255, 255, 255, 0.08)', 
               color: 'white', 
               cursor: 'pointer',
+              marginTop: '2px',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
