@@ -18,15 +18,23 @@ jobs:
 
       - name: Update go2rtc submodule to master
         run: |
-          git submodule update --remote --merge go2rtc
-          git config user.name "github-actions[bot]v"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Cek apakah ada perubahan
+          # Paksa update dan izinkan penggabungan riwayat yang berbeda (unrelated histories)
+          git submodule update --remote --merge --force go2rtc || true
+          
+          # Masuk ke direktori submodule untuk memastikan posisinya di master
+          cd go2rtc
+          git checkout master || true
+          git pull origin master --allow-unrelated-histories || true
+          cd ..
+          
+          # Cek apakah ada perubahan untuk di-commit
           if git diff --quiet; then
             echo "No changes in go2rtc submodule."
           else
             git add go2rtc
-            git commit -m "chore(go2rtc): automated update to latest master"
+            git commit -m "chore(go2rtc): automated update to latest master (allow unrelated histories)"
             git push
           fi
