@@ -8,53 +8,8 @@ import { useI18n } from '../../i18n.js';
 import { showSuccessToast, showErrorToast } from './ToastContainer.jsx';
 import {
   getPtzCapabilities, getPtzPresets, savePtzPreset, setPtzHome,
-  ptzMove, ptzStop, ptzHome, ptzGotoPreset
+  ptzMove, ptzStop, ptzHome, ptzGotoPreset, deletePtzPreset
 } from './ptzActions.js';
-
-const ptzApi = {
-  async move(streamName, pan, tilt, zoom) {
-    const response = await fetch(`/api/streams/${encodeURIComponent(streamName)}/ptz/move`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pan, tilt, zoom })
-    });
-    if (!response.ok) throw new Error('Failed to move');
-    return response.json();
-  },
-
-  async stop(streamName) {
-    const response = await fetch(`/api/streams/${encodeURIComponent(streamName)}/ptz/stop`, {
-      method: 'POST'
-    });
-    return response.json();
-  },
-
-  async home(streamName) {
-    const response = await fetch(`/api/streams/${encodeURIComponent(streamName)}/ptz/home`, {
-      method: 'POST'
-    });
-    return response.json();
-  },
-
-  async gotoPreset(streamName, token) {
-    const response = await fetch(`/api/streams/${encodeURIComponent(streamName)}/ptz/goto-preset`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token })
-    });
-    return response.json();
-  },
-
-  async deletePreset(streamName, token) {
-    const response = await fetch(`/api/streams/${encodeURIComponent(streamName)}/ptz/delete-preset`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token })
-    });
-    if (!response.ok) throw new Error('Failed to delete preset');
-    return response.json();
-  }
-};
 
 /**
  * Direction button component
@@ -316,7 +271,7 @@ export function PTZControls({
     if (!stream?.name || !selectedPreset || saving) return;
     setSaving(true);
     try {
-      await ptzApi.deletePreset(stream.name, selectedPreset);
+      await deletePtzPreset(stream.name, selectedPreset);
       setPresets(prev => prev.filter(p => p.token !== selectedPreset));
       setSelectedPreset('');
       showSuccessToast(t('live.ptzPresetDeleted') || 'Preset deleted');
@@ -355,7 +310,7 @@ export function PTZControls({
   }, [stream?.name, speed, t]);
 
   const handleMoveStop = useCallback(() => {
-    if (!stream?.name) return;
+    if (!stream?.name || !isMoving) return;
     setIsMoving(false);
     
     ptzStop(stream.name)
@@ -447,8 +402,8 @@ export function PTZControls({
           <button
             type="button"
             onClick={onClose}
-            onMouseDown={(e) => e.stopPropagation()} // Mencegah drag saat diklik di PC
-            onTouchStart={(e) => e.stopPropagation()} // Mencegah drag saat ditekan di HP agar bisa diklik
+            onMouseDown={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
             aria-label={t('common.close')}
             style={{
               background: 'none',
@@ -535,11 +490,11 @@ export function PTZControls({
         <div></div>
       </div>
 
-      {/* Zoom controls - Posisinya dikembalikan ke tengah */}
+      {/* Zoom controls */}
       <div
         style={{
           display: 'flex',
-          justifyContent: 'center', // Ini yang sebelumnya terhapus
+          justifyContent: 'center',
           alignItems: 'center',
           gap: '8px',
           marginTop: '2px',
@@ -641,7 +596,7 @@ export function PTZControls({
             >
               {t('live.goToPreset')}
             </option>
-      
+        
             {presets.map(preset => (
               <option
                 key={preset.token}
@@ -652,7 +607,7 @@ export function PTZControls({
               </option>
             ))}
           </select>
-      
+        
           {canManage && selectedPreset && (
             <button
               type="button"
