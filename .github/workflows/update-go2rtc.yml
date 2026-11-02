@@ -1,0 +1,32 @@
+name: Auto-Update go2rtc Submodule
+
+on:
+  schedule:
+    # Otomatis berjalan setiap hari jam 00:00 UTC (bisa disesuaikan)
+    - cron: '0 0 * * *'
+  workflow_dispatch: # Bisa dijalankan manual lewat tab Actions di GitHub
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update go2rtc submodule to master
+        run: |
+          git submodule update --remote --merge go2rtc
+          git config user.name "github-actions[bot]v"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Cek apakah ada perubahan
+          if git diff --quiet; then
+            echo "No changes in go2rtc submodule."
+          else
+            git add go2rtc
+            git commit -m "chore(go2rtc): automated update to latest master"
+            git push
+          fi
