@@ -1,0 +1,47 @@
+name: Create Empty Branch Automatically
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: 'Masukkan nama branch kosong yang ingin dibuat'
+        required: true
+        type: string
+        default: 'sync-main'
+
+permissions:
+  contents: write
+
+jobs:
+  create-branch:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Checkout repository utama
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      # 2. Setup identitas Git
+      - name: Setup Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # 3. Membuat Orphan Branch (Branch Kosong) dan Push ke GitHub
+      - name: Create Empty Branch
+        run: |
+          # Membuat branch tanpa history commit
+          git checkout --orphan ${{ github.event.inputs.branch_name }}
+          
+          # Membersihkan semua file bawaan
+          git rm -rf .
+          
+          # Membuat file README wajib sebagai penanda awal
+          echo "# Branch Kosong: ${{ github.event.inputs.branch_name }}" > README.md
+          
+          # Commit dan Push ke GitHub
+          git add README.md
+          git commit -m "initial commit branch kosong"
+          git push origin ${{ github.event.inputs.branch_name }}

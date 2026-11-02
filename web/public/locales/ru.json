@@ -557,6 +557,8 @@
   "live.ptzMoveFailed": "Переместить не удалось",
   "live.ptzHomeFailed": "Главная не удалась",
   "live.ptzPresetFailed": "Не удалось выполнить предустановку",
+  "live.ptzPresetDeleted": "Пресет успешно удален",
+  "live.ptzPresetDeleteFailed": "Не удалось удалить пресет",
   "live.goToHomePosition": "Перейти в домашнюю позицию",
   "live.zoom": "Увеличить",
   "live.speedLabel": "Скорость:",

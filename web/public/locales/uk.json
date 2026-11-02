@@ -557,6 +557,8 @@
   "live.ptzMoveFailed": "Не вдалося перемістити",
   "live.ptzHomeFailed": "Помилка помешкання",
   "live.ptzPresetFailed": "Помилка попереднього налаштування",
+  "live.ptzPresetDeleted": "Пресет успішно видалено",
+  "live.ptzPresetDeleteFailed": "Не вдалося видалити пресет",
   "live.goToHomePosition": "Перейти до початкової позиції",
   "live.zoom": "Збільшити",
   "live.speedLabel": "Швидкість:",

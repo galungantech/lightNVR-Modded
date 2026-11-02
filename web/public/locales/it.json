@@ -641,6 +641,8 @@
   "live.ptzMoveFailed": "Spostamento fallito",
   "live.ptzHomeFailed": "La casa è fallita",
   "live.ptzPresetFailed": "La preimpostazione non è riuscita",
+  "live.ptzPresetDeleted": "Preset eliminato con successo",
+  "live.ptzPresetDeleteFailed": "Impossibile eliminare il preset",
   "live.goToHomePosition": "Vai alla posizione iniziale",
   "live.zoom": "Zoom",
   "live.speedLabel": "Velocità:",

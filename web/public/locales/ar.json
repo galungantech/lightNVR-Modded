@@ -557,6 +557,8 @@
   "live.ptzMoveFailed": "فشل التحريك",
   "live.ptzHomeFailed": "فشل الرجوع إلى الموضع الرئيسي",
   "live.ptzPresetFailed": "فشل الإعداد المسبق",
+  "live.ptzPresetDeleted": "تم حذف الإعداد المسبق بنجاح",
+  "live.ptzPresetDeleteFailed": "فشل حذف الإعداد المسبق",
   "live.goToHomePosition": "الانتقال إلى الموضع الرئيسي",
   "live.zoom": "تكبير",
   "live.speedLabel": "السرعة:",

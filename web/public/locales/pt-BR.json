@@ -709,6 +709,8 @@
   "live.ptzMoveFailed": "Falha no movimento",
   "live.ptzHomeFailed": "Falha ao ir para a posição inicial",
   "live.ptzPresetFailed": "Falha no preset",
+  "live.ptzPresetDeleted": "Preset excluído com sucesso",
+  "live.ptzPresetDeleteFailed": "Falha ao excluir o preset",
   "live.goToHomePosition": "Ir para a posição inicial",
   "live.zoom": "Zoom",
   "live.speedLabel": "Velocidade:",

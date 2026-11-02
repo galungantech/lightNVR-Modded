@@ -801,7 +801,6 @@ export function VideoModal({ isOpen, onClose, videoUrl, title, downloadUrl }) {
                 ref={videoRef}
                 className="w-full h-full object-contain"
                 controls
-                controlsList="nofullscreen"
                 key={videoUrl} /* Add key to force re-render when URL changes */
                 onLoadStart={() => console.log('Video load started')}
                 onLoadedData={() => console.log('Video data loaded')}

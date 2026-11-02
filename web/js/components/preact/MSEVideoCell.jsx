@@ -1224,7 +1224,6 @@ export function MSEVideoCell({
             zIndex: 10,
             pointerEvents: 'none'
           }}
-          title={t('live.mseLowLatencyStreaming')}
         >
           MSE
         </div>

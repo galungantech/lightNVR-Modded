@@ -259,6 +259,35 @@ export function StreamsView() {
     }
   }, [streamPage, streamTotalPages]);
 
+// --- GANTI LOGIKA DRAG LAMA DENGAN INI ---
+  const handleDragStart = (e, index) => {
+    e.dataTransfer.setData('text/plain', index);
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault(); // Diperlukan agar drop target bisa menerima elemen
+  };
+
+const handleDrop = (e, targetIndex) => {
+    e.preventDefault();
+    const sourceIndex = parseInt(e.dataTransfer.getData('text/plain'), 10);
+    if (sourceIndex === targetIndex) return;
+
+    const items = Array.from(sortedStreams);
+    const [reorderedItem] = items.splice(sourceIndex, 1);
+    items.splice(targetIndex, 0, reorderedItem);
+
+    // 1. Update kartu di layar secara instan
+    setOrderedStreams(items);
+
+    // 2. Ambil semua susunan nama CCTV yang baru
+    const orderedNames = items.map(stream => stream.name);
+
+    // 3. Kunci dan Simpan langsung di memori browser Anda
+    localStorage.setItem('lightnvr_camera_order', JSON.stringify(orderedNames));
+  };
+  // ----------------------------------------
+  
   // Default stream state
   const [currentStream, setCurrentStream] = useState({
     name: '',

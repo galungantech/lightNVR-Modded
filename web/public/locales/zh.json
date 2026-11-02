@@ -557,6 +557,8 @@
   "live.ptzMoveFailed": "移动失败",
   "live.ptzHomeFailed": "主页失败",
   "live.ptzPresetFailed": "预设失败",
+  "live.ptzPresetDeleted": "预设删除成功",
+  "live.ptzPresetDeleteFailed": "预设删除失败",
   "live.goToHomePosition": "回到起始位置",
   "live.zoom": "飞涨",
   "live.speedLabel": "速度：",

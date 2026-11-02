@@ -557,6 +557,8 @@
   "live.ptzMoveFailed": "Taşıma işlemi başarısız oldu",
   "live.ptzHomeFailed": "Ana sayfa başarısız oldu",
   "live.ptzPresetFailed": "Ön ayar başarısız oldu",
+  "live.ptzPresetDeleted": "Ön ayar başarıyla silindi",
+  "live.ptzPresetDeleteFailed": "Ön ayar silinemedi",
   "live.goToHomePosition": "Ana Konuma Git",
   "live.zoom": "Yakınlaştır",
   "live.speedLabel": "Hız:",
