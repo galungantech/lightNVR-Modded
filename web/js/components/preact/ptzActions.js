@@ -66,3 +66,18 @@ export function ptzHome(streamName) {
 export function ptzGotoPreset(streamName, token) {
   return ptzRequest(streamName, 'goto-preset', postJson({ token }));
 }
+
+export async function deletePtzPreset(streamName, token) {
+  const response = await fetch(`/api/streams/${encodeURIComponent(streamName)}/ptz/delete-preset`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token })
+  });
+  
+  if (!response.ok) {
+    const error = new Error('Failed to delete preset');
+    error.status = response.status;
+    throw error;
+  }
+  return response.json();
+}
