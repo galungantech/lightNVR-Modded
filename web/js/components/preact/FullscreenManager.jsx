@@ -233,7 +233,7 @@ function navigateFullscreenGrid(direction, streamsToShow, cols, rows) {
 /**
  * Returns the stream name of the video cell currently in native fullscreen,
  * or null. Reads `data-stream-name` from `document.fullscreenElement` and
- * updates on every `fullscreenchange`. LiveView/WebRTCView use it to swap
+ * updates on every `fullscreenchange`. LiveView uses it to swap
  * the fullscreened cell off the sub-stream and onto the main stream (#366).
  *
  * @returns {string|null}
@@ -417,7 +417,7 @@ export function FullscreenExitButton({ isFullscreen, onExit }) {
 
   return (
     <button 
-      className="fullscreen-exit fixed top-4 right-4 w-10 h-10 bg-black/70 text-white rounded-full flex justify-center items-center cursor-pointer z-50 transition-all duration-200 hover:bg-black/85 hover:scale-110 shadow-md"
+      className="fullscreen-exit fixed top-4 inset-e-4 w-10 h-10 bg-black/70 text-white rounded-full flex justify-center items-center cursor-pointer z-50 transition-all duration-200 hover:bg-black/85 hover:scale-110 shadow-md"
       onClick={onExit}
     >
       ✕

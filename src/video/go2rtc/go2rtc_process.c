@@ -1,3 +1,10 @@
+/*
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2025-2026 OpenSensor Engineering and LightNVR contributors
+ *
+ * This file is part of LightNVR <https://github.com/opensensor/lightNVR>.
+ */
+
 /**
  * @file go2rtc_process.c
  * @brief Implementation of the go2rtc process management module
@@ -400,6 +407,10 @@ static void remove_owned_config_symlink(void) {
 #define FAST_DEATH_RING_SIZE       8
 
 static time_t g_last_start_time = 0;
+/* Set when lightNVR itself stopped a live managed go2rtc (config apply,
+ * settings change, restart).  The next start consumes it so intentional
+ * restarts are not counted as fast deaths. */
+static bool   g_last_stop_was_managed = false;
 static time_t g_fast_death_history[FAST_DEATH_RING_SIZE];
 static int    g_fast_death_history_idx = 0;
 
@@ -1162,22 +1173,9 @@ static bool go2rtc_process_generate_config_locked(const char *config_path, int a
     fclose(config_file);
     log_info("Generated go2rtc configuration file: %s", config_path);
 
-    // Print the content of the config file at DEBUG level to avoid
-    // leaking credentials from overrides into production logs.
-    FILE *read_file = fopen(config_path, "r");
-    if (read_file) {
-        char line[256];
-        log_debug("Contents of go2rtc config file:");
-        while (fgets(line, sizeof(line), read_file)) {
-            // Remove newline character
-            size_t len = strlen(line);
-            if (len > 0 && line[len-1] == '\n') {
-                line[len-1] = '\0';
-            }
-            log_debug("  %s", line);
-        }
-        fclose(read_file);
-    }
+    // Intentionally do not dump generated config contents to logs.
+    // The YAML may contain sensitive values (e.g., TURN credentials and
+    // per-stream URL credentials), and logging full contents can leak secrets.
 
     return true;
 }
@@ -1200,7 +1198,9 @@ bool go2rtc_process_generate_config(const char *config_path, int api_port) {
  *
  * Extracted from go2rtc_process_generate_config() by the T2 refactor.
  * Preserves the pre-refactor behavior exactly:
- *   - Skip disabled streams and streams with empty go2rtc_source_override.
+ *   - Skip disabled streams, privacy-mode streams, and streams with empty
+ *     go2rtc_source_override. A privacy-mode stream must not be served after
+ *     a go2rtc (re)start; startup sync and the health monitor skip it too.
  *   - Escape stream names for YAML double-quoted key safety.
  *   - Single-line overrides are emitted as an inline scalar.
  *   - Multi-line overrides are emitted as an indented block under the key.
@@ -1226,6 +1226,7 @@ static int write_stream_overrides(FILE *fp) {
 
     for (int i = 0; i < count; i++) {
         if (!streams[i].enabled) continue;
+        if (streams[i].privacy_mode) continue;
         if (!string_has_non_whitespace(streams[i].go2rtc_source_override)) continue;
 
         // Escape stream name for YAML double-quoted key safety
@@ -1274,8 +1275,8 @@ static int write_stream_overrides(FILE *fp) {
  *       - rtmp://.../key
  *
  * go2rtc then pushes the named stream to the RTMP/RTMPS destination (YouTube,
- * Telegram, etc.). Only enabled streams with a non-empty publish_url are
- * included. Writes nothing (not even the `publish:` key) when none are set, to
+ * Telegram, etc.). Only enabled, non-privacy-mode streams with a non-empty
+ * publish_url are included: privacy mode must also stop restreaming. Writes nothing (not even the `publish:` key) when none are set, to
  * avoid an empty mapping. See issue #455.
  *
  * @param fp Open writable FILE *.
@@ -1294,6 +1295,7 @@ static int write_publish_config(FILE *fp) {
 
     for (int i = 0; i < count; i++) {
         if (!streams[i].enabled) continue;
+        if (streams[i].privacy_mode) continue;
         if (streams[i].publish_url[0] == '\0') continue;
 
         // Re-validate: rows written before list validation existed (or edited
@@ -1454,11 +1456,13 @@ static void quarantine_override_file(void)
     char *reason = malloc(sizeof(log_tail) + 512);
     if (reason) {
         snprintf(reason, sizeof(log_tail) + 512,
-                 "go2rtc crashed >= %d times within %ds of start with "
-                 "override.yaml in use. Quarantined to %s.\n\n"
+                 "go2rtc crashed >= %d times (each within %ds of start) "
+                 "within a %ds rolling window with override.yaml in use. "
+                 "Quarantined to %s.\n\n"
                  "Last %zu bytes of go2rtc.log:\n%s",
                  QUARANTINE_FAST_DEATH_COUNT,
                  FAST_DEATH_THRESHOLD_SEC,
+                 QUARANTINE_WINDOW_SEC,
                  g_override_quarantined_path,
                  strlen(log_tail), log_tail);
         if (db_set_system_setting("go2rtc_config_override_disabled_reason",
@@ -1480,6 +1484,12 @@ static void quarantine_override_file(void)
  */
 static void check_and_handle_crash_loop(void)
 {
+    if (g_last_stop_was_managed) {
+        /* Intentional lifecycle restart (e.g., config apply): do not treat as crash. */
+        g_last_stop_was_managed = false;
+        return;
+    }
+
     if (g_last_start_time == 0) return;  /* first start, nothing to compare */
 
     time_t now = time(NULL);
@@ -2645,6 +2655,9 @@ static bool go2rtc_process_stop_locked(void) {
         log_info("Stopping verified managed go2rtc PID %d", pid);
         bool result = true;
         if (managed_process_identity_matches(pid)) {
+            /* A zombie is a crashed child we are only reaping; that is not
+             * an intentional stop and must still count toward T4b. */
+            g_last_stop_was_managed = !is_zombie_process(pid);
             signal_managed_process(pid, SIGTERM);
             if (!wait_for_process_termination(pid, 3000)) {
                 log_warn("Managed go2rtc PID %d did not stop on SIGTERM; sending SIGKILL",
@@ -2654,6 +2667,7 @@ static bool go2rtc_process_stop_locked(void) {
             }
         } else {
             // Reap a dead child, but never signal a reused/unverified PID.
+            g_last_stop_was_managed = false;
             (void)waitpid(pid, NULL, WNOHANG);
         }
         g_process_pid = -1;
@@ -2720,6 +2734,7 @@ static void go2rtc_process_cleanup_locked(void) {
     g_initialized = false;
     /* Reset T4b crash-loop bookkeeping so a fresh init starts clean. */
     g_last_start_time = 0;
+    g_last_stop_was_managed = false;
     memset(g_fast_death_history, 0, sizeof(g_fast_death_history));
     g_fast_death_history_idx = 0;
 

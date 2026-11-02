@@ -6,7 +6,10 @@
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 import { useI18n } from '../../i18n.js';
 import { showSuccessToast, showErrorToast } from './ToastContainer.jsx';
-import { getPtzCapabilities, getPtzPresets, savePtzPreset, setPtzHome } from './ptzActions.js';
+import {
+  getPtzCapabilities, getPtzPresets, savePtzPreset, setPtzHome,
+  ptzMove, ptzStop, ptzHome, ptzGotoPreset
+} from './ptzActions.js';
 
 const ptzApi = {
   async move(streamName, pan, tilt, zoom) {
@@ -342,8 +345,8 @@ export function PTZControls({
     if (!stream?.name) return;
     setIsMoving(true);
     setError(null);
-
-    ptzApi.move(stream.name, pan * speed, tilt * speed, zoom * speed)
+    
+    ptzMove(stream.name, pan * speed, tilt * speed, zoom * speed)
       .catch(err => {
         setIsMoving(false);
         setError(t('live.ptzMoveFailed'));
@@ -354,25 +357,31 @@ export function PTZControls({
   const handleMoveStop = useCallback(() => {
     if (!stream?.name) return;
     setIsMoving(false);
-    ptzApi.stop(stream.name).catch(err => console.error('PTZ stop error:', err));
-  }, [stream?.name]);
+    
+    ptzStop(stream.name)
+      .catch(err => console.error('PTZ stop error:', err));
+  }, [stream?.name, isMoving]);
 
   const handleHome = useCallback(() => {
     if (!stream?.name) return;
     setError(null);
-    ptzApi.home(stream.name).catch(err => {
-      setError(t('live.ptzHomeFailed'));
-      console.error('PTZ home error:', err);
-    });
+    
+    ptzHome(stream.name)
+      .catch(err => {
+        setError(t('live.ptzHomeFailed'));
+        console.error('PTZ home error:', err);
+      });
   }, [stream?.name, t]);
 
   const handlePreset = useCallback((token) => {
     if (!stream?.name) return;
     setError(null);
-    ptzApi.gotoPreset(stream.name, token).catch(err => {
-      setError(t('live.ptzPresetFailed'));
-      console.error('PTZ preset error:', err);
-    });
+    
+    ptzGotoPreset(stream.name, token)
+      .catch(err => {
+        setError(t('live.ptzPresetFailed'));
+        console.error('PTZ preset error:', err);
+      });
   }, [stream?.name, t]);
 
   if (!isVisible || !stream?.ptz_enabled) {
@@ -469,14 +478,7 @@ export function PTZControls({
       </div>
 
       {/* Direction pad */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(3, 32px)',
-          gap: '4px',
-          justifyContent: 'center'
-        }}
-      >
+      <div dir="ltr" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 40px)', gap: '4px', justifyContent: 'center' }}>
         <div></div>
         <DirectionButton
           direction="up"

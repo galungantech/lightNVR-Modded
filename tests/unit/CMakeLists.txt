@@ -20,6 +20,7 @@ macro(add_layer1_test TEST_NAME)
     target_link_libraries(${TEST_NAME} unity_lib)
     set_target_properties(${TEST_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+    lightnvr_ci_test(${TEST_NAME} ${ARGN})
 endmacro()
 
 macro(add_layer2_test TEST_NAME)
@@ -53,8 +54,11 @@ macro(add_layer2_test TEST_NAME)
             ${CMAKE_CURRENT_SOURCE_DIR}/s3_fixture.py $<TARGET_FILE:test_storage_archive>)
         add_test(NAME test_storage_archive_operator COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test_archive_operator.py)
+        lightnvr_ci_test(${TEST_NAME} ${ARGN}
+            TESTS test_storage_archive_s3 test_storage_archive_operator)
     else()
         add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+        lightnvr_ci_test(${TEST_NAME} ${ARGN})
     endif()
 endmacro()
 
@@ -65,14 +69,14 @@ target_sources(test_hls_cache_cleanup PRIVATE
 
 # Variant for Layer 2 tests that require CURL
 macro(add_layer2_test_with_curl TEST_NAME)
-    add_layer2_test(${TEST_NAME})
+    add_layer2_test(${TEST_NAME} ${ARGN})
     target_link_libraries(${TEST_NAME} ${CURL_LIBRARIES})
 endmacro()
 
 # Convenience wrappers for Layer 2 tests with common external deps.
 
 macro(add_layer2_test_with_ffmpeg TEST_NAME)
-    add_layer2_test(${TEST_NAME})
+    add_layer2_test(${TEST_NAME} ${ARGN})
     target_link_libraries(${TEST_NAME} ${FFMPEG_LIBRARIES})
 endmacro()
 
@@ -108,6 +112,7 @@ macro(add_layer3_test TEST_NAME)
     endif()
     set_target_properties(${TEST_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+    lightnvr_ci_test(${TEST_NAME} ${ARGN})
 endmacro()
 
 # ====================================================================
@@ -116,40 +121,46 @@ endmacro()
 # disk_pressure_level_str() and evaluate_disk_pressure_level() are
 # both static inline in storage_manager.h, so no .c files are linked.
 # ====================================================================
-add_layer1_test(test_storage_pressure)
+add_layer1_test(test_storage_pressure CI_UNIT CI_SANITIZER)
 
 # ====================================================================
 # Layer 2: test_storage_retention_sqlite
 # Integration test — runs real SQL queries via db_core / db_recordings.
 # ====================================================================
-add_layer2_test(test_storage_retention_sqlite)
+add_layer2_test(test_storage_retention_sqlite CI_UNIT CI_SANITIZER)
 
 # ====================================================================
 # Layer 1: Pure logic tests — unity_lib + project headers only
 # (Only tests whose functions are static inline in headers)
 # ====================================================================
-add_layer1_test(test_storage_pressure_extended)
-add_layer1_test(test_detection_result_structures)
-add_layer1_test(test_stream_frame_rate)
+add_layer1_test(test_storage_pressure_extended CI_UNIT CI_SANITIZER)
+add_layer1_test(test_signal_safe CI_UNIT CI_SANITIZER)
+target_link_options(test_signal_safe PRIVATE "-Wl,--wrap=write")
+add_layer1_test(test_detection_result_structures CI_UNIT CI_SANITIZER)
+add_layer1_test(test_stream_frame_rate CI_UNIT CI_SANITIZER)
 target_sources(test_stream_frame_rate PRIVATE
     ${CMAKE_SOURCE_DIR}/src/video/stream_frame_rate.c)
 
 # ====================================================================
 # Layer 2: lightnvr_lib tests — compiled functions + optional SQLite
 # ====================================================================
-add_layer2_test(test_config)
+add_layer2_test(test_config CI_UNIT CI_SANITIZER)
 add_layer2_test(test_db_core_initialization)
-add_layer2_test(test_logger)
-add_layer2_test(test_strings)
+add_layer2_test(test_sqlite_migration_boundaries CI_UNIT CI_SANITIZER)
+set_tests_properties(test_sqlite_migration_boundaries PROPERTIES TIMEOUT 20)
+add_layer2_test(test_logger CI_UNIT CI_SANITIZER)
+add_layer2_test(test_strings CI_UNIT CI_SANITIZER)
 add_layer2_test(test_interruptible_sleep)
 add_layer2_test(test_stream_metrics)
-add_layer2_test(test_memory)
+add_layer2_test(test_memory CI_UNIT CI_SANITIZER)
 add_layer2_test(test_path_utils)
-add_layer2_test(test_request_response)
-add_layer2_test(test_shutdown_coordinator)
+add_layer2_test(test_request_response CI_UNIT CI_SANITIZER)
+add_layer2_test(test_shutdown_coordinator CI_UNIT CI_SANITIZER)
+target_link_options(test_shutdown_coordinator PRIVATE -Wl,--wrap=pthread_cond_timedwait)
+set_tests_properties(test_shutdown_coordinator PROPERTIES TIMEOUT 15)
 add_layer2_test(test_go2rtc_lifecycle)
-add_layer2_test(test_detection_config)
-add_layer2_test_with_curl(test_detection_model_motion)
+add_layer2_test(test_detection_config CI_UNIT CI_SANITIZER)
+add_layer2_test_with_curl(test_detection_model_motion CI_UNIT CI_SANITIZER)
 add_layer2_test_with_curl(test_detection_system_onvif)
 add_layer3_test(test_onvif_poll_recovery)
 target_link_options(test_onvif_poll_recovery PRIVATE
@@ -161,7 +172,7 @@ target_compile_definitions(test_onvif_lpr_event PRIVATE
     TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )
 add_layer2_test_with_ffmpeg(test_api_detection)
-add_layer2_test_with_ffmpeg(test_mp4_failed_open_memory)
+add_layer2_test_with_ffmpeg(test_mp4_failed_open_memory CI_UNIT)
 add_layer2_test_with_ffmpeg(test_ffmpeg_rgb24_padding)
 if(TARGET lightnvr-ffmpeg-guard)
     add_executable(test_ffmpeg_guard_probe ffmpeg_guard_probe.c)
@@ -180,8 +191,8 @@ if(TARGET lightnvr-ffmpeg-guard)
         "$<TARGET_FILE:lightnvr-ffmpeg-guard>"
         "$<TARGET_FILE:test_ffmpeg_guard_probe>")
 endif()
-add_layer2_test_with_curl(test_url_utils)
-add_layer2_test(test_db_streams)
+add_layer2_test_with_curl(test_url_utils CI_UNIT)
+add_layer2_test(test_db_streams CI_UNIT CI_SANITIZER)
 add_layer2_test(test_db_detection_engines)
 add_layer2_test(test_db_lpr_reads)
 add_layer2_test(test_api_handlers_lpr)
@@ -196,19 +207,39 @@ add_layer2_test(test_api_handlers_fleet)
 add_layer2_test(test_api_handlers_workspaces)
 add_layer2_test(test_db_live_saved_layouts)
 add_layer2_test(test_api_handlers_live_layouts)
-add_layer2_test(test_db_camera_favorites)
-add_layer2_test(test_api_handlers_camera_favorites)
+add_layer2_test(test_db_camera_favorites CI_UNIT)
+add_layer2_test(test_api_handlers_camera_favorites CI_UNIT)
 add_layer2_test(test_db_operator_floor_plans)
 add_layer2_test(test_api_handlers_operator_floor_plans)
+add_layer2_test(test_floor_plan_background_publication CI_UNIT CI_SANITIZER)
+target_link_options(test_floor_plan_background_publication PRIVATE -Wl,--wrap=mkstemp -Wl,--wrap=openat -Wl,--wrap=fstat -Wl,--wrap=syscall -Wl,--wrap=mkdtemp -Wl,--wrap=access -Wl,--wrap=rename -Wl,--wrap=db_operator_floor_plan_set_background)
+set_tests_properties(test_floor_plan_background_publication PROPERTIES TIMEOUT 30)
+add_layer3_test(test_delete_stream_launch_failure CI_UNIT CI_SANITIZER)
+target_link_options(test_delete_stream_launch_failure PRIVATE
+    "-Wl,--wrap=pthread_create" "-Wl,--wrap=free")
+set_tests_properties(test_delete_stream_launch_failure PROPERTIES TIMEOUT 15)
+add_layer3_test(test_put_stream_launch_failure CI_UNIT CI_SANITIZER)
+target_link_options(test_put_stream_launch_failure PRIVATE
+    "-Wl,--wrap=pthread_create" "-Wl,--wrap=free"
+    "-Wl,--wrap=go2rtc_stream_is_ready"
+    "-Wl,--wrap=go2rtc_integration_unregister_stream"
+    "-Wl,--wrap=go2rtc_integration_reload_stream"
+    "-Wl,--wrap=go2rtc_api_remove_stream"
+    "-Wl,--wrap=go2rtc_stream_register_substream"
+    "-Wl,--wrap=go2rtc_integration_restart_process")
+set_tests_properties(test_put_stream_launch_failure PROPERTIES TIMEOUT 15)
 add_layer2_test(test_api_handlers_investigations)
+# Counts SQLite VM steps to keep investigation search bounded by its window.
+target_link_options(test_api_handlers_investigations PRIVATE
+    "-Wl,--wrap=sqlite3_finalize")
 add_layer2_test(test_db_investigation_bookmarks)
 add_layer2_test(test_api_handlers_investigation_bookmarks)
 add_layer2_test(test_db_camera_collections)
 add_layer2_test(test_api_handlers_camera_collections)
-add_layer2_test(test_db_recordings_extended)
+add_layer2_test(test_db_recordings_extended CI_UNIT CI_SANITIZER)
 add_layer2_test(test_api_handlers_recordings_list)
 add_layer2_test(test_recording_transcode)
-add_layer2_test(test_api_handlers_recordings_playback)
+add_layer2_test(test_api_handlers_recordings_playback CI_UNIT)
 target_link_options(test_api_handlers_recordings_playback PRIVATE
     "-Wl,--wrap=storage_source_resolve"
     "-Wl,--wrap=storage_source_remote"
@@ -218,22 +249,25 @@ target_link_options(test_api_handlers_recordings_playback PRIVATE
     "-Wl,--wrap=request_recording_transcode_cache"
     "-Wl,--wrap=http_serve_file"
 )
-add_layer2_test(test_storage_manager_retention)
-add_layer2_test(test_storage_target_pressure_cleanup)
-add_layer2_test(test_storage_migration)
+add_layer2_test(test_storage_manager_retention CI_UNIT)
+add_layer2_test(test_storage_target_pressure_cleanup CI_UNIT)
+add_layer2_test(test_storage_migration CI_UNIT)
+add_layer2_test(test_storage_migration_publication CI_UNIT CI_SANITIZER)
+target_link_options(test_storage_migration_publication PRIVATE -Wl,--wrap=lstat -Wl,--wrap=syscall -Wl,--wrap=unlink -Wl,--wrap=db_storage_migration_update_progress -Wl,--wrap=db_storage_migration_commit_location)
+set_tests_properties(test_storage_migration_publication PROPERTIES TIMEOUT 30)
 add_layer2_test(test_storage_deletion_ledger)   # Layer 2: deletion ledger scoping, pruning, indexes
 if(ENABLE_S3_ARCHIVE)
-    add_layer2_test(test_storage_archive)
+    add_layer2_test(test_storage_archive CI_UNIT)
     target_link_options(test_storage_archive PRIVATE "-Wl,--wrap=uv_timer_start"
         "-Wl,--wrap=db_open_readonly_connection")
 endif()
-add_layer2_test(test_db_detections)
-add_layer2_test(test_db_zones)
-add_layer2_test(test_db_events)
-add_layer2_test(test_db_auth)
-add_layer2_test(test_authorization)
-add_layer2_test(test_audit_log)
-add_layer2_test(test_audit_summary)
+add_layer2_test(test_db_detections CI_UNIT CI_SANITIZER)
+add_layer2_test(test_db_zones CI_UNIT CI_SANITIZER)
+add_layer2_test(test_db_events CI_UNIT CI_SANITIZER)
+add_layer2_test(test_db_auth CI_UNIT CI_SANITIZER)
+add_layer2_test(test_authorization CI_UNIT)
+add_layer2_test(test_audit_log CI_SANITIZER)
+add_layer2_test(test_audit_summary CI_SANITIZER)
 add_layer2_test(test_event_envelope)
 add_layer2_test(test_event_bus)
 add_layer2_test(test_event_detection_adapter)
@@ -245,20 +279,32 @@ add_layer2_test(test_api_handlers_event_routes)
 add_layer2_test(test_event_router)
 add_layer2_test(test_db_event_destinations)
 add_layer2_test(test_api_handlers_event_destinations)
-add_layer2_test(test_db_storage_targets)
-add_layer2_test(test_db_storage_policies)
-add_layer2_test(test_api_handlers_storage_targets)
-add_layer2_test(test_api_handlers_storage_policies)
-add_layer2_test(test_db_transactions)
-add_layer2_test(test_db_maintenance)
-add_layer2_test(test_db_query_builder)
+add_layer2_test(test_db_storage_targets CI_UNIT)
+add_layer2_test(test_db_storage_policies CI_UNIT)
+add_layer2_test(test_api_handlers_storage_targets CI_UNIT)
+add_layer2_test(test_api_handlers_storage_policies CI_UNIT)
+add_layer2_test(test_db_transactions CI_UNIT CI_SANITIZER)
+add_layer2_test(test_db_maintenance CI_UNIT CI_SANITIZER)
+add_layer2_test(test_db_backup_cleanup CI_UNIT CI_SANITIZER)
+target_link_options(test_db_backup_cleanup PRIVATE -Wl,--wrap=lstat -Wl,--wrap=fstatat
+    -Wl,--wrap=openat -Wl,--wrap=close -Wl,--wrap=fstat -Wl,--wrap=mkdirat
+    -Wl,--wrap=syscall -Wl,--wrap=unlinkat
+    -Wl,--wrap=readdir -Wl,--wrap=lightnvr_uuid_generate_v4)
+set_tests_properties(test_db_backup_cleanup PROPERTIES TIMEOUT 30)
+add_layer3_test(test_db_backup_retention_identity CI_UNIT CI_SANITIZER)
+target_link_options(test_db_backup_retention_identity PRIVATE -Wl,--wrap=stat -Wl,--wrap=fstat
+    -Wl,--wrap=openat -Wl,--wrap=close -Wl,--wrap=opendir -Wl,--wrap=closedir
+    -Wl,--wrap=readdir -Wl,--wrap=realloc -Wl,--wrap=strdup
+    -Wl,--wrap=syscall -Wl,--wrap=unlinkat)
+set_tests_properties(test_db_backup_retention_identity PROPERTIES TIMEOUT 30)
+add_layer2_test(test_db_query_builder CI_UNIT CI_SANITIZER)
 add_layer2_test(test_db_system_settings)
-add_layer2_test(test_logger_json)
-add_layer2_test(test_batch_delete_progress)
-add_layer2_test(test_db_recordings_sync)
-add_layer2_test(test_httpd_utils)
-add_layer2_test(test_zone_filter)
-add_layer2_test(test_onvif_soap_fault)
+add_layer2_test(test_logger_json CI_UNIT CI_SANITIZER)
+add_layer2_test(test_batch_delete_progress CI_UNIT CI_SANITIZER)
+add_layer2_test(test_db_recordings_sync CI_UNIT CI_SANITIZER)
+add_layer2_test(test_httpd_utils CI_UNIT CI_SANITIZER)
+add_layer2_test(test_zone_filter CI_UNIT CI_SANITIZER)
+add_layer2_test(test_onvif_soap_fault CI_UNIT)
 add_layer2_test(test_onvif_discovery_response)
 add_layer2_test(test_go2rtc_base_path)
 add_layer2_test(test_yaml_validate)
@@ -340,26 +386,34 @@ endif()
 # ====================================================================
 # Layer 3: Integration tests — lightnvr_lib + FFmpeg
 # ====================================================================
-add_layer3_test(test_faac_encoder)
-add_layer3_test(test_audio_transcoder)
-add_layer3_test(test_mp4_forced_reconnect)
+add_layer3_test(test_faac_encoder CI_UNIT CI_SANITIZER)
+add_layer3_test(test_audio_transcoder CI_UNIT CI_SANITIZER)
+add_layer3_test(test_mp4_forced_reconnect CI_UNIT)
 target_link_options(test_mp4_forced_reconnect PRIVATE
     "-Wl,--wrap=record_segment" "-Wl,--wrap=av_usleep"
     "-Wl,--wrap=get_stream_config_by_name" "-Wl,--wrap=storage_should_pause_recording"
     "-Wl,--wrap=prepare_placed_mp4_recording_path")
-add_layer3_test(test_mp4_recovery_watchdog)
+add_layer3_test(test_mp4_recovery_watchdog CI_UNIT)
 target_link_options(test_mp4_recovery_watchdog PRIVATE
     "-Wl,--wrap=sleep" "-Wl,--wrap=mp4_writer_start_recording_thread"
     "-Wl,--wrap=mp4_writer_stop_recording_thread" "-Wl,--wrap=mp4_writer_is_recording"
     "-Wl,--wrap=go2rtc_integration_is_using_go2rtc_for_recording" "-Wl,--wrap=_log_message_ctx")
 set_tests_properties(test_mp4_forced_reconnect test_mp4_recovery_watchdog PROPERTIES TIMEOUT 10)
-add_layer3_test(test_mp4_audio_recovery)
+add_layer3_test(test_mp4_audio_recovery CI_UNIT)
 target_link_options(test_mp4_audio_recovery PRIVATE
     "-Wl,--wrap=av_read_frame" "-Wl,--wrap=cleanup_audio_transcoder")
-add_layer3_test(test_stream_manager)
-add_layer3_test(test_stream_state)
-add_layer3_test(test_packet_buffer)
-add_layer3_test(test_hls_cleanup)
+add_layer3_test(test_stream_manager CI_UNIT CI_SANITIZER)
+add_layer3_test(test_stream_state CI_UNIT CI_SANITIZER)
+add_layer3_test(test_stream_state_disposal CI_UNIT CI_SANITIZER)
+target_link_options(test_stream_state_disposal PRIVATE
+    "-Wl,--wrap=pthread_mutex_destroy"
+    "-Wl,--wrap=stream_stop_hls"
+    "-Wl,--wrap=stop_mp4_recording"
+    "-Wl,--wrap=reset_timestamp_tracker"
+    "-Wl,--wrap=remove_timestamp_tracker")
+set_tests_properties(test_stream_state_disposal PROPERTIES TIMEOUT 15)
+add_layer3_test(test_packet_buffer CI_UNIT CI_SANITIZER)
+add_layer3_test(test_hls_cleanup CI_UNIT)
 target_compile_definitions(test_hls_cleanup PRIVATE
     TEST_RECORDING_PATH="${CMAKE_SOURCE_DIR}/tests/integration/fixtures/recording.mp4"
 )
@@ -372,33 +426,33 @@ target_link_options(test_hls_reconnect_backoff PRIVATE "-Wl,--wrap=av_usleep")
 set_tests_properties(test_hls_reconnect_backoff PROPERTIES TIMEOUT 10)
 add_layer3_test(test_mp4_writer_watchdog)
 add_layer3_test(test_mp4_segment_timestamps)
-add_layer3_test(test_mp4_segment_boundaries)
-add_layer3_test(test_recording_video_params)
+add_layer3_test(test_mp4_segment_boundaries CI_UNIT CI_SANITIZER)
+add_layer3_test(test_recording_video_params CI_UNIT CI_SANITIZER)
 target_link_options(test_recording_video_params PRIVATE
     "-Wl,--wrap=update_stream_video_params")
 add_layer3_test(test_mp4_faststart)
 target_compile_definitions(test_mp4_faststart PRIVATE
     RECORDING_FIXTURE="${CMAKE_SOURCE_DIR}/tests/integration/fixtures/recording.mp4")
-add_layer3_test(test_audio_voice_enhancement)
+add_layer3_test(test_audio_voice_enhancement CI_UNIT CI_SANITIZER)
 if(ENABLE_AUDIO_FILTERS)
     # Fault injection for the voice-enhancement graph (issue #652).
-    add_layer3_test(test_audio_voice_filter_faults)
+    add_layer3_test(test_audio_voice_filter_faults CI_UNIT CI_SANITIZER)
     target_link_options(test_audio_voice_filter_faults PRIVATE
         "-Wl,--wrap=avfilter_inout_alloc" "-Wl,--wrap=av_strdup"
         "-Wl,--wrap=avfilter_graph_config" "-Wl,--wrap=av_buffersrc_add_frame_flags"
         "-Wl,--wrap=av_buffersink_get_frame" "-Wl,--wrap=av_audio_fifo_write"
     )
 endif()
-add_layer3_test(test_timestamp_manager)
+add_layer3_test(test_timestamp_manager CI_UNIT CI_SANITIZER)
 add_layer3_test(test_api_handlers_system)
 add_layer3_test(test_api_read_isolation)
 set_tests_properties(test_api_read_isolation PROPERTIES TIMEOUT 15)
 add_layer1_test(test_external_motion_trigger)    # Layer 1: external_motion_trigger state-machine (PR #356)
-add_layer2_test(test_motion_trigger_parse)       # Layer 2: motion trigger body parsing (#466)
-add_layer2_test(test_motion_max_area)            # Layer 2: motion detector max-area sanity cap
+add_layer2_test(test_motion_trigger_parse CI_UNIT)       # Layer 2: motion trigger body parsing (#466)
+add_layer2_test(test_motion_max_area CI_UNIT)            # Layer 2: motion detector max-area sanity cap
 add_layer3_test(test_cross_stream_motion_trigger)
 add_layer3_test(test_annotation_writer_registry)  # Layer 3: continuous-writer probe behind annotation mode (#547)
-add_layer3_test(test_detection_current_frame)
+add_layer3_test(test_detection_current_frame CI_UNIT CI_SANITIZER)
 target_compile_definitions(test_detection_current_frame PRIVATE
     TEST_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/detection"
 )
@@ -409,7 +463,7 @@ target_link_options(test_detection_current_frame PRIVATE
     "-Wl,--wrap=filter_detections_by_stream_objects"
 )
 set_tests_properties(test_detection_current_frame PROPERTIES TIMEOUT 15)
-add_layer3_test(test_detection_io_recovery)
+add_layer3_test(test_detection_io_recovery CI_UNIT CI_SANITIZER)
 target_compile_definitions(test_detection_io_recovery PRIVATE
     TEST_RECORDING_PATH="${CMAKE_SOURCE_DIR}/tests/integration/fixtures/recording.mp4"
 )
@@ -419,7 +473,7 @@ target_link_options(test_detection_io_recovery PRIVATE
     "-Wl,--wrap=_log_message_ctx"
 )
 set_tests_properties(test_detection_io_recovery PROPERTIES TIMEOUT 30)
-add_layer3_test(test_udt_recording)
+add_layer3_test(test_udt_recording CI_UNIT CI_SANITIZER)
 target_compile_definitions(test_udt_recording PRIVATE
     TEST_RECORDING_PATH="${CMAKE_SOURCE_DIR}/tests/integration/fixtures/recording.mp4"
 )

@@ -7,7 +7,7 @@ if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.0")
     set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
 endif()
 
-project(LightNVR VERSION 0.45.1 LANGUAGES C CXX)
+project(LightNVR VERSION 0.46.0 LANGUAGES C CXX)
 
 # Set C/C++ standards
 set(CMAKE_C_STANDARD 11)
@@ -82,7 +82,7 @@ set(GO2RTC_API_PORT 1984 CACHE STRING "Port for go2rtc HTTP API")
 
 # llhttp download configuration. Avoid the LLHTTP_VERSION name because
 # pkg_check_modules(LLHTTP ...) owns that variable when libllhttp is probed.
-set(LLHTTP_DOWNLOAD_REF "release/v9.2.1" CACHE STRING "llhttp tag/ref to download from GitHub")
+set(LLHTTP_DOWNLOAD_REF "release/v9.4.3" CACHE STRING "llhttp tag/ref to download from GitHub")
 
 # SSL/TLS options
 option(ENABLE_SSL "Enable SSL/TLS support" OFF)
@@ -92,6 +92,10 @@ option(USE_WOLFSSL "Use WolfSSL instead of OpenSSL (if SSL is enabled)" OFF)
 # HTTP backend: libuv + llhttp
 set(HTTP_BACKEND "libuv" CACHE STRING "HTTP server backend")
 set_property(CACHE HTTP_BACKEND PROPERTY STRINGS libuv)
+string(TOLOWER "${HTTP_BACKEND}" HTTP_BACKEND)
+if(NOT HTTP_BACKEND STREQUAL "libuv")
+    message(FATAL_ERROR "Unsupported HTTP_BACKEND='${HTTP_BACKEND}'. Only 'libuv' is currently supported.")
+endif()
 
 # Compiler flags for optimization and memory usage.  Do not override the
 # toolchain's optimization level (Buildroot supplies -Os for target builds).
@@ -393,9 +397,34 @@ if(NOT LLHTTP_FOUND)
         "src/http.c"
         "include/llhttp.h"
     )
+    # SHA-256 hashes for LLHTTP_PINNED_REF, in the same order as
+    # LLHTTP_REQUIRED_FILES.  Update both together when bumping llhttp.
+    # If LLHTTP_DOWNLOAD_REF is overridden to a different ref, the hashes
+    # cannot be known here, so downloads proceed unverified with a warning.
+    set(LLHTTP_PINNED_REF "release/v9.4.3")
+    set(LLHTTP_REQUIRED_HASHES
+        "391e7c99912abf3b1c9dd8a9c85fdeaac2663e9fa55b6f3871154d16fef8b892"
+        "0f8590206fe2f264db2825401b5fb856b979ee1363dc88b06f36dc9577afb941"
+        "a1f2b23168f8e9b5bfa464c89027d3ca259fc649ae3d7e72bfff997d1aeb5d72"
+        "5bc82fa51b19aa8bee7d921038393fbfc74e8cc9bae0844c2d82c102fb8cfd68"
+    )
+    if(LLHTTP_DOWNLOAD_REF STREQUAL LLHTTP_PINNED_REF)
+        set(LLHTTP_VERIFY_HASHES TRUE)
+    else()
+        set(LLHTTP_VERIFY_HASHES FALSE)
+    endif()
     set(LLHTTP_BASE_URL "https://raw.githubusercontent.com/nodejs/llhttp/refs/tags/${LLHTTP_DOWNLOAD_REF}")
 
-    foreach(LLHTTP_FILE IN LISTS LLHTTP_REQUIRED_FILES)
+    list(LENGTH LLHTTP_REQUIRED_FILES LLHTTP_REQUIRED_FILES_LEN)
+    math(EXPR LLHTTP_REQUIRED_FILES_LAST "${LLHTTP_REQUIRED_FILES_LEN} - 1")
+    foreach(LLHTTP_INDEX RANGE 0 ${LLHTTP_REQUIRED_FILES_LAST})
+        list(GET LLHTTP_REQUIRED_FILES ${LLHTTP_INDEX} LLHTTP_FILE)
+        if(LLHTTP_VERIFY_HASHES)
+            list(GET LLHTTP_REQUIRED_HASHES ${LLHTTP_INDEX} LLHTTP_EXPECTED_HASH)
+            set(LLHTTP_HASH_ARGS EXPECTED_HASH "SHA256=${LLHTTP_EXPECTED_HASH}")
+        else()
+            set(LLHTTP_HASH_ARGS "")
+        endif()
         set(LLHTTP_LOCAL_PATH "${LLHTTP_DIR}/${LLHTTP_FILE}")
         set(LLHTTP_NEEDS_DOWNLOAD FALSE)
         set(LLHTTP_DOWNLOAD_REASON "not found")
@@ -411,6 +440,9 @@ if(NOT LLHTTP_FOUND)
 
         if(LLHTTP_NEEDS_DOWNLOAD)
             message(STATUS "llhttp ${LLHTTP_FILE} ${LLHTTP_DOWNLOAD_REASON}, downloading from GitHub...")
+            if(NOT LLHTTP_VERIFY_HASHES)
+                message(WARNING "LLHTTP_DOWNLOAD_REF='${LLHTTP_DOWNLOAD_REF}' differs from pinned '${LLHTTP_PINNED_REF}'; downloading ${LLHTTP_FILE} without SHA-256 verification")
+            endif()
             get_filename_component(LLHTTP_LOCAL_DIR "${LLHTTP_LOCAL_PATH}" DIRECTORY)
             file(MAKE_DIRECTORY "${LLHTTP_LOCAL_DIR}")
             file(REMOVE "${LLHTTP_LOCAL_PATH}")
@@ -420,6 +452,7 @@ if(NOT LLHTTP_FOUND)
                 "${LLHTTP_LOCAL_PATH}"
                 SHOW_PROGRESS
                 STATUS LLHTTP_DOWNLOAD_STATUS
+                ${LLHTTP_HASH_ARGS}
             )
             list(GET LLHTTP_DOWNLOAD_STATUS 0 LLHTTP_STATUS_CODE)
             list(GET LLHTTP_DOWNLOAD_STATUS 1 LLHTTP_STATUS_MESSAGE)
@@ -471,40 +504,60 @@ set(INIH_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/external/inih/ini.c")
 add_library(inih_lib STATIC ${INIH_SOURCES})
 target_include_directories(inih_lib INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/external/inih")
 
-# Set up vendored FAAC library
+# Set up vendored FAAC library (libfaac encoder only, HE-AAC v1/SBR, no PS).
+# Mirrors upstream meson: encoder-sbr=true, encoder-ps=false, max-channels=8.
+set(FAAC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac")
 set(FAAC_SOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/bitstream.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/blockswitch.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/channels.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/cpu_compute.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/faac.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/fft.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/filtbank.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/frame.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/huff2.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/huffdata.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/quantize.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/ratecontrol.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/resample.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/sbr.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/sbr_analysis.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/sbr_bitstream.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/sbr_tables.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/stereo.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/tns.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac/util.c"
+    "${FAAC_DIR}/common/fft.c"
+    "${FAAC_DIR}/common/sbr_tables.c"
+    "${FAAC_DIR}/common/sfb_tables.c"
+    "${FAAC_DIR}/libfaac/bitstream.c"
+    "${FAAC_DIR}/libfaac/blockswitch.c"
+    "${FAAC_DIR}/libfaac/channels.c"
+    "${FAAC_DIR}/libfaac/cpu_compute.c"
+    "${FAAC_DIR}/libfaac/faac.c"
+    "${FAAC_DIR}/libfaac/filtbank.c"
+    "${FAAC_DIR}/libfaac/frame.c"
+    "${FAAC_DIR}/libfaac/huff2.c"
+    "${FAAC_DIR}/libfaac/huffdata.c"
+    "${FAAC_DIR}/libfaac/quantize.c"
+    "${FAAC_DIR}/libfaac/ratecontrol.c"
+    "${FAAC_DIR}/libfaac/resample.c"
+    "${FAAC_DIR}/libfaac/sbr.c"
+    "${FAAC_DIR}/libfaac/sbr_analysis.c"
+    "${FAAC_DIR}/libfaac/sbr_bitstream.c"
+    "${FAAC_DIR}/libfaac/sbr_huff_tables.c"
+    "${FAAC_DIR}/libfaac/stereo.c"
+    "${FAAC_DIR}/libfaac/tns.c"
+    "${FAAC_DIR}/libfaac/util.c"
 )
-add_library(faac_lib STATIC ${FAAC_SOURCES})
-target_compile_definitions(faac_lib PRIVATE
-    PACKAGE_VERSION="2.2.0"
+set(FAAC_DEFINITIONS
+    PACKAGE_VERSION="3.0.0"
     PACKAGE="faac"
     MAX_CHANNELS=8
     FAAC_SBR_DECIMATION=1
+    FAAC_ENCODER_SBR=1
+    FAAC_ENCODER_PS=0
+    COMMON_PREFIX=faac_
 )
-target_include_directories(faac_lib PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/include"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac/libfaac"
+include(CheckIncludeFile)
+check_include_file(immintrin.h FAAC_HAVE_IMMINTRIN_H)
+if(FAAC_HAVE_IMMINTRIN_H AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|i[3-6]86|x86)$")
+    list(APPEND FAAC_DEFINITIONS HAVE_SSE2=1)
+    set(FAAC_QUANTIZE_SSE "${FAAC_DIR}/libfaac/quantize_sse.c")
+    list(APPEND FAAC_SOURCES "${FAAC_QUANTIZE_SSE}")
+    if(NOT MSVC)
+        set_source_files_properties("${FAAC_QUANTIZE_SSE}" PROPERTIES COMPILE_OPTIONS "-msse2")
+    endif()
+endif()
+add_library(faac_lib STATIC ${FAAC_SOURCES})
+target_compile_definitions(faac_lib PRIVATE ${FAAC_DEFINITIONS})
+target_include_directories(faac_lib PRIVATE
+    "${FAAC_DIR}"
+    "${FAAC_DIR}/common"
+    "${FAAC_DIR}/libfaac"
 )
+target_include_directories(faac_lib PUBLIC "${FAAC_DIR}/include")
 if(UNIX)
     target_link_libraries(faac_lib PUBLIC m)
 endif()

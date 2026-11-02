@@ -3,7 +3,7 @@
  * Hover over cells to preview the grid size; click to confirm.
  */
 
-import { useState, useEffect, useRef } from 'preact/hooks';
+import { useState, useEffect, useRef, useId } from 'preact/hooks';
 import { useI18n } from '../../i18n.js';
 
 // Hard cap: more than 36 simultaneous HLS/MSE streams will exhaust tab memory.
@@ -34,14 +34,17 @@ export function computeOptimalGrid(n) {
  * @param {number}   props.cols      Current column count
  * @param {number}   props.rows      Current row count
  * @param {Function} props.onSelect  Called with (cols, rows) on cell click
- * @param {number}   [props.maxCells]  Maximum selectable cells (= stream count).
- *                                    Cells whose cols×rows would exceed this are
- *                                    greyed out and unclickable.
+ * @param {number}   [props.maxCells]  Stream count. Only sizes the picker (a
+ *                                    square just large enough to fit it); it
+ *                                    does not disable cells, because a layout
+ *                                    with spare cells (e.g. 3×3 for 5 streams)
+ *                                    is valid. Only MAX_GRID_CELLS is enforced.
  */
 export function GridPicker({ cols, rows, onSelect, maxCells }) {
   const { t } = useI18n();
   const [hover, setHover] = useState({ c: cols, r: rows });
   const [open, setOpen]   = useState(false);
+  const popoverId = useId();
   const containerRef      = useRef(null);
 
   // Scale the picker grid to fit the stream count, always as a square.
@@ -75,6 +78,8 @@ export function GridPicker({ cols, rows, onSelect, maxCells }) {
         onClick={() => setOpen(o => !o)}
         title={t('live.selectGridLayout')}
         aria-label={t('live.gridLayoutAria', { cols, rows })}
+        aria-expanded={open}
+        aria-controls={open ? popoverId : undefined}
       >
         {/* 2×2 grid icon */}
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
@@ -93,8 +98,14 @@ export function GridPicker({ cols, rows, onSelect, maxCells }) {
 
       {/* Popover */}
       {open && (
+        // onMouseLeave only resets the visual size preview; keyboard users get
+        // the same via each cell's onFocus/onBlur, so no interaction is lost.
+        // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
         <div
-          className="absolute right-0 top-full mt-1.5 z-50 bg-card border border-border rounded-lg shadow-xl p-3 select-none"
+          id={popoverId}
+          className="absolute inset-e-0 top-full mt-1.5 z-50 bg-card border border-border rounded-lg shadow-xl p-3 select-none"
+          role="group"
+          aria-label={t('live.selectGridLayout')}
           onMouseLeave={() => setHover({ c: cols, r: rows })}
         >
           <p className="text-xs font-semibold text-center text-foreground mb-2 tabular-nums">
@@ -113,14 +124,19 @@ export function GridPicker({ cols, rows, onSelect, maxCells }) {
                 const overLimit   = cellCount > MAX_GRID_CELLS;
                 const highlighted = !overLimit && r < hover.r && c < hover.c;
                 const isCurrent   = !overLimit && r < rows   && c < cols;
+                const label = overLimit
+                  ? t('live.gridCellExceedsLimit', { cols: c + 1, rows: r + 1, max: MAX_GRID_CELLS })
+                  : `${c + 1}×${r + 1}`;
+                const preview = () => { if (!overLimit) setHover({ c: c + 1, r: r + 1 }); };
                 return (
-                  <div
+                  <button
+                    type="button"
                     key={`${r}-${c}`}
                     style={{ width: '20px', height: '20px' }}
-                    title={overLimit
-                      ? t('live.gridCellExceedsLimit', { cols: c + 1, rows: r + 1, max: MAX_GRID_CELLS })
-                      : `${c + 1}×${r + 1}`}
-                    className={`rounded-sm border transition-colors ${
+                    title={label}
+                    aria-label={label}
+                    disabled={overLimit}
+                    className={`block p-0 rounded-sm border transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary ${
                       overLimit
                         ? 'bg-muted/30 border-border/30 opacity-30 cursor-not-allowed'
                         : highlighted
@@ -129,7 +145,9 @@ export function GridPicker({ cols, rows, onSelect, maxCells }) {
                             ? 'bg-primary/25 border-primary/40 cursor-pointer'
                             : 'bg-muted border-border hover:border-primary/50 hover:bg-muted/80 cursor-pointer'
                     }`}
-                    onMouseEnter={() => { if (!overLimit) setHover({ c: c + 1, r: r + 1 }); }}
+                    onMouseEnter={preview}
+                    onFocus={preview}
+                    onBlur={() => setHover({ c: cols, r: rows })}
                     onClick={() => { if (!overLimit) { onSelect(c + 1, r + 1); setOpen(false); } }}
                   />
                 );

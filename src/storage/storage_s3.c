@@ -1,3 +1,10 @@
+/*
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 OpenSensor Engineering and LightNVR contributors
+ *
+ * This file is part of LightNVR <https://github.com/opensensor/lightNVR>.
+ */
+
 #define _POSIX_C_SOURCE 200809L
 
 #include "storage/storage_s3.h"
@@ -8,6 +15,7 @@
 #include <curl/curl.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <mbedtls/sha256.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -121,10 +129,32 @@ bool storage_s3_validate(const storage_target_t *target, char *error, size_t len
     return message == NULL;
 }
 
+/* The credentials directory must be an absolute, canonical path: no "." or
+ * ".." components, no empty components, no control characters. */
+static bool safe_credentials_directory(const char *directory) {
+    size_t total = directory ? strlen(directory) : 0;
+    if (total < 2 || total >= PATH_MAX || directory[0] != '/') return false;
+    for (const unsigned char *cursor = (const unsigned char *)directory;
+         *cursor; ++cursor) {
+        if (*cursor < 0x20U || *cursor == 0x7fU) return false;
+    }
+    for (const char *component = directory + 1; ; ) {
+        size_t length = strcspn(component, "/");
+        if (length == 0 && component[0] == '/') return false;
+        if ((length == 1 && component[0] == '.') ||
+            (length == 2 && component[0] == '.' && component[1] == '.'))
+            return false;
+        if (!component[length]) break;
+        component += length + 1;
+    }
+    return true;
+}
+
 /* Credentials and operator attestations share the same protected file boundary. */
 static cJSON *private_json_read(const storage_target_t *target, const char *suffix) {
     const char *directory = getenv("LIGHTNVR_ARCHIVE_CREDENTIALS_DIR");
     if (!directory) directory = "/etc/lightnvr/archive-credentials";
+    if (!safe_credentials_directory(directory)) return NULL;
     if (!safe_identifier(target->credential_ref, sizeof(target->credential_ref), false)) return NULL;
     char filename[sizeof(target->credential_ref) + 32];
     snprintf(filename, sizeof(filename), "%s%s", target->credential_ref, suffix);

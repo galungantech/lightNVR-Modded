@@ -25,8 +25,9 @@ import { useVideoZoom } from './useVideoZoom.js';
 import { streamConnectionGate, priorityForStreamStatus, isGateTimeout, isGateAbort } from '../../utils/stream-connection-gate.js';
 import { LiveTileStatus } from './LiveTileStatus.jsx';
 import { PictureInPictureButton } from './PictureInPictureButton.jsx';
+import { getNativeFullscreenElement } from './fullscreenApi.js';
 import {
-  shouldEnterFullscreenFromTap,
+  shouldToggleFullscreenFromTap,
   shouldToggleFullscreenFromDoubleClick,
 } from './useAlwaysFullscreenOnTap.js';
 import { MobileTileContextMenu, useMobileTileGestures } from './MobileTileGestures.jsx';
@@ -752,7 +753,8 @@ export function MSEVideoCell({
       onContextMenu={mobileGestures.onContextMenu}
       onClick={(event) => {
         if (mobileGestures.onClick(event)) return;
-        if (shouldEnterFullscreenFromTap(event, alwaysFullscreenOnTap, zoom.isZoomed)) {
+        if (shouldToggleFullscreenFromTap(event, alwaysFullscreenOnTap, zoom.isZoomed,
+          cellRef.current, getNativeFullscreenElement())) {
           onToggleFullscreen(stream.name, event, cellRef.current);
         }
       }}
@@ -830,7 +832,7 @@ export function MSEVideoCell({
           style={{
             position: 'absolute',
             top: '42px',
-            right: '10px',
+            insetInlineEnd: '10px',
             padding: '4px 8px',
             color: 'white',
             backgroundColor: 'rgba(0, 0, 0, 0.65)',
@@ -851,7 +853,7 @@ export function MSEVideoCell({
           style={{
             position: 'absolute',
             top: '8px',
-            left: '8px',
+            insetInlineStart: '8px',
             backgroundColor: 'rgba(0, 0, 0, 0.7)',
             color: 'white',
             padding: '4px 8px',
@@ -978,7 +980,7 @@ export function MSEVideoCell({
           style={{
             position: 'absolute',
             bottom: '8px',
-            right: '8px',
+            insetInlineEnd: '8px',
             display: 'flex',
             gap: '8px',
             zIndex: 10
@@ -1212,7 +1214,7 @@ export function MSEVideoCell({
           style={{
             position: 'absolute',
             top: '8px',
-            right: '8px',
+            insetInlineEnd: '8px',
             backgroundColor: 'rgba(16, 185, 129, 0.8)',
             color: 'white',
             padding: '4px 8px',

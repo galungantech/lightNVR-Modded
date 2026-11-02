@@ -1,8 +1,16 @@
+/*
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 OpenSensor Engineering and LightNVR contributors
+ *
+ * This file is part of LightNVR <https://github.com/opensensor/lightNVR>.
+ */
+
 #include "video/faac_encoder.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 #define LOG_COMPONENT "FAACEncoder"
 #include "core/logger.h"
@@ -13,6 +21,7 @@ struct faac_adapter {
     uint8_t *asc_buf;
     size_t asc_size;
     uint32_t num_channels;
+    uint32_t sample_rate;
 };
 
 faac_adapter_t *faac_adapter_open(const faac_encoder_config_t *config) {
@@ -28,6 +37,7 @@ faac_adapter_t *faac_adapter_open(const faac_encoder_config_t *config) {
     }
 
     adapter->num_channels = config->num_channels;
+    adapter->sample_rate = config->sample_rate;
 
     faac_params params;
     faac_status status = faac_params_init(&params, sizeof(params));
@@ -38,8 +48,8 @@ faac_adapter_t *faac_adapter_open(const faac_encoder_config_t *config) {
     }
 
     params.sample_rate = config->sample_rate;
-    params.num_channels = config->num_channels;
-    params.output_format = FAAC_STREAM_RAW; // Raw AAC for MP4 container
+    params.channels = config->num_channels;
+    params.stream_format = FAAC_STREAM_RAW; // Raw AAC for MP4 container
     params.input_format = FAAC_INPUT_16BIT;
     params.object_type = config->object_type; // FAAC_OBJ_AUTO by default
 
@@ -48,12 +58,20 @@ faac_adapter_t *faac_adapter_open(const faac_encoder_config_t *config) {
     if (br_per_ch == 0) {
         br_per_ch = (config->sample_rate >= 32000) ? 64000 : 32000;
     }
-    params.bit_rate = br_per_ch;
-    params.rate_control = FAAC_RC_AUTO; // ABR when bit_rate is set
+    // FAAC 3 takes a whole-stream bitrate
+    if (br_per_ch > (UINT32_MAX / config->num_channels)) {
+        log_error("faac_adapter_open: requested bitrate overflow (%u per channel x %u channels)",
+                  br_per_ch, config->num_channels);
+        free(adapter);
+        return NULL;
+    }
+    params.bit_rate = br_per_ch * config->num_channels;
+    params.rate_control = FAAC_RC_ABR;
 
     status = faac_encoder_open(&params, &adapter->enc);
     if (status != FAAC_OK || !adapter->enc) {
-        log_error("faac_encoder_open failed: %s", faac_strerror(status));
+        log_error("faac_encoder_open failed: %s",
+                  status != FAAC_OK ? faac_strerror(status) : "NULL encoder handle");
         free(adapter);
         return NULL;
     }
@@ -72,8 +90,14 @@ faac_adapter_t *faac_adapter_open(const faac_encoder_config_t *config) {
     const uint8_t *asc_ptr = NULL;
     uint32_t asc_len = 0;
     status = faac_encoder_asc(adapter->enc, &asc_ptr, &asc_len);
-    if (status != FAAC_OK || !asc_ptr || asc_len == 0) {
+    if (status != FAAC_OK) {
         log_error("faac_encoder_asc failed: %s", faac_strerror(status));
+        faac_encoder_close(&adapter->enc);
+        free(adapter);
+        return NULL;
+    } else if (!asc_ptr || asc_len == 0) {
+        log_error("faac_encoder_asc returned invalid AudioSpecificConfig (ptr=%p, len=%u)",
+                  (const void *)asc_ptr, asc_len);
         faac_encoder_close(&adapter->enc);
         free(adapter);
         return NULL;
@@ -88,8 +112,8 @@ faac_adapter_t *faac_adapter_open(const faac_encoder_config_t *config) {
     memcpy(adapter->asc_buf, asc_ptr, asc_len);
     adapter->asc_size = asc_len;
 
-    log_info("Opened FAAC encoder: %u Hz, %u ch, bitrate %u bps/ch, frame_samples %u, delay %u, obj_type %d",
-             adapter->info.sample_rate, config->num_channels, adapter->info.bit_rate,
+    log_info("Opened FAAC encoder: %u Hz, %u ch, bitrate %u bps, frame_samples %u, delay %u, obj_type %d",
+             adapter->sample_rate, config->num_channels, adapter->info.bit_rate,
              adapter->info.frame_samples, adapter->info.encoder_delay, (int)adapter->info.object_type);
 
     return adapter;
@@ -113,7 +137,7 @@ uint32_t faac_adapter_get_max_output_bytes(faac_adapter_t *adapter) {
 }
 
 uint32_t faac_adapter_get_sample_rate(faac_adapter_t *adapter) {
-    return adapter ? adapter->info.sample_rate : 0;
+    return adapter ? adapter->sample_rate : 0;
 }
 
 enum faac_object_type faac_adapter_get_object_type(faac_adapter_t *adapter) {

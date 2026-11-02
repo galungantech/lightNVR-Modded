@@ -31,8 +31,9 @@ import {
 import { shouldFallbackFullscreenToSubStream } from './liveStreamPolicy.js';
 import { LiveTileStatus } from './LiveTileStatus.jsx';
 import { PictureInPictureButton } from './PictureInPictureButton.jsx';
+import { getNativeFullscreenElement } from './fullscreenApi.js';
 import {
-  shouldEnterFullscreenFromTap,
+  shouldToggleFullscreenFromTap,
   shouldToggleFullscreenFromDoubleClick,
 } from './useAlwaysFullscreenOnTap.js';
 import { MobileTileContextMenu, useMobileTileGestures } from './MobileTileGestures.jsx';
@@ -316,8 +317,9 @@ export function WebRTCVideoCell({
 
     // Cell-scoped abort: cancels queued/in-flight gated requests on unmount
     // or when this effect re-runs (retry, sub-stream switch).
-    abortControllerRef.current = new AbortController();
-    const cellAbortSignal = abortControllerRef.current.signal;
+    const cellAbortController = new AbortController();
+    abortControllerRef.current = cellAbortController;
+    const cellAbortSignal = cellAbortController.signal;
 
     // Async function to initialize WebRTC
     const initWebRTC = async () => {
@@ -372,6 +374,37 @@ export function WebRTCVideoCell({
         if (peerConnectionRef.current === pc) peerConnectionRef.current = null;
         return;
       }
+
+      // A failed attempt must release its peer and pending work immediately,
+      // rather than keeping them alive until the next automatic retry.
+      const stopConnectionAttempt = () => {
+        cellAbortController.abort();
+        clearTimeout(connectionTimeout);
+        clearTimeout(videoDataTimeout);
+        // A superseded attempt can reject after the replacement has started.
+        // Never clear the replacement peer's monitoring interval.
+        if (peerConnectionRef.current === pc) {
+          clearInterval(connectionMonitorRef.current);
+          connectionMonitorRef.current = null;
+        }
+        pc.ontrack = null;
+        pc.oniceconnectionstatechange = null;
+        if (pc.signalingState !== 'closed') pc.close();
+        if (peerConnectionRef.current === pc) peerConnectionRef.current = null;
+      };
+
+      // Queue time is not camera startup time. Start the overall deadline only
+      // when this tile gets its first signaling slot; retries share that budget.
+      const startConnectionTimeout = () => {
+        if (connectionTimeout !== null) return;
+        connectionTimeout = setTimeout(() => {
+          if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') return;
+          console.error(`WebRTC connection timeout for stream ${stream.name}, ICE state: ${pc.iceConnectionState}`);
+          setError(t('live.connectionTimeoutCheckNetwork'));
+          setIsLoading(false);
+          stopConnectionAttempt();
+        }, webrtcConnectionTimeoutMs);
+      };
 
       // Set up event handlers
       let videoTransceiver;
@@ -787,17 +820,6 @@ export function WebRTCVideoCell({
     // Connect directly to go2rtc for WebRTC
     // go2rtcBaseUrl is set at the start of initWebRTC from settings
 
-    // Set a timeout for the entire connection process
-    connectionTimeout = setTimeout(() => {
-      if (peerConnectionRef.current &&
-          peerConnectionRef.current.iceConnectionState !== 'connected' &&
-          peerConnectionRef.current.iceConnectionState !== 'completed') {
-        console.error(`WebRTC connection timeout for stream ${stream.name}, ICE state: ${peerConnectionRef.current.iceConnectionState}`);
-        setError(t('live.connectionTimeoutCheckNetwork'));
-        setIsLoading(false);
-      }
-    }, webrtcConnectionTimeoutMs); // Overall connect timeout (configurable via settings)
-
     // Create and send offer
     pc.createOffer()
       .then(offer => {
@@ -846,21 +868,31 @@ export function WebRTCVideoCell({
         const offerGateOpts = {
           priority: priorityForStreamStatus(stream.status),
           signal: cellAbortSignal,
+          // FFmpeg startup may legitimately exceed the shared gate's 10s
+          // default when several high-resolution cameras start together.
+          timeoutMs: webrtcConnectionTimeoutMs,
         };
         const sendOfferWithRetry = async (attempt) => {
-          const response = await streamConnectionGate.run(
-            (signal) => fetch(`${go2rtcBaseUrl}/api/webrtc?src=${encodeURIComponent(effectiveName)}`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/sdp',
-              },
-              body: pc.localDescription.sdp,
-              signal,
-            }),
+          const { response, bodyText } = await streamConnectionGate.run(
+            async (signal) => {
+              signal.throwIfAborted();
+              startConnectionTimeout();
+              const response = await fetch(`${go2rtcBaseUrl}/api/webrtc?src=${encodeURIComponent(effectiveName)}`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/sdp',
+                },
+                body: pc.localDescription.sdp,
+                signal,
+              });
+              // Keep both the slot and cancellation wired through body reading.
+              // fetch() resolves at headers, before the SDP has necessarily arrived.
+              const bodyText = await response.text();
+              return { response, bodyText };
+            },
             offerGateOpts
           );
-
-          const bodyText = await response.text().catch(() => '');
+          cellAbortSignal.throwIfAborted();
 
           if (!response.ok) {
             // Check whether the go2rtc error body indicates the camera source is
@@ -885,6 +917,7 @@ export function WebRTCVideoCell({
         return sendOfferWithRetry(0);
       })
       .then(sdpAnswer => {
+        cellAbortSignal.throwIfAborted();
         console.log(`Received SDP answer from go2rtc for stream ${stream.name}`);
         // Debug: Check if audio is in the SDP answer
         const hasAudio = sdpAnswer.includes('m=audio');
@@ -907,17 +940,15 @@ export function WebRTCVideoCell({
       .catch(error => {
         // Component unmounted or attempt superseded — nothing to report
         if (isGateAbort(error) || cellAbortSignal.aborted) {
-          clearTimeout(connectionTimeout);
-          if (pc.signalingState !== 'closed') pc.close();
-          if (peerConnectionRef.current === pc) peerConnectionRef.current = null;
+          stopConnectionAttempt();
           return;
         }
         console.error(`Error setting up WebRTC for stream ${stream.name}:`, error);
         setError(isGateTimeout(error)
-          ? t('live.cannotConnectToSource')
+          ? t('live.connectionTimeoutCheckNetwork')
           : (error.message || t('live.failedToEstablishWebrtcConnection')));
         setIsLoading(false);
-        clearTimeout(connectionTimeout);
+        stopConnectionAttempt();
       });
 
     // Set up connection quality monitoring
@@ -1041,8 +1072,8 @@ export function WebRTCVideoCell({
       }
 
       // Abort any pending fetch requests
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
+      cellAbortController.abort();
+      if (abortControllerRef.current === cellAbortController) {
         abortControllerRef.current = null;
       }
 
@@ -1417,7 +1448,8 @@ export function WebRTCVideoCell({
       onContextMenu={mobileGestures.onContextMenu}
       onClick={(event) => {
         if (mobileGestures.onClick(event)) return;
-        if (shouldEnterFullscreenFromTap(event, alwaysFullscreenOnTap, zoom.isZoomed)) {
+        if (shouldToggleFullscreenFromTap(event, alwaysFullscreenOnTap, zoom.isZoomed,
+          cellRef.current, getNativeFullscreenElement())) {
           onToggleFullscreen(stream.name, event, cellRef.current);
         }
       }}
@@ -1504,7 +1536,7 @@ export function WebRTCVideoCell({
           style={{
             position: 'absolute',
             bottom: '10px',
-            right: '10px',
+            insetInlineEnd: '10px',
             padding: '4px 8px',
             backgroundColor: 'rgba(0, 0, 0, 0.6)',
             color: 'white',
@@ -1527,7 +1559,7 @@ export function WebRTCVideoCell({
           style={{
             position: 'absolute',
             top: '10px',
-            left: '10px',
+            insetInlineStart: '10px',
             padding: '5px 10px',
             backgroundColor: 'rgba(0, 0, 0, 0.5)',
             color: 'white',
@@ -1594,7 +1626,7 @@ export function WebRTCVideoCell({
         style={{
           position: 'absolute',
           bottom: '10px',
-          right: '10px',
+          insetInlineEnd: '10px',
           display: 'flex',
           gap: '10px',
           zIndex: 5,
@@ -1948,7 +1980,7 @@ export function WebRTCVideoCell({
           style={{
             position: 'absolute',
             bottom: '60px',
-            right: '10px',
+            insetInlineEnd: '10px',
             backgroundColor: 'rgba(239, 68, 68, 0.9)',
             color: 'white',
             padding: '8px 12px',
@@ -2145,7 +2177,7 @@ export function WebRTCVideoCell({
           style={{
             position: 'absolute',
             top: '8px',
-            right: '8px',
+            insetInlineEnd: '8px',
             backgroundColor: 'rgba(16, 185, 129, 0.8)',
             color: 'white',
             padding: '4px 8px',

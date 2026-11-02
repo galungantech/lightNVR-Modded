@@ -1,3 +1,10 @@
+/*
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2025-2026 OpenSensor Engineering and LightNVR contributors
+ *
+ * This file is part of LightNVR <https://github.com/opensensor/lightNVR>.
+ */
+
 #ifndef LIGHTNVR_DB_STREAMS_H
 #define LIGHTNVR_DB_STREAMS_H
 
@@ -31,6 +38,14 @@ uint64_t add_stream_config(const stream_config_t *stream);
  * @return 0 on success, non-zero on failure
  */
 int update_stream_config(const char *name, const stream_config_t *stream);
+
+/**
+ * Set a stream's privacy mode (the only writer of privacy_mode for an
+ * existing stream; update_stream_config() preserves the stored value).
+ *
+ * @return 0 on success, -1 on error or if the stream does not exist
+ */
+int set_stream_privacy_mode(const char *name, bool privacy_mode);
 
 /**
  * Delete a stream configuration from the database (soft delete by disabling)

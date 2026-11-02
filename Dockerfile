@@ -2,9 +2,9 @@
 # Stage 1: Build image
 ARG DEBIAN_SUITE=sid
 ARG SQLITE_YEAR=2026
-ARG SQLITE_AUTOCONF_VERSION=3530400
-ARG LIBUV_VERSION=1.52.1
-ARG LLHTTP_VERSION=9.3.1
+ARG SQLITE_AUTOCONF_VERSION=3540100
+ARG LIBUV_VERSION=1.53.0
+ARG LLHTTP_VERSION=9.4.3
 ARG NODE_MAJOR=24
 ARG DEB_BUILD=false
 
@@ -179,10 +179,10 @@ RUN if [ "$DEB_BUILD" != "true" ]; then \
 # Build upstream llhttp (skipped for .deb builds which use system libllhttp)
 RUN if [ "$DEB_BUILD" != "true" ]; then \
     mkdir -p /tmp/llhttp/include /tmp/llhttp/src /usr/include && \
-    wget -q "https://raw.githubusercontent.com/nodejs/llhttp/release/include/llhttp.h" -O /tmp/llhttp/include/llhttp.h && \
-    wget -q "https://raw.githubusercontent.com/nodejs/llhttp/release/src/llhttp.c" -O /tmp/llhttp/src/llhttp.c && \
-    wget -q "https://raw.githubusercontent.com/nodejs/llhttp/release/src/api.c" -O /tmp/llhttp/src/api.c && \
-    wget -q "https://raw.githubusercontent.com/nodejs/llhttp/release/src/http.c" -O /tmp/llhttp/src/http.c && \
+    wget -q "https://raw.githubusercontent.com/nodejs/llhttp/release/v${LLHTTP_VERSION}/include/llhttp.h" -O /tmp/llhttp/include/llhttp.h && \
+    wget -q "https://raw.githubusercontent.com/nodejs/llhttp/release/v${LLHTTP_VERSION}/src/llhttp.c" -O /tmp/llhttp/src/llhttp.c && \
+    wget -q "https://raw.githubusercontent.com/nodejs/llhttp/release/v${LLHTTP_VERSION}/src/api.c" -O /tmp/llhttp/src/api.c && \
+    wget -q "https://raw.githubusercontent.com/nodejs/llhttp/release/v${LLHTTP_VERSION}/src/http.c" -O /tmp/llhttp/src/http.c && \
     if [ "$TARGETARCH/$TARGETVARIANT" = "arm/v7" ]; then \
       TARGET_CC=arm-linux-gnueabihf-gcc; \
     else \
@@ -215,15 +215,6 @@ RUN if [ "$TARGETARCH/$TARGETVARIANT" = "arm/v7" ] && \
         /usr/lib/pkgconfig/libllhttp.pc \
         /opt/target-sysroot/usr/lib/pkgconfig/; \
     fi
-
-# Fetch external dependencies
-RUN mkdir -p /opt/external && \
-    # ezxml
-    cd /opt/external && \
-    git clone https://github.com/lxfontes/ezxml.git && \
-    # inih
-    cd /opt/external && \
-    git clone https://github.com/benhoyt/inih.git
 
 # LiteRT requires a build-host flatc binary while cross-compiling. Build the
 # exact FlatBuffers revision selected by LiteRT, in a layer that changes only

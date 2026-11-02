@@ -1,3 +1,10 @@
+/*
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2025-2026 OpenSensor Engineering and LightNVR contributors
+ *
+ * This file is part of LightNVR <https://github.com/opensensor/lightNVR>.
+ */
+
 #define _GNU_SOURCE
 #include "core/sentry.h"
 #include <stdio.h>
@@ -27,6 +34,7 @@
 #include "core/logger.h"
 #include "core/daemon.h"
 #include "core/shutdown_coordinator.h"
+#include "core/signal_safe.h"
 #include "core/curl_init.h"
 #include "core/event_bus.h"
 #include "core/event_identity.h"
@@ -101,8 +109,19 @@ void init_recordings_system(void);
 // object an implicit sequentially-consistent atomic store/load.
 _Atomic bool running = true;
 
-// Global flag for restart request (set by API handler)
-volatile bool restart_requested = false;
+// Global flag for restart request. _Atomic for the same reason as `running`:
+// it is written by the HTTP API thread (request_restart(), via
+// POST /api/system/restart) and read by the main thread after the main loop
+// exits. A plain or volatile bool would be a cross-thread data race, and the
+// sequentially-consistent stores guarantee that a thread observing
+// running == false also observes restart_requested == true.
+_Atomic bool restart_requested = false;
+
+// The signal handlers store to these _Atomic bools (and to the background-abort
+// flag). Atomics are only async-signal-safe when lock-free; a lock-based
+// fallback could deadlock if a signal lands while the lock is held.
+_Static_assert(ATOMIC_BOOL_LOCK_FREE == 2,
+               "signal handlers require lock-free atomic bool");
 
 // Store original argc/argv for restart functionality
 static int saved_argc = 0;
@@ -114,31 +133,16 @@ bool daemon_mode = false;
 // Global flag for container mode (detected at startup)
 static bool container_mode = false;
 
-// Declare a global variable to store the web server socket
-int web_server_socket = -1;
-
 // global config
 config_t config;
 
 // Global HTTP server handle
 http_server_handle_t http_server = NULL;
 
-// Function to set the web server socket
-void set_web_server_socket(int socket_fd) {
-    web_server_socket = socket_fd;
-}
-
-// Async-signal-safe write to stderr
-// Note: We cast to void to suppress the unused result warning
-static void signal_safe_write(const char *msg) {
-    if (msg) {
-        (void)write(STDERR_FILENO, msg, strlen(msg));
-    }
-}
-
 // Improved signal handler with phased shutdown approach
 // IMPORTANT: This handler must be async-signal-safe - no mutex operations!
-// Only use: write(), _exit(), alarm(), atomic operations on sig_atomic_t
+// Only use: write(), _exit(), alarm(), volatile sig_atomic_t, and lock-free
+// C11 atomics (ATOMIC_BOOL_LOCK_FREE == 2 is asserted above)
 static void signal_handler(int sig) {
     (void)sig; // Suppress unused parameter warning
 
@@ -153,8 +157,6 @@ static void signal_handler(int sig) {
     // Check if we're already shutting down
     // Use volatile sig_atomic_t to ensure visibility across signal invocations
     static volatile sig_atomic_t shutdown_in_progress = 0;
-    static volatile sig_atomic_t signal_count = 0;
-    signal_count++;
 
     if (shutdown_in_progress) {
         // Second signal during shutdown - force exit immediately
@@ -175,7 +177,7 @@ static void signal_handler(int sig) {
     // The main thread will call initiate_shutdown() after exiting the main loop
 
     // Set the running flag to false to trigger main loop exit
-    // This is safe because running is declared as volatile bool
+    // Safe: running is a lock-free _Atomic bool (see the _Static_assert above)
     running = false;
 
     // Also wake up any long-running background operation (e.g. a scheduled
@@ -186,11 +188,8 @@ static void signal_handler(int sig) {
 
     // The dedicated shutdown watchdog owns the deadline. Process-global
     // alarm timers cannot safely implement independent thread timeouts.
-    // This handler only sets flags and closes the listening socket.
-    if (web_server_socket >= 0) {
-        close(web_server_socket);
-        web_server_socket = -1;
-    }
+    // This handler only sets flags; the HTTP server (libuv) closes its own
+    // listening socket during orderly shutdown on the main thread.
 }
 
 // Alarm signal handler -- MUST ONLY use async-signal-safe functions.
@@ -1212,12 +1211,10 @@ int main(int argc, char *argv[]) {
                         config.streams[i].name, model_path);
             } else if (config.streams[i].detection_model[0] != '/') {
                 // Relative path, use configured models path from INI if it exists
-                if (config.models_path && strlen(config.models_path) > 0) {
-                    snprintf(model_path, sizeof(model_path), "%s/%s", config.models_path, config.streams[i].detection_model);
-                } else {
-                    // Fall back to default path if INI config doesn't exist
-                    snprintf(model_path, MAX_PATH_LENGTH, "/etc/lightnvr/models/%s", config.streams[i].detection_model);
-                }
+                const char *models_dir = config.models_path[0] != '\0'
+                                             ? config.models_path
+                                             : "/etc/lightnvr/models";
+                snprintf(model_path, sizeof(model_path), "%s/%s", models_dir, config.streams[i].detection_model);
 
                 // Check if file exists
                 FILE *model_file = fopen(model_path, "r");
@@ -1229,10 +1226,10 @@ int main(int argc, char *argv[]) {
                     log_error("Detection will not work properly!");
 
                     // Create the models directory if it doesn't exist
-                    if (mkdir_recursive(config.models_path)) {
+                    if (mkdir_recursive(models_dir)) {
                         log_error("Failed to create models directory: %s", strerror(errno));
                     } else {
-                        log_info("Created models directory: %s", config.models_path);
+                        log_info("Created models directory: %s", models_dir);
                     }
                 }
             } else {
@@ -1570,13 +1567,7 @@ cleanup:
                 // Update component state
                 char component_name[128];
                 snprintf(component_name, sizeof(component_name), "detection_thread_%s", config.streams[i].name);
-                int component_id = -1;
-                for (int j = 0; j < atomic_load(&get_shutdown_coordinator()->component_count); j++) {
-                    if (strcmp(get_shutdown_coordinator()->components[j].name, component_name) == 0) {
-                        component_id = j;
-                        break;
-                    }
-                }
+                int component_id = find_component_id_by_name(component_name);
                 if (component_id >= 0) {
                     update_component_state(component_id, COMPONENT_STOPPED);
                 }
@@ -1609,13 +1600,7 @@ cleanup:
             if (config.streams[i].name[0] != '\0' && config.streams[i].record) {
                 char component_name[128];
                 snprintf(component_name, sizeof(component_name), "mp4_writer_%s", config.streams[i].name);
-                int component_id = -1;
-                for (int j = 0; j < atomic_load(&get_shutdown_coordinator()->component_count); j++) {
-                    if (strcmp(get_shutdown_coordinator()->components[j].name, component_name) == 0) {
-                        component_id = j;
-                        break;
-                    }
-                }
+                int component_id = find_component_id_by_name(component_name);
                 if (component_id >= 0) {
                     update_component_state(component_id, COMPONENT_STOPPED);
                 }
@@ -1631,13 +1616,7 @@ cleanup:
             if (config.streams[i].name[0] != '\0') {
                 char component_name[128];
                 snprintf(component_name, sizeof(component_name), "hls_writer_%s", config.streams[i].name);
-                int component_id = -1;
-                for (int j = 0; j < atomic_load(&get_shutdown_coordinator()->component_count); j++) {
-                    if (strcmp(get_shutdown_coordinator()->components[j].name, component_name) == 0) {
-                        component_id = j;
-                        break;
-                    }
-                }
+                int component_id = find_component_id_by_name(component_name);
                 if (component_id >= 0) {
                     update_component_state(component_id, COMPONENT_STOPPED);
                 }
@@ -1750,6 +1729,9 @@ cleanup:
                          DB_SCHEDULED_BACKUP_JOIN_TIMEOUT_MS / 1000);
             }
         }
+
+        log_info("Cleaning up batch delete progress...");
+        batch_delete_progress_cleanup();
 
         log_info("Shutting down database...");
         shutdown_database();

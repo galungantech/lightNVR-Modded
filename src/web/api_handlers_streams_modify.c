@@ -1,3 +1,10 @@
+/*
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2025-2026 OpenSensor Engineering and LightNVR contributors
+ *
+ * This file is part of LightNVR <https://github.com/opensensor/lightNVR>.
+ */
+
 #define _XOPEN_SOURCE
 #define _GNU_SOURCE
 
@@ -37,6 +44,8 @@
 #include "video/mp4_recording.h"
 #include "utils/yaml_validate.h"
 
+static pthread_mutex_t g_put_stream_update_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 static bool check_stream_write_access(const http_request_t *req,
                                       http_response_t *res,
                                       const stream_config_t *config) {
@@ -51,12 +60,13 @@ static bool check_stream_write_access(const http_request_t *req,
  * @brief Structure for PUT stream update task
  */
 typedef struct {
-    stream_handle_t stream;                    // Stream handle
     stream_config_t config;                    // Updated stream configuration
-    char stream_id[MAX_STREAM_NAME];          // Decoded stream ID
+    char stream_id[MAX_STREAM_NAME];          // Decoded stream ID (durable key for worker-time lookup)
     char original_url[MAX_URL_LENGTH];         // Original URL before update
     stream_protocol_t original_protocol;       // Original protocol before update
     bool original_record_audio;                // Original record_audio before update
+    bool original_backchannel_enabled;         // Original backchannel_enabled before update
+    bool original_enabled;                     // Original enabled flag before update
     bool config_changed;                       // Whether config changed
     bool requires_restart;                     // Whether restart is required
     bool is_running;                           // Whether stream was running
@@ -163,14 +173,22 @@ static void redact_url_for_log(const char *url, char *out_url, size_t out_size) 
  *
  * This function performs the actual stream update work in a background thread.
  */
-static void put_stream_worker(put_stream_task_t *task) {
-    if (!task) {
-        log_error("Invalid PUT stream task");
+static void put_stream_worker_locked(put_stream_task_t *task) {
+    log_set_thread_context("StreamAPI", task->stream_id);
+    log_info("Processing PUT /api/streams/%s in worker thread", task->stream_id);
+
+    // Resolve the stream handle at worker time from the durable name key; the
+    // stream may have been deleted while this task was queued.
+    stream_handle_t stream = get_stream_by_name(task->stream_id);
+    if (!stream) {
+        log_warn("Stream %s no longer exists, dropping queued PUT update", task->stream_id);
+        put_stream_task_free(task);
         return;
     }
 
-    log_set_thread_context("StreamAPI", task->stream_id);
-    log_info("Processing PUT /api/streams/%s in worker thread", task->stream_id);
+    // Note: update_stream_config() never writes privacy_mode (owned by the
+    // set_privacy_mode toggle), so a toggle made while this task was queued
+    // is preserved.
 
     // Update stream configuration in database first
     if (update_stream_config(task->stream_id, &task->config) != 0) {
@@ -181,13 +199,13 @@ static void put_stream_worker(put_stream_task_t *task) {
 
     // Force update of stream configuration in memory to ensure it matches the database
     stream_config_t updated_config;
-    if (get_stream_config(task->stream, &updated_config) != 0) {
+    if (get_stream_config(stream, &updated_config) != 0) {
         log_error("Failed to refresh stream configuration from database for stream %s", task->config.name);
         put_stream_task_free(task);
         return;
     }
 
-    if (set_stream_detection_params(task->stream,
+    if (set_stream_detection_params(stream,
                                    task->config.detection_interval,
                                    task->config.detection_threshold,
                                    task->config.pre_detection_buffer,
@@ -195,7 +213,7 @@ static void put_stream_worker(put_stream_task_t *task) {
         log_warn("Failed to update detection parameters for stream %s", task->config.name);
     }
 
-    if (set_stream_detection_recording(task->stream,
+    if (set_stream_detection_recording(stream,
                                       task->config.detection_based_recording,
                                       task->config.detection_model) != 0) {
         log_warn("Failed to update detection recording for stream %s", task->config.name);
@@ -217,13 +235,13 @@ static void put_stream_worker(put_stream_task_t *task) {
                 task->config.name,
                 task->config.record,
                 task->config.record ? "enabled" : "disabled");
-        if (set_stream_recording(task->stream, task->config.record) != 0) {
+        if (set_stream_recording(stream, task->config.record) != 0) {
             log_warn("Failed to update recording setting for stream %s", task->config.name);
         }
     }
 
     if (task->has_streaming_enabled) {
-        if (set_stream_streaming_enabled(task->stream, task->config.streaming_enabled) != 0) {
+        if (set_stream_streaming_enabled(stream, task->config.streaming_enabled) != 0) {
             log_warn("Failed to update streaming setting for stream %s", task->config.name);
         }
     }
@@ -312,7 +330,7 @@ static void put_stream_worker(put_stream_task_t *task) {
     log_info("Updated stream configuration in memory for stream %s", task->config.name);
 
     // Verify the update by reading back the configuration
-    if (get_stream_config(task->stream, &updated_config) == 0) {
+    if (get_stream_config(stream, &updated_config) == 0) {
         log_info("Detection settings after update - Model: %s, Threshold: %.2f, Interval: %d, Pre-buffer: %d, Post-buffer: %d",
                  updated_config.detection_model, updated_config.detection_threshold, updated_config.detection_interval,
                  updated_config.pre_detection_buffer, updated_config.post_detection_buffer);
@@ -321,12 +339,16 @@ static void put_stream_worker(put_stream_task_t *task) {
     // Restart stream if configuration changed and either:
     // 1. Critical parameters requiring restart were changed (URL, protocol, record_audio)
     // 2. The stream is currently running AND non-dynamic parameters changed
+    // 3. The stream was just enabled (it is not running, so (2) can't start it)
     // Note: record and streaming_enabled can be toggled dynamically without restart
     // Note: retention and PTZ settings are metadata only and don't require restart
 
-    if (task->config_changed && (task->requires_restart || (task->is_running && task->non_dynamic_config_changed))) {
-        log_info("Restarting stream %s (requires_restart=%s, is_running=%s, non_dynamic_changed=%s)",
+    bool enabled_changed_to_true = (!task->original_enabled && task->config.enabled);
+
+    if (task->config_changed && (enabled_changed_to_true || task->requires_restart || (task->is_running && task->non_dynamic_config_changed))) {
+        log_info("Restarting stream %s (enabled_now=%s, requires_restart=%s, is_running=%s, non_dynamic_changed=%s)",
                 task->config.name,
+                enabled_changed_to_true ? "true" : "false",
                 task->requires_restart ? "true" : "false",
                 task->is_running ? "true" : "false",
                 task->non_dynamic_config_changed ? "true" : "false");
@@ -334,6 +356,7 @@ static void put_stream_worker(put_stream_task_t *task) {
         bool url_changed = strcmp(task->original_url, task->config.url) != 0;
         bool protocol_changed = task->original_protocol != task->config.protocol;
         bool record_audio_changed = task->original_record_audio != task->config.record_audio;
+        bool backchannel_changed = task->original_backchannel_enabled != task->config.backchannel_enabled;
 
         // First clear HLS segments if URL changed
         if (url_changed) {
@@ -347,13 +370,13 @@ static void put_stream_worker(put_stream_task_t *task) {
         if (task->is_running) {
             log_info("Stopping stream %s for restart", task->config.name);
 
-            if (stop_stream(task->stream) != 0) {
+            if (stop_stream(stream) != 0) {
                 log_error("Failed to stop stream: %s", task->stream_id);
             }
 
             // Wait for stream to stop with increased timeout for critical parameter changes
             int timeout = task->requires_restart ? 50 : 30;
-            while (get_stream_status(task->stream) != STREAM_STATUS_STOPPED && timeout > 0) {
+            while (get_stream_status(stream) != STREAM_STATUS_STOPPED && timeout > 0) {
                 usleep(100000); // 100ms
                 timeout--;
             }
@@ -363,13 +386,15 @@ static void put_stream_worker(put_stream_task_t *task) {
             }
         }
 
-        // If URL, protocol, record_audio, or credentials changed, update the dynamic
+        // If URL, protocol, record_audio, backchannel, or credentials changed, update the dynamic
         // go2rtc API registration. Streams with a source override are YAML-backed;
         // those changes are applied by the go2rtc process restart below instead.
+        bool go2rtc_reloaded = false;
         if (!task->go2rtc_override_changed &&
             task->config.go2rtc_source_override[0] == '\0' &&
-            (url_changed || protocol_changed || record_audio_changed || task->credentials_changed)) {
-            log_info("URL, protocol, record_audio, or credentials changed for stream %s, updating go2rtc registration", task->config.name);
+            (url_changed || protocol_changed || record_audio_changed || backchannel_changed || task->credentials_changed)) {
+            go2rtc_reloaded = true;
+            log_info("URL, protocol, record_audio, backchannel, or credentials changed for stream %s, updating go2rtc registration", task->config.name);
 
             if (go2rtc_integration_reload_stream_config(task->config.name, task->config.url,
                                                         task->config.onvif_username[0] != '\0' ? task->config.onvif_username : NULL,
@@ -400,19 +425,6 @@ static void put_stream_worker(put_stream_task_t *task) {
             usleep(500000);
         }
 
-        // If the RTMP publish (restream) URL changed, regenerate go2rtc.yaml (which
-        // carries the publish: block) and restart go2rtc so it starts/stops the
-        // RTMP push. Skip if an override restart already happened above.
-        if (task->publish_changed && !task->go2rtc_override_changed) {
-            log_info("Publish URL changed for stream %s, restarting go2rtc to apply restream config", task->config.name);
-            if (go2rtc_integration_restart_process()) {
-                log_info("Successfully restarted go2rtc after publish URL change for stream %s", task->config.name);
-            } else {
-                log_error("Failed to restart go2rtc after publish URL change for stream %s", task->config.name);
-            }
-            usleep(500000);
-        }
-
         // If sub-stream URL changed, register or unregister the {name}_sub stream
         if (task->sub_stream_changed && !task->go2rtc_override_changed) {
             char sub_name[MAX_STREAM_NAME + 8];
@@ -432,10 +444,22 @@ static void put_stream_worker(put_stream_task_t *task) {
             usleep(500000);
         }
 
+        // A stream that was just enabled is not registered with go2rtc yet
+        // (disabled streams are skipped at startup), so register it before
+        // starting. Override-backed streams were handled by the restart above.
+        if (enabled_changed_to_true && !go2rtc_reloaded && !task->go2rtc_override_changed) {
+            if (go2rtc_integration_reload_stream(task->config.name)) {
+                log_info("Registered newly enabled stream %s with go2rtc", task->config.name);
+            } else {
+                log_warn("Failed to register newly enabled stream %s with go2rtc (go2rtc may not be ready)",
+                         task->config.name);
+            }
+        }
+
         // Start stream if enabled (AFTER go2rtc has been updated)
         if (task->config.enabled) {
             log_info("Starting stream %s after configuration update", task->config.name);
-            if (start_stream(task->stream) != 0) {
+            if (start_stream(stream) != 0) {
                 log_error("Failed to restart stream: %s", task->stream_id);
             }
 
@@ -453,10 +477,44 @@ static void put_stream_worker(put_stream_task_t *task) {
         log_info("Configuration changed for stream %s but restart not required", task->config.name);
     }
 
+    // If the RTMP publish (restream) URL changed, regenerate go2rtc.yaml (which
+    // carries the publish: block) and restart go2rtc so it starts/stops the
+    // RTMP push. This is independent of the stream restart decision above: a
+    // restream edit must apply even when the stream is not running, and it does
+    // not need the recording pipeline restarted. Skip if an override change
+    // already restarted go2rtc (which regenerated the publish block too).
+    if (task->config_changed && task->publish_changed && !task->go2rtc_override_changed) {
+        log_info("Publish URL changed for stream %s, restarting go2rtc to apply restream config", task->config.name);
+        if (go2rtc_integration_restart_process()) {
+            log_info("Successfully restarted go2rtc after publish URL change for stream %s", task->config.name);
+        } else {
+            log_error("Failed to restart go2rtc after publish URL change for stream %s", task->config.name);
+        }
+    }
+
     log_info("Successfully completed stream update for: %s", task->stream_id);
 
     // Clean up
     put_stream_task_free(task);
+}
+
+/**
+ * @brief Thread entry for PUT stream update.
+ *
+ * Applies are serialized so two queued updates never interleave their
+ * DB write / stop / go2rtc reload / start sequences.
+ */
+static void *put_stream_worker(void *arg) {
+    put_stream_task_t *task = (put_stream_task_t *)arg;
+    if (!task) {
+        log_error("Invalid PUT stream task");
+        return NULL;
+    }
+
+    pthread_mutex_lock(&g_put_stream_update_mutex);
+    put_stream_worker_locked(task);  // frees task on every path
+    pthread_mutex_unlock(&g_put_stream_update_mutex);
+    return NULL;
 }
 
 /**
@@ -465,6 +523,56 @@ static void put_stream_worker(put_stream_task_t *task) {
  * This function is called by the multithreading system.
  */
 // put_stream_handler removed - work done via update_stream_task_func
+
+/* Validate a non-blank go2rtc_source_override shared by POST and PUT.
+ * Single-line values are URLs and are not YAML-checked; values containing a
+ * newline are treated as YAML and validated so malformed lists are rejected
+ * with line/column info instead of failing later inside go2rtc.
+ * On failure the error response is set on `res` and false is returned; the
+ * caller still owns (and must free) the request JSON that `src` points into. */
+static bool validate_go2rtc_source_override(const char *src, size_t max_size,
+                                            http_response_t *res) {
+    size_t src_len = strlen(src);
+
+    if (src_len >= max_size) {
+        log_error("go2rtc_source_override too long (%zu bytes, max %zu)",
+                  src_len, max_size - 1);
+        http_response_set_json_error(res, 413,
+            "go2rtc_source_override exceeds size limit");
+        return false;
+    }
+
+    if (strchr(src, '\n') == NULL) {
+        return true;
+    }
+
+    char err[256] = {0};
+    if (yaml_validate_str(src, src_len, err, sizeof(err)) >= 0) {
+        return true;
+    }
+
+    log_warn("Rejecting go2rtc_source_override: %s", err);
+    /* Structured 400 carrying the validator's line/column message. */
+    cJSON *response = cJSON_CreateObject();
+    if (response) {
+        cJSON_AddBoolToObject(response, "valid", false);
+        cJSON *errobj = cJSON_CreateObject();
+        if (errobj) {
+            cJSON_AddStringToObject(errobj, "message", err);
+            cJSON_AddItemToObject(response, "error", errobj);
+        }
+        char *body = cJSON_PrintUnformatted(response);
+        cJSON_Delete(response);
+        if (body) {
+            http_response_set_json(res, 400, body);
+            free(body);
+            return false;
+        }
+    }
+    http_response_set_json_error(res, 400,
+        "go2rtc_source_override is not valid YAML");
+    return false;
+}
 
 /* detection_url is user-supplied and passed to avformat_open_input in the
  * detection stream thread. Restrict the scheme to network protocols so
@@ -926,45 +1034,10 @@ void handle_post_stream(const http_request_t *req, http_response_t *res) {
         if (!string_has_non_whitespace(src)) {
             config.go2rtc_source_override[0] = '\0';
         } else {
-            size_t src_len = strlen(src);
-
-            if (src_len >= sizeof(config.go2rtc_source_override)) {
-                log_error("go2rtc_source_override too long (%zu bytes, max %zu)",
-                          src_len, sizeof(config.go2rtc_source_override) - 1);
+            if (!validate_go2rtc_source_override(
+                    src, sizeof(config.go2rtc_source_override), res)) {
                 cJSON_Delete(stream_json);
-                http_response_set_json_error(res, 413,
-                    "go2rtc_source_override exceeds size limit");
                 return;
-            }
-
-            if (strchr(src, '\n') != NULL) {
-                char err[256] = {0};
-                int rc = yaml_validate_str(src, src_len, err, sizeof(err));
-                if (rc < 0) {
-                    log_warn("Rejecting go2rtc_source_override: %s", err);
-                    cJSON_Delete(stream_json);
-                    /* Build a structured 400 response with line/column when
-                     * the validator surfaced them in `err`. */
-                    cJSON *response = cJSON_CreateObject();
-                    if (response) {
-                        cJSON_AddBoolToObject(response, "valid", false);
-                        cJSON *errobj = cJSON_CreateObject();
-                        if (errobj) {
-                            cJSON_AddStringToObject(errobj, "message", err);
-                            cJSON_AddItemToObject(response, "error", errobj);
-                        }
-                        char *body = cJSON_PrintUnformatted(response);
-                        cJSON_Delete(response);
-                        if (body) {
-                            http_response_set_json(res, 400, body);
-                            free(body);
-                            return;
-                        }
-                    }
-                    http_response_set_json_error(res, 400,
-                        "go2rtc_source_override is not valid YAML");
-                    return;
-                }
             }
 
             safe_strcpy(config.go2rtc_source_override, src,
@@ -1279,6 +1352,136 @@ void handle_put_stream(const http_request_t *req, http_response_t *res) {
         return;
     }
 
+    // Check if there's a request to set/clear privacy mode (lightweight toggle, no full restart).
+    // Handled before any other field so a rejected or privacy-only request
+    // never triggers ONVIF probes or other per-field work.
+    cJSON *privacy_request = cJSON_GetObjectItem(stream_json, "set_privacy_mode");
+    if (privacy_request && cJSON_IsBool(privacy_request)) {
+        // Reject mixed updates to avoid silently discarding ordinary config
+        // fields. Identifying metadata ("name") is tolerated and ignored.
+        cJSON *field = NULL;
+        cJSON_ArrayForEach(field, stream_json) {
+            if (!field->string ||
+                (strcmp(field->string, "set_privacy_mode") != 0 &&
+                 strcmp(field->string, "name") != 0)) {
+                cJSON_Delete(stream_json);
+                http_response_set_json_error(
+                    res, 400,
+                    "set_privacy_mode cannot be combined with other update fields");
+                return;
+            }
+        }
+
+        bool enable_privacy = cJSON_IsTrue(privacy_request);
+        log_info("Privacy mode %s requested for stream %s", enable_privacy ? "enable" : "disable", stream_id);
+
+        if (set_stream_privacy_mode(stream_id, enable_privacy) != 0) {
+            cJSON_Delete(stream_json);
+            http_response_set_json_error(res, 500, "Failed to update privacy mode");
+            return;
+        }
+        log_info("Successfully set privacy_mode=%d for stream %s", enable_privacy ? 1 : 0, stream_id);
+
+        char sub_name[MAX_STREAM_NAME + 8];
+        snprintf(sub_name, sizeof(sub_name), "%s_sub", stream_id);
+        bool has_sub_stream = config.sub_stream_url[0] != '\0';
+        // Parts of this stream that live in the generated go2rtc.yaml (a source
+        // override, or an RTMP publish/restream entry) only change when go2rtc
+        // restarts and regenerates its config from the saved privacy flag.
+        bool yaml_backed =
+            (!g_config.audio_disabled && config.go2rtc_source_override[0] != '\0') ||
+            config.publish_url[0] != '\0';
+        // Whether the stream is (enable) no longer / (disable) again served by go2rtc
+        bool go2rtc_applied = true;
+
+        if (enable_privacy) {
+            // Unregister the main stream and its sub-stream so clients cannot
+            // connect through either. If go2rtc is not running nothing is being
+            // served, and config generation, startup sync and the health monitor
+            // all skip privacy-mode streams, so only a failure against a live
+            // go2rtc is reported.
+            if (go2rtc_stream_is_ready()) {
+                if (!go2rtc_integration_unregister_stream(stream_id)) {
+                    go2rtc_applied = false;
+                }
+                if (has_sub_stream && !go2rtc_api_remove_stream(sub_name)) {
+                    go2rtc_applied = false;
+                }
+                // Drop the YAML source override / RTMP publish entry, which an
+                // API delete does not stop.
+                if (yaml_backed && !go2rtc_integration_restart_process()) {
+                    go2rtc_applied = false;
+                }
+            }
+            if (go2rtc_applied) {
+                log_info("Stream %s is no longer served by go2rtc (privacy mode)", stream_id);
+            } else {
+                log_error("Privacy mode saved for stream %s but go2rtc still serves it", stream_id);
+            }
+        } else if (!config.enabled) {
+            // A disabled stream must stay unregistered; clearing privacy only
+            // updates the saved flag. Enabling the stream registers it later.
+            log_info("Privacy mode cleared for disabled stream %s; not registering with go2rtc", stream_id);
+        } else if (yaml_backed) {
+            // Regenerate go2rtc.yaml (override / publish entries) and restart;
+            // the restart re-registers every enabled non-privacy stream,
+            // including this one and its sub-stream.
+            if (go2rtc_integration_restart_process()) {
+                log_info("Restarted go2rtc to restore stream %s after privacy mode cleared", stream_id);
+            } else {
+                go2rtc_applied = false;
+                log_warn("Failed to restart go2rtc to restore stream %s", stream_id);
+            }
+        } else {
+            // Resume: re-register with go2rtc. If this fails the health monitor
+            // re-adds missing enabled streams, so report it without failing.
+            if (go2rtc_integration_reload_stream(stream_id)) {
+                log_info("Re-registered stream %s with go2rtc after privacy mode cleared", stream_id);
+            } else {
+                go2rtc_applied = false;
+                log_warn("Failed to re-register stream %s with go2rtc", stream_id);
+            }
+            if (has_sub_stream &&
+                !go2rtc_stream_register_substream(
+                    sub_name, config.sub_stream_url,
+                    config.onvif_username[0] != '\0' ? config.onvif_username : NULL,
+                    config.onvif_password[0] != '\0' ? config.onvif_password : NULL,
+                    config.protocol)) {
+                go2rtc_applied = false;
+                log_warn("Failed to re-register sub-stream %s with go2rtc", sub_name);
+            }
+        }
+
+        cJSON_Delete(stream_json);
+
+        if (enable_privacy && !go2rtc_applied) {
+            // The saved flag is on (and keeps go2rtc from re-adding the stream),
+            // but the camera is still viewable right now. Do not report success;
+            // retrying the request repeats the unregister.
+            http_response_set_json_error(
+                res, 502,
+                "Privacy mode was saved but the stream could not be removed from go2rtc; retry");
+            return;
+        }
+
+        cJSON *response = cJSON_CreateObject();
+        if (response) {
+            cJSON_AddBoolToObject(response, "success", true);
+            cJSON_AddBoolToObject(response, "privacy_mode", enable_privacy);
+            cJSON_AddBoolToObject(response, "stream_registered",
+                                  !enable_privacy && config.enabled && go2rtc_applied);
+            char *response_str = cJSON_PrintUnformatted(response);
+            cJSON_Delete(response);
+            if (response_str) {
+                http_response_set_json(res, 200, response_str);
+                free(response_str);
+                return;
+            }
+        }
+        http_response_set_json_error(res, 500, "Failed to build response");
+        return;
+    }
+
     // Update configuration with provided values
     bool config_changed = false;
     bool requires_restart = false;  // Flag for changes that require stream restart
@@ -1295,6 +1498,7 @@ void handle_put_stream(const http_request_t *req, http_response_t *res) {
 
     stream_protocol_t original_protocol = config.protocol;
     bool original_record_audio = config.record_audio;
+    bool original_backchannel_enabled = config.backchannel_enabled;
 
     cJSON *url = cJSON_GetObjectItem(stream_json, "url");
     if (url && cJSON_IsString(url)) {
@@ -1310,11 +1514,15 @@ void handle_put_stream(const http_request_t *req, http_response_t *res) {
         }
     }
 
+    bool original_enabled = config.enabled;
     cJSON *enabled = cJSON_GetObjectItem(stream_json, "enabled");
     if (enabled && cJSON_IsBool(enabled)) {
-        config.enabled = cJSON_IsTrue(enabled);
-        config_changed = true;
-        non_dynamic_config_changed = true;
+        bool new_enabled = cJSON_IsTrue(enabled);
+        if (config.enabled != new_enabled) {
+            config.enabled = new_enabled;
+            config_changed = true;
+            non_dynamic_config_changed = true;
+        }
     }
 
     cJSON *streaming_enabled = cJSON_GetObjectItem(stream_json, "streaming_enabled");
@@ -1367,9 +1575,11 @@ void handle_put_stream(const http_request_t *req, http_response_t *res) {
 
     cJSON *priority = cJSON_GetObjectItem(stream_json, "priority");
     if (priority && cJSON_IsNumber(priority)) {
-        config.priority = priority->valueint;
-        config_changed = true;
-        non_dynamic_config_changed = true;
+        if (config.priority != priority->valueint) {
+            config.priority = priority->valueint;
+            config_changed = true;
+            non_dynamic_config_changed = true;
+        }
     }
 
     cJSON *record = cJSON_GetObjectItem(stream_json, "record");
@@ -1791,6 +2001,13 @@ void handle_put_stream(const http_request_t *req, http_response_t *res) {
             src = "";
         }
 
+        if (src[0] != '\0' &&
+            !validate_go2rtc_source_override(
+                src, sizeof(config.go2rtc_source_override), res)) {
+            cJSON_Delete(stream_json);
+            return;
+        }
+
         if (strncmp(config.go2rtc_source_override, src,
                     sizeof(config.go2rtc_source_override) - 1) != 0) {
             safe_strcpy(config.go2rtc_source_override, src,
@@ -1894,7 +2111,6 @@ void handle_put_stream(const http_request_t *req, http_response_t *res) {
             safe_strcpy(config.publish_url, pub, sizeof(config.publish_url), 0);
             publish_changed = true;
             config_changed = true;
-            non_dynamic_config_changed = true;
             log_info("Publish (restream) URL changed for stream %s", config.name);
         }
     } else if (publish_url_put && cJSON_IsNull(publish_url_put)) {
@@ -1902,7 +2118,6 @@ void handle_put_stream(const http_request_t *req, http_response_t *res) {
             config.publish_url[0] = '\0';
             publish_changed = true;
             config_changed = true;
-            non_dynamic_config_changed = true;
             log_info("Publish (restream) URL cleared for stream %s", config.name);
         }
     }
@@ -1910,13 +2125,11 @@ void handle_put_stream(const http_request_t *req, http_response_t *res) {
     // Update is_onvif flag based on request or URL
     bool original_is_onvif = config.is_onvif;
 
-    // Check if isOnvif flag is set in the request
+    // Check if isOnvif flag is explicitly set in the request.
+    // For PUT updates, preserve existing persisted value when omitted.
     cJSON *is_onvif = cJSON_GetObjectItem(stream_json, "isOnvif");
     if (is_onvif && cJSON_IsBool(is_onvif)) {
         config.is_onvif = cJSON_IsTrue(is_onvif);
-    } else {
-        // Fall back to URL-based detection if not explicitly set
-        config.is_onvif = (strstr(config.url, "onvif") != NULL);
     }
 
     if (original_is_onvif != config.is_onvif) {
@@ -2006,127 +2219,29 @@ void handle_put_stream(const http_request_t *req, http_response_t *res) {
     // Check if there's a request to enable a disabled stream
     cJSON *enable_request = cJSON_GetObjectItem(stream_json, "enable_disabled");
     if (enable_request && cJSON_IsBool(enable_request) && cJSON_IsTrue(enable_request)) {
-        // Request to enable a disabled stream
-        log_info("Enable requested for disabled stream %s", stream_id);
-
-        // Check if the stream is currently disabled
-        bool currently_disabled = false;
-        sqlite3 *db = get_db_handle();
-        if (db) {
-            sqlite3_stmt *stmt;
-            const char *sql = "SELECT enabled FROM streams WHERE name = ?;";
-            if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(stmt, 1, stream_id, -1, SQLITE_STATIC);
-                if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) != SQLITE_NULL) {
-                    currently_disabled = sqlite3_column_int(stmt, 0) == 0;
-                }
-                sqlite3_finalize(stmt);
-            }
+        // An explicit "enabled": false in the same request contradicts this.
+        if (enabled && cJSON_IsBool(enabled) && !cJSON_IsTrue(enabled)) {
+            cJSON_Delete(stream_json);
+            http_response_set_json_error(res, 400,
+                                         "enable_disabled cannot be combined with enabled=false");
+            return;
         }
 
-        if (currently_disabled) {
-            // Enable the stream by setting enabled to 1 (reuse the same handle)
-            db = get_db_handle();
-            if (db) {
-                sqlite3_stmt *stmt;
-                const char *sql = "UPDATE streams SET enabled = 1 WHERE name = ?;";
-                if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-                    sqlite3_bind_text(stmt, 1, stream_id, -1, SQLITE_STATIC);
-                    if (sqlite3_step(stmt) != SQLITE_DONE) {
-                        log_error("Failed to enable stream %s: %s", stream_id, sqlite3_errmsg(db));
-                    } else {
-                        log_info("Successfully enabled stream %s", stream_id);
-
-                        // Get the stream configuration to register with go2rtc
-                        stream_config_t stream_config;
-                        if (get_stream_config_by_name(stream_id, &stream_config) == 0) {
-                            // Use centralized function to register the stream with go2rtc
-                            if (go2rtc_integration_reload_stream(stream_id)) {
-                                log_info("Successfully registered stream %s with go2rtc", stream_id);
-                            } else {
-                                log_warn("Failed to register stream %s with go2rtc (go2rtc may not be ready)", stream_id);
-                            }
-
-                            // If detection is enabled for this stream, start the unified detection thread
-                            if (stream_config.detection_based_recording &&
-                                is_detection_recording_scheduled(&stream_config)) {
-                                // If continuous recording is also enabled, run detection in annotation-only mode
-                                bool annotation_only = stream_config.record;
-                                log_info("Starting unified detection thread for enabled stream %s (annotation_only=%s)",
-                                         stream_id, annotation_only ? "true" : "false");
-
-                                // Start unified detection thread
-                                if (start_unified_detection_thread(stream_id,
-                                                                  stream_config.detection_model,
-                                                                  stream_config.detection_threshold,
-                                                                  stream_config.pre_detection_buffer,
-                                                                  stream_config.post_detection_buffer,
-                                                                  annotation_only) != 0) {
-                                    log_warn("Failed to start unified detection thread for stream %s", stream_id);
-                                } else {
-                                    log_info("Successfully started unified detection thread for stream %s", stream_id);
-                                }
-                            }
-                        } else {
-                            log_error("Failed to get configuration for stream %s", stream_id);
-                        }
-                    }
-                    sqlite3_finalize(stmt);
-                }
-            }
+        /*
+         * Do not update SQLite directly here: the worker persists the whole
+         * config loaded above, so a direct write would be overwritten by the
+         * stale enabled=false. Route the change through the normal update path;
+         * the worker sees original_enabled=false -> enabled=true, registers the
+         * stream with go2rtc, starts it, and starts detection if configured.
+         */
+        if (!original_enabled) {
+            log_info("Enable requested for disabled stream %s", stream_id);
+            config.enabled = true;
+            config_changed = true;
+            non_dynamic_config_changed = true;
+        } else {
+            log_info("Enable requested for stream %s, which is already enabled", stream_id);
         }
-    }
-
-    // Check if there's a request to set/clear privacy mode (lightweight toggle, no full restart)
-    cJSON *privacy_request = cJSON_GetObjectItem(stream_json, "set_privacy_mode");
-    if (privacy_request && cJSON_IsBool(privacy_request)) {
-        bool enable_privacy = cJSON_IsTrue(privacy_request);
-        log_info("Privacy mode %s requested for stream %s", enable_privacy ? "enable" : "disable", stream_id);
-
-        sqlite3 *db = get_db_handle();
-        if (db) {
-            sqlite3_stmt *stmt;
-            const char *sql = "UPDATE streams SET privacy_mode = ? WHERE name = ?;";
-            if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-                sqlite3_bind_int(stmt, 1, enable_privacy ? 1 : 0);
-                sqlite3_bind_text(stmt, 2, stream_id, -1, SQLITE_STATIC);
-                if (sqlite3_step(stmt) != SQLITE_DONE) {
-                    log_error("Failed to set privacy mode for stream %s: %s", stream_id, sqlite3_errmsg(db));
-                } else {
-                    log_info("Successfully set privacy_mode=%d for stream %s", enable_privacy ? 1 : 0, stream_id);
-                    // If enabling privacy, stop stream processing; if disabling, restart it
-                    if (enable_privacy) {
-                        // Unregister from go2rtc so clients cannot connect
-                        go2rtc_integration_unregister_stream(stream_id);
-                        log_info("Unregistered stream %s from go2rtc due to privacy mode", stream_id);
-                    } else {
-                        // Resume: re-register with go2rtc
-                        if (go2rtc_integration_reload_stream(stream_id)) {
-                            log_info("Re-registered stream %s with go2rtc after privacy mode cleared", stream_id);
-                        } else {
-                            log_warn("Failed to re-register stream %s with go2rtc", stream_id);
-                        }
-                    }
-                }
-                sqlite3_finalize(stmt);
-            }
-        }
-
-        cJSON_Delete(stream_json);
-        cJSON *response = cJSON_CreateObject();
-        if (response) {
-            cJSON_AddBoolToObject(response, "success", true);
-            cJSON_AddBoolToObject(response, "privacy_mode", enable_privacy);
-            char *response_str = cJSON_PrintUnformatted(response);
-            cJSON_Delete(response);
-            if (response_str) {
-                http_response_set_json(res, 200, response_str);
-                free(response_str);
-                return;
-            }
-        }
-        http_response_set_json_error(res, 500, "Failed to build response");
-        return;
     }
 
     // Clean up JSON
@@ -2145,12 +2260,13 @@ void handle_put_stream(const http_request_t *req, http_response_t *res) {
     }
 
     // Populate task with all necessary data
-    task->stream = stream;
     memcpy(&task->config, &config, sizeof(stream_config_t));
     safe_strcpy(task->stream_id, stream_id, MAX_STREAM_NAME, 0);
     safe_strcpy(task->original_url, original_url, MAX_URL_LENGTH, 0);
     task->original_protocol = original_protocol;
     task->original_record_audio = original_record_audio;
+    task->original_backchannel_enabled = original_backchannel_enabled;
+    task->original_enabled = original_enabled;
     task->config_changed = config_changed;
     task->requires_restart = requires_restart;
     task->is_running = is_running;
@@ -2175,7 +2291,7 @@ void handle_put_stream(const http_request_t *req, http_response_t *res) {
              config.detection_model, config.detection_threshold, config.detection_interval,
              config.pre_detection_buffer, config.post_detection_buffer);
 
-    // Send an immediate 202 Accepted response to the client
+    // Prepare the accepted response; the backend sends it after this handler returns.
     // Include ONVIF test results if applicable
     cJSON *response = cJSON_CreateObject();
     if (!response) {
@@ -2209,21 +2325,37 @@ void handle_put_stream(const http_request_t *req, http_response_t *res) {
         return;
     }
 
-    http_response_set_json(res, 202, json_str);
-    free(json_str);
-
     // Spawn background thread to perform the actual update work
     // This prevents blocking the web server event loop
     pthread_t thread_id;
     pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-
-    if (pthread_create(&thread_id, &attr, (void *(*)(void *))put_stream_worker, task) != 0) {
-        log_error("Failed to create worker thread for PUT stream");
+    int attr_rc = pthread_attr_init(&attr);
+    if (attr_rc != 0) {
+        log_error("Failed to initialize thread attributes for PUT stream (rc=%d)", attr_rc);
+        free(json_str);
         put_stream_task_free(task);
-        // Response already sent, just log the error
+        http_response_set_json_error(res, 500, "Failed to start update task");
+        return;
+    }
+
+    attr_rc = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (attr_rc != 0) {
+        log_error("Failed to set detached thread attribute for PUT stream (rc=%d)", attr_rc);
+        pthread_attr_destroy(&attr);
+        free(json_str);
+        put_stream_task_free(task);
+        http_response_set_json_error(res, 500, "Failed to start update task");
+        return;
+    }
+
+    if (pthread_create(&thread_id, &attr, put_stream_worker, task) != 0) {
+        log_error("Failed to create worker thread for PUT stream");
+        free(json_str);
+        put_stream_task_free(task);
+        http_response_set_json_error(res, 500, "Failed to start update task");
     } else {
+        http_response_set_json(res, 202, json_str);
+        free(json_str);
         log_info("PUT stream task started in worker thread for: %s", stream_id);
     }
 
@@ -2234,8 +2366,7 @@ void handle_put_stream(const http_request_t *req, http_response_t *res) {
  * @brief Structure for DELETE stream background task
  */
 typedef struct {
-    stream_handle_t stream;                    // Stream handle
-    char stream_id[MAX_STREAM_NAME];          // Decoded stream ID
+    char stream_id[MAX_STREAM_NAME];          // Decoded stream ID (durable key)
     bool permanent_delete;                     // Whether to permanently delete
 } delete_stream_task_t;
 
@@ -2246,26 +2377,37 @@ typedef struct {
  * It handles stopping the stream, detection threads, removing from memory,
  * database deletion, and go2rtc unregistration.
  */
-static void delete_stream_worker(delete_stream_task_t *task) {
+static void *delete_stream_worker(void *arg) {
+    delete_stream_task_t *task = (delete_stream_task_t *)arg;
     if (!task) {
         log_error("Invalid DELETE stream task");
-        return;
+        return NULL;
     }
 
     log_set_thread_context("StreamAPI", task->stream_id);
     log_info("Processing DELETE /api/streams/%s in worker thread", task->stream_id);
 
+    // Re-resolve the handle by name: a handle captured in the request handler
+    // is a slot pointer that may have been freed or reused by another stream
+    // (e.g. a concurrent DELETE) before this worker runs.
+    stream_handle_t stream = get_stream_by_name(task->stream_id);
+    if (!stream) {
+        log_warn("Stream %s no longer exists, nothing to delete", task->stream_id);
+        free(task);
+        return NULL;
+    }
+
     // Stop stream if it's running
-    stream_status_t status = get_stream_status(task->stream);
+    stream_status_t status = get_stream_status(stream);
     if (status == STREAM_STATUS_RUNNING || status == STREAM_STATUS_STARTING) {
-        if (stop_stream(task->stream) != 0) {
+        if (stop_stream(stream) != 0) {
             log_error("Failed to stop stream: %s", task->stream_id);
             // Continue anyway
         }
 
         // Wait for stream to stop
         int timeout = 30; // 3 seconds
-        while (get_stream_status(task->stream) != STREAM_STATUS_STOPPED && timeout > 0) {
+        while (get_stream_status(stream) != STREAM_STATUS_STOPPED && timeout > 0) {
             usleep(100000); // 100ms
             timeout--;
         }
@@ -2283,10 +2425,10 @@ static void delete_stream_worker(delete_stream_task_t *task) {
     }
 
     // Delete stream from memory
-    if (remove_stream(task->stream) != 0) {
+    if (remove_stream(stream) != 0) {
         log_error("Failed to delete stream from memory: %s", task->stream_id);
         free(task);
-        return;
+        return NULL;
     }
 
     // Delete the stream from the database (permanently or just disable)
@@ -2295,7 +2437,7 @@ static void delete_stream_worker(delete_stream_task_t *task) {
                 task->permanent_delete ? "permanently delete" : "disable",
                 task->stream_id);
         free(task);
-        return;
+        return NULL;
     }
 
     // Unregister stream from go2rtc
@@ -2309,6 +2451,7 @@ static void delete_stream_worker(delete_stream_task_t *task) {
             task->stream_id);
 
     free(task);
+    return NULL;
 }
 
 /**
@@ -2364,11 +2507,10 @@ void handle_delete_stream(const http_request_t *req, http_response_t *res) {
         return;
     }
 
-    task->stream = stream;
     safe_strcpy(task->stream_id, stream_id, sizeof(task->stream_id), 0);
     task->permanent_delete = permanent_delete;
 
-    // Send 202 Accepted response immediately so we don't block the event loop
+    // Prepare the accepted response; the backend sends it after this handler returns.
     cJSON *response_json = cJSON_CreateObject();
     if (!response_json) {
         log_error("Failed to create response JSON object");
@@ -2391,21 +2533,37 @@ void handle_delete_stream(const http_request_t *req, http_response_t *res) {
         return;
     }
 
-    http_response_set_json(res, 202, json_str);
-    free(json_str);
-
     // Spawn background thread to perform the actual deletion work
     // This prevents blocking the web server event loop
     pthread_t thread_id;
     pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    int attr_rc = pthread_attr_init(&attr);
+    if (attr_rc != 0) {
+        log_error("Failed to initialize pthread attributes for DELETE stream worker (rc=%d)", attr_rc);
+        free(task);
+        free(json_str);
+        http_response_set_json_error(res, 500, "Failed to start delete task");
+        return;
+    }
 
-    if (pthread_create(&thread_id, &attr, (void *(*)(void *))delete_stream_worker, task) != 0) {
+    attr_rc = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (attr_rc != 0) {
+        log_error("Failed to set detached state for DELETE stream worker (rc=%d)", attr_rc);
+        pthread_attr_destroy(&attr);
+        free(task);
+        free(json_str);
+        http_response_set_json_error(res, 500, "Failed to start delete task");
+        return;
+    }
+
+    if (pthread_create(&thread_id, &attr, delete_stream_worker, task) != 0) {
         log_error("Failed to create worker thread for DELETE stream");
         free(task);
-        // Response already sent, just log the error
+        free(json_str);
+        http_response_set_json_error(res, 500, "Failed to start delete task");
     } else {
+        http_response_set_json(res, 202, json_str);
+        free(json_str);
         log_info("DELETE stream task started in worker thread for: %s", stream_id);
     }
 
@@ -2725,8 +2883,26 @@ void handle_post_stream_refresh(const http_request_t *req, http_response_t *res)
     // This prevents blocking the web server event loop
     pthread_t thread_id;
     pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    int attr_rc = pthread_attr_init(&attr);
+    if (attr_rc != 0) {
+        log_error("Failed to initialize pthread attributes for stream refresh");
+        free(task);
+        finish_stream_refresh(stream_name, true);
+        free(json_str);
+        http_response_set_json_error(res, 500, "Failed to start stream refresh");
+        return;
+    }
+
+    attr_rc = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (attr_rc != 0) {
+        log_error("Failed to configure detached pthread attributes for stream refresh");
+        free(task);
+        finish_stream_refresh(stream_name, true);
+        free(json_str);
+        pthread_attr_destroy(&attr);
+        http_response_set_json_error(res, 500, "Failed to start stream refresh");
+        return;
+    }
 
     if (pthread_create(&thread_id, &attr, refresh_stream_worker, task) != 0) {
         log_error("Failed to create worker thread for stream refresh");

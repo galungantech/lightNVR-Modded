@@ -1,3 +1,10 @@
+/*
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2025-2026 OpenSensor Engineering and LightNVR contributors
+ *
+ * This file is part of LightNVR <https://github.com/opensensor/lightNVR>.
+ */
+
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +27,7 @@
 #include "core/daemon.h"
 #include "core/path_utils.h"
 #include "core/shutdown_coordinator.h"
+#include "core/signal_safe.h"
 #include "utils/strings.h"
 
 extern _Atomic bool running; // Reference to the global variable defined in main.c
@@ -30,6 +38,19 @@ static char pid_file_path[MAX_PATH_LENGTH] = "/run/lightnvr.pid";
 // Forward declarations
 static void daemon_signal_handler(int sig);
 static int check_running_daemon(const char *pid_file);
+
+// Report child startup result to the waiting parent and close the pipe.
+static void notify_startup_status(int fd, unsigned char status) {
+    ssize_t n;
+    do {
+        n = write(fd, &status, 1);
+    } while (n < 0 && errno == EINTR);
+    if (n != 1) {
+        log_warn("Failed to report daemon startup status to parent: %s",
+                 n < 0 ? strerror(errno) : "short write");
+    }
+    close(fd);
+}
 
 // Initialize daemon - simplified version that works on all platforms including Linux 4.4
 int init_daemon(const char *pid_file) {
@@ -45,30 +66,60 @@ int init_daemon(const char *pid_file) {
     }
 
     log_info("Starting daemon mode with PID file: %s", pid_file_path);
-    log_info("Current working directory: %s", getcwd(NULL, 0));
+    char *startup_cwd = getcwd(NULL, 0);
+    if (startup_cwd != NULL) {
+        log_info("Current working directory: %s", startup_cwd);
+        free(startup_cwd);
+    } else {
+        log_warn("Current working directory unavailable: %s", strerror(errno));
+    }
+
+    // Create startup status pipe for parent/child handshake
+    int status_pipe[2];
+    if (pipe(status_pipe) != 0) {
+        log_error("Failed to create startup status pipe: %s", strerror(errno));
+        return -1;
+    }
 
     // Fork the process
     pid_t pid = fork();
     if (pid < 0) {
         log_error("Failed to fork daemon process: %s", strerror(errno));
+        close(status_pipe[0]);
+        close(status_pipe[1]);
         return -1;
     }
 
-    // Parent process exits
+    // Parent process waits for child initialization result
     if (pid > 0) {
-        log_info("Parent process exiting, child PID: %d", pid);
-        // Wait briefly to ensure child has time to start and write PID file
-        usleep(200000); // 200ms - increased from 100ms for better reliability
-        exit(EXIT_SUCCESS);
+        close(status_pipe[1]);
+        log_info("Parent process waiting for child startup, child PID: %d", pid);
+
+        unsigned char child_status = 0;
+        ssize_t n;
+        do {
+            n = read(status_pipe[0], &child_status, 1);
+        } while (n < 0 && errno == EINTR);
+        close(status_pipe[0]);
+
+        if (n == 1 && child_status == 1) {
+            log_info("Child daemon initialization succeeded, child PID: %d", pid);
+            exit(EXIT_SUCCESS);
+        }
+
+        log_error("Child daemon initialization failed, child PID: %d", pid);
+        exit(EXIT_FAILURE);
     }
 
     // Child process continues
+    close(status_pipe[0]);
     log_info("Child process starting daemon initialization, PID: %d", getpid());
 
     // Create a new session
     pid_t sid = setsid();
     if (sid < 0) {
         log_error("Failed to create session: %s", strerror(errno));
+        notify_startup_status(status_pipe[1], 0);
         return -1;
     }
     log_info("Created new session with SID: %d", sid);
@@ -108,14 +159,15 @@ int init_daemon(const char *pid_file) {
     }
     log_info("Signal handlers configured");
 
-    // Block SIGPIPE to prevent crashes when writing to closed sockets
-    sigset_t set;
-    sigemptyset(&set);
-    sigaddset(&set, SIGPIPE);
-    if (pthread_sigmask(SIG_BLOCK, &set, NULL) != 0) {
-        log_warn("Failed to block SIGPIPE: %s", strerror(errno));
+    // Ignore SIGPIPE process-wide to prevent termination on closed socket writes
+    struct sigaction sa_pipe;
+    memset(&sa_pipe, 0, sizeof(sa_pipe));
+    sa_pipe.sa_handler = SIG_IGN;
+    sigemptyset(&sa_pipe.sa_mask);
+    if (sigaction(SIGPIPE, &sa_pipe, NULL) != 0) {
+        log_warn("Failed to ignore SIGPIPE: %s", strerror(errno));
     } else {
-        log_debug("SIGPIPE blocked successfully");
+        log_debug("SIGPIPE ignored process-wide");
     }
 
     // Write PID file
@@ -123,10 +175,14 @@ int init_daemon(const char *pid_file) {
     int fd = write_pid_file(pid_file_path);
     if (fd < 0) {
         log_error("Failed to write PID file, daemon initialization failed");
+        notify_startup_status(status_pipe[1], 0);
         return -1;
     }
 
     log_info("Daemon started successfully with PID %d", getpid());
+
+    // Notify parent that daemon initialization has completed successfully
+    notify_startup_status(status_pipe[1], 1);
 
     // Add a small delay to ensure everything is properly initialized
     usleep(100000); // 100ms
@@ -134,28 +190,19 @@ int init_daemon(const char *pid_file) {
     return fd;
 }
 
-// Async-signal-safe write helper for daemon signal handler
-static void daemon_signal_safe_write(const char *msg) {
-    // write() is async-signal-safe
-    if (msg) {
-        size_t len = 0;
-        while (msg[len] != '\0') len++;
-        write(STDERR_FILENO, msg, len);
-    }
-}
-
 // Signal handler for daemon
 // IMPORTANT: This handler must be async-signal-safe - no mutex operations!
-// Only use: write(), _exit(), alarm(), close(), shutdown(), atomic operations on sig_atomic_t
+// Only use: write(), _exit(), alarm(), volatile sig_atomic_t, and lock-free
+// C11 atomics (main.c asserts ATOMIC_BOOL_LOCK_FREE == 2)
 static void daemon_signal_handler(int sig) {
     switch (sig) {
     case SIGTERM:
     case SIGINT:
         // Use write() instead of log_info() - it's async-signal-safe
-        daemon_signal_safe_write("[DAEMON] Received shutdown signal, initiating shutdown...\n");
+        signal_safe_write("[DAEMON] Received shutdown signal, initiating shutdown...\n");
 
         // Set global flag to stop main loop
-        // This is safe because running is declared as volatile bool
+        // Safe: running is a lock-free _Atomic bool (asserted in main.c)
         running = false;
 
         // Also wake up any long-running background operation (e.g. a
@@ -169,15 +216,6 @@ static void daemon_signal_handler(int sig) {
         // is async-signal-safe (atomic store only).
         request_background_abort();
 
-        // Also signal the web server to shut down
-        extern int web_server_socket;
-        if (web_server_socket >= 0) {
-            // shutdown() and close() are async-signal-safe
-            shutdown(web_server_socket, SHUT_RDWR);
-            close(web_server_socket);
-            web_server_socket = -1; // Update the global reference
-        }
-
         // main.c's dedicated shutdown watchdog owns the deadline. Do not
         // introduce a process-global alarm shared with unrelated threads.
         break;
@@ -185,13 +223,13 @@ static void daemon_signal_handler(int sig) {
     case SIGHUP:
         // Just write a message, don't try to reload config in signal handler
         // Config reload is NOT async-signal-safe
-        daemon_signal_safe_write("[DAEMON] Received SIGHUP signal\n");
+        signal_safe_write("[DAEMON] Received SIGHUP signal\n");
         break;
 
     case SIGALRM:
         // Compatibility for externally delivered SIGALRM; HLS cleanup no
         // longer arms alarms or changes the process signal dispositions.
-        daemon_signal_safe_write("[DAEMON] Stray SIGALRM caught at top level (harmless, ignored)\n");
+        signal_safe_write("[DAEMON] Stray SIGALRM caught at top level (harmless, ignored)\n");
         break;
 
     default:
@@ -223,8 +261,9 @@ int write_pid_file(const char *pid_file) {
     
     // Truncate the file to ensure we overwrite any existing content
     if (ftruncate(fd, 0) < 0) {
-        log_warn("Could not truncate PID file: %s", strerror(errno));
-        // Continue anyway
+        log_error("Failed to truncate PID file %s: %s", pid_file, strerror(errno));
+        close(fd);
+        return -1;
     }
     
     // Write PID to file
@@ -257,21 +296,29 @@ int write_pid_file(const char *pid_file) {
 
 // Remove PID file
 int remove_pid_file(int fd, const char *pid_file) {
-    if (fd >= 0) {
-        // Release the lock by closing the file
-        close(fd);
-    }
-
-    // Try to remove the file
+    // Remove the path while lock is still held by fd to avoid races.
     if (unlink(pid_file) != 0) {
         if (errno == ENOENT) {
             // File doesn't exist, that's fine
             log_info("PID file %s already removed", pid_file);
+            if (fd >= 0) {
+                // Release lock/descriptor after unlink attempt
+                close(fd);
+            }
             return 0;
         }
-        
+
         log_error("Failed to remove PID file %s: %s", pid_file, strerror(errno));
+        if (fd >= 0) {
+            // Ensure descriptor is closed even on failure
+            close(fd);
+        }
         return -1;
+    }
+
+    if (fd >= 0) {
+        // Release the lock by closing the file after unlink
+        close(fd);
     }
 
     log_info("Removed PID file %s", pid_file);
@@ -293,12 +340,27 @@ static int check_running_daemon(const char *pid_file) {
     }
     
     // Try to lock the file
-    if (lockf(fd, F_TLOCK, 0) == 0) {
-        // We got the lock, which means no other process has it
-        // This is a stale PID file
-        log_warn("Found stale PID file %s (not locked), removing it", pid_file);
-        remove_pid_file(fd, pid_file);
-        return 0;
+    for (;;) {
+        if (lockf(fd, F_TLOCK, 0) == 0) {
+            // We got the lock, which means no other process has it
+            // This is a stale PID file
+            log_warn("Found stale PID file %s (not locked), removing it", pid_file);
+            remove_pid_file(fd, pid_file);  // closes fd
+            return 0;
+        }
+
+        if (errno == EINTR) {
+            continue; // Retry interrupted lock attempt
+        }
+
+        if (errno == EACCES || errno == EAGAIN) {
+            // File is locked by another process
+            break;
+        }
+
+        log_error("Failed to lock PID file %s: %s", pid_file, strerror(errno));
+        close(fd);
+        return -1;
     }
     
     // File is locked by another process, read the PID
@@ -330,11 +392,10 @@ static int check_running_daemon(const char *pid_file) {
         return 1;
     } else {
         if (errno == ESRCH) {
-            // Process is not running, but file is locked?
-            // This is unusual, but could happen if the file is locked by another process
-            log_warn("Found stale PID file %s (locked but process %d not running), removing it", pid_file, pid);
-            remove_pid_file(-1, pid_file);
-            return 0;
+            // Process in PID file is not running, but lock is held by another process.
+            // Do not unlink: removing a lock-held PID path can allow multiple daemon instances.
+            log_error("PID file %s is lock-held but process %d is not running; refusing to remove due to ambiguous lock ownership", pid_file, pid);
+            return -1;
         } else {
             log_error("Failed to check process status: %s", strerror(errno));
             return -1;
@@ -365,12 +426,23 @@ int daemon_status(const char *pid_file) {
     }
     
     // Try to lock the file
-    if (lockf(fd, F_TLOCK, 0) == 0) {
+    int lock_ret;
+    do {
+        lock_ret = lockf(fd, F_TLOCK, 0);
+    } while (lock_ret < 0 && errno == EINTR);
+
+    if (lock_ret == 0) {
         // We got the lock, which means no other process has it
         // This is a stale PID file
         log_warn("Found stale PID file %s (not locked), removing it", file_path);
         remove_pid_file(fd, file_path);
         return 0;
+    }
+
+    if (errno != EACCES && errno != EAGAIN) {
+        log_error("Failed to lock PID file %s: %s", file_path, strerror(errno));
+        close(fd);
+        return -1;
     }
     
     // File is locked by another process, read the PID
@@ -400,13 +472,18 @@ int daemon_status(const char *pid_file) {
         // Process is running
         log_info("Daemon is running with PID %d", pid);
         return 1;
+    } else if (errno == EPERM) {
+        // Process exists, but we don't have permission to signal it.
+        // For status checks, this still means the daemon is running.
+        log_info("Daemon is running with PID %d (no permission to signal)", pid);
+        return 1;
     } else {
         if (errno == ESRCH) {
-            // Process is not running, but file is locked?
-            // This is unusual, but could happen if the file is locked by another process
-            log_warn("Found stale PID file %s (locked but process %d not running), removing it", file_path, pid);
-            remove_pid_file(-1, file_path);
-            return 0;
+            // Process is not running, but the PID file is still locked by another process.
+            // Do NOT remove a locked PID file here: unlinking a locked entry can race with
+            // another instance creating a new PID file, allowing multiple daemons to coexist.
+            log_warn("PID file %s is locked but process %d is not running; leaving file in place", file_path, pid);
+            return -1;
         } else {
             log_error("Failed to check process status: %s", strerror(errno));
             return -1;

@@ -24,8 +24,9 @@ import { useVideoZoom } from './useVideoZoom.js';
 import { streamConnectionGate, priorityForStreamStatus, isGateTimeout, isGateAbort } from '../../utils/stream-connection-gate.js';
 import { LiveTileStatus } from './LiveTileStatus.jsx';
 import { PictureInPictureButton } from './PictureInPictureButton.jsx';
+import { getNativeFullscreenElement } from './fullscreenApi.js';
 import {
-  shouldEnterFullscreenFromTap,
+  shouldToggleFullscreenFromTap,
   shouldToggleFullscreenFromDoubleClick,
 } from './useAlwaysFullscreenOnTap.js';
 import { MobileTileContextMenu, useMobileTileGestures } from './MobileTileGestures.jsx';
@@ -738,7 +739,8 @@ export function HLSVideoCell({
       onContextMenu={mobileGestures.onContextMenu}
       onClick={(event) => {
         if (mobileGestures.onClick(event)) return;
-        if (shouldEnterFullscreenFromTap(event, alwaysFullscreenOnTap, zoom.isZoomed)) {
+        if (shouldToggleFullscreenFromTap(event, alwaysFullscreenOnTap, zoom.isZoomed,
+          cellRef.current, getNativeFullscreenElement())) {
           onToggleFullscreen(stream.name, event, cellRef.current);
         }
       }}
@@ -822,7 +824,7 @@ export function HLSVideoCell({
           style={{
             position: 'absolute',
             bottom: '10px',
-            right: '10px',
+            insetInlineEnd: '10px',
             padding: '4px 8px',
             backgroundColor: 'rgba(0, 0, 0, 0.6)',
             color: 'white',
@@ -845,7 +847,7 @@ export function HLSVideoCell({
           style={{
             position: 'absolute',
             top: '10px',
-            left: '10px',
+            insetInlineStart: '10px',
             padding: '5px 10px',
             backgroundColor: 'rgba(0, 0, 0, 0.5)',
             color: 'white',
@@ -892,7 +894,7 @@ export function HLSVideoCell({
         style={{
           position: 'absolute',
           bottom: '10px',
-          right: '10px',
+          insetInlineEnd: '10px',
           display: 'flex',
           gap: '10px',
           zIndex: 30,
@@ -1347,7 +1349,7 @@ export function HLSVideoCell({
           style={{
             position: 'absolute',
             top: '8px',
-            right: '8px',
+            insetInlineEnd: '8px',
             backgroundColor: 'rgba(16, 185, 129, 0.8)',
             color: 'white',
             padding: '4px 8px',

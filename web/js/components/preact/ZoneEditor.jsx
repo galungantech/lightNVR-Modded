@@ -583,7 +583,7 @@ export function ZoneEditor({ streamName, streamWidth, streamHeight, zones = [], 
                 </div>
               )}
               {imageLoaded && snapshotError && (
-                <div className="absolute top-4 left-4 bg-[hsl(var(--warning-muted))] border border-[hsl(var(--warning))] text-[hsl(var(--warning-muted-foreground))] px-3 py-2 rounded text-sm">
+                <div className="absolute top-4 inset-s-4 bg-[hsl(var(--warning-muted))] border border-[hsl(var(--warning))] text-[hsl(var(--warning-muted-foreground))] px-3 py-2 rounded text-sm">
                   ⚠️ {t('zoneEditor.snapshotUnavailable')}
                 </div>
               )}
@@ -626,7 +626,7 @@ export function ZoneEditor({ streamName, streamWidth, streamHeight, zones = [], 
           </div>
 
           {/* Sidebar - Zone List */}
-          <div className="w-80 border-l border-border p-6 overflow-y-auto">
+          <div className="w-80 border-s border-border p-6 overflow-y-auto">
             <h4 className="font-semibold mb-4">{t('zoneEditor.zonesCount', { count: zoneList.length })}</h4>
             
             {zoneList.length === 0 && (
@@ -641,7 +641,10 @@ export function ZoneEditor({ streamName, streamWidth, streamHeight, zones = [], 
                 className={`mb-3 p-3 rounded border ${
                   index === selectedZoneIndex ? 'border-primary bg-primary/10' : 'border-border'
                 }`}
-                onClick={() => setSelectedZoneIndex(index)}
+                onClick={(event) => {
+                  // Preserve the native toggle until onChange records it below.
+                  if (event.target.type !== 'checkbox') setSelectedZoneIndex(index);
+                }}
               >
                 <input
                   type="text"
@@ -666,7 +669,10 @@ export function ZoneEditor({ streamName, streamWidth, streamHeight, zones = [], 
                     <input
                       type="checkbox"
                       checked={zone.enabled}
-                      onChange={(e) => updateZoneProperty(index, 'enabled', e.target.checked)}
+                      onChange={(e) => {
+                        updateZoneProperty(index, 'enabled', e.target.checked);
+                        setSelectedZoneIndex(index);
+                      }}
                     />
                     <span className="text-sm">{t('common.enabled')}</span>
                   </label>
