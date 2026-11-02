@@ -1,7 +1,7 @@
 [submodule "go2rtc"]
 	path = go2rtc
-	url = https://github.com/opensensor/go2rtc.git
-	branch = dev
+	url = https://github.com/galungantech/go2rtc.git
+	branch = master
 [submodule "third_party/litert"]
 	path = third_party/litert
 	url = https://github.com/google-ai-edge/LiteRT.git
