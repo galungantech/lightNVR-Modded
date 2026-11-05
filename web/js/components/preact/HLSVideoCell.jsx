@@ -4,36 +4,43 @@
  */
 
 import { useState, useEffect, useRef } from 'preact/hooks';
-import { DetectionOverlay, drawDetectionsOnCanvas } from './DetectionOverlay.jsx';
-import { SnapshotButton } from './SnapshotManager.jsx';
-import { ManualRecordingButton } from './ManualRecordingButton.jsx';
-import { LoadingIndicator } from './LoadingIndicator.jsx';
-import { showStatusMessage } from './ToastContainer.jsx';
-import { PTZControls } from './PTZControls.jsx';
-import { DayNightControl } from './DayNightControl.jsx';
-import { ConfirmDialog } from './UI.jsx';
-import { getGo2rtcBaseUrl, isGo2rtcAvailable, isGo2rtcEnabled, isForceNativeHls } from '../../utils/settings-utils.js';
-import { formatFilenameTimestamp } from '../../utils/date-utils.js';
-import { forceNavigation } from '../../utils/navigation-utils.js';
-import { formatUtils } from './recordings/formatUtils.js';
-import { useI18n } from '../../i18n.js';
-import { useQueryClient } from '../../query-client.js';
-import { createPlayerTelemetry } from '../../utils/player-telemetry.js';
-import { useAutoRetry } from './useAutoRetry.js';
-import { useVideoZoom } from './useVideoZoom.js';
-import { streamConnectionGate, priorityForStreamStatus, isGateTimeout, isGateAbort } from '../../utils/stream-connection-gate.js';
-import { LiveTileStatus } from './LiveTileStatus.jsx';
-import { PictureInPictureButton } from './PictureInPictureButton.jsx';
-import { getNativeFullscreenElement } from './fullscreenApi.js';
+import { DetectionOverlay, drawDetectionsOnCanvas } from './DetectionOverlay.tsx';
+import { SnapshotButton } from './SnapshotManager.tsx';
+import { ManualRecordingButton } from './ManualRecordingButton.tsx';
+import { LoadingIndicator } from './LoadingIndicator.tsx';
+import { showStatusMessage } from './ToastContainer.tsx';
+import { PTZControls } from './PTZControls.tsx';
+import { DayNightControl } from './DayNightControl.tsx';
+import { ConfirmDialog } from './UI.tsx';
+import { getGo2rtcBaseUrl, isGo2rtcAvailable, isGo2rtcEnabled, isForceNativeHls } from '../../utils/settings-utils.ts';
+import { formatFilenameTimestamp } from '../../utils/date-utils.ts';
+import { forceNavigation } from '../../utils/navigation-utils.ts';
+import { formatUtils } from './recordings/formatUtils.ts';
+import { useI18n } from '../../i18n.ts';
+import { useQueryClient } from '../../query-client.ts';
+import { createPlayerTelemetry } from '../../utils/player-telemetry.ts';
+import { useAutoRetry } from './useAutoRetry.ts';
+import { useVideoZoom } from './useVideoZoom.ts';
+import { streamConnectionGate, priorityForStreamStatus, isGateTimeout, isGateAbort } from '../../utils/stream-connection-gate.ts';
+import { LiveTileStatus } from './LiveTileStatus.tsx';
+import { PictureInPictureButton } from './PictureInPictureButton.tsx';
+import { getNativeFullscreenElement } from './fullscreenApi.ts';
 import {
   shouldToggleFullscreenFromTap,
   shouldToggleFullscreenFromDoubleClick,
-} from './useAlwaysFullscreenOnTap.js';
-import { MobileTileContextMenu, useMobileTileGestures } from './MobileTileGestures.jsx';
-import { TileAudioButton } from './TileAudioButton.jsx';
-import { FisheyeEptzCanvas } from './FisheyeEptzCanvas.jsx';
-import { isEptzEnabled } from '../../utils/eptz-config.js';
+} from './useAlwaysFullscreenOnTap.ts';
+import { MobileTileContextMenu, useMobileTileGestures } from './MobileTileGestures.tsx';
+import { TileAudioButton } from './TileAudioButton.tsx';
+import { FisheyeEptzCanvas } from './FisheyeEptzCanvas.tsx';
+import { isEptzEnabled } from '../../utils/eptz-config.ts';
+import type { DetectionOverlayHandle } from './DetectionOverlay.tsx';
+import type {
+  HlsMode,
+  LiveTransportCellProps,
+  VendorFullscreenDocument,
+} from '../../types/live-transport.ts';
 import Hls from 'hls.js';
+import { clickOnActivationKey } from '../../utils/a11y.ts';
 
 /**
  * HLSVideoCell component
@@ -56,13 +63,13 @@ export function HLSVideoCell({
   mobileGesturesDisabled = false,
   audioDisabled = false,
   onTransportFailure
-}) {
+}: LiveTransportCellProps) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
 
   // Component state
   const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [error, setError] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [audioEnabled, setAudioEnabled] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
@@ -80,7 +87,7 @@ export function HLSVideoCell({
   // HLS source state: 'go2rtc' (go2rtc's dynamic HLS), 'native' (lightNVR FFmpeg-based HLS), or 'failed'
   // Default to native lightNVR HLS (reliable, always running when streaming enabled)
   // go2rtc mode is used only when the backend reports go2rtc is available for this stream
-  const [hlsMode, setHlsMode] = useState(() => {
+  const [hlsMode, setHlsMode] = useState<HlsMode>(() => {
     return stream && stream.go2rtc_hls_available ? 'go2rtc' : 'native';
   });
 
@@ -96,15 +103,15 @@ export function HLSVideoCell({
   const zoom = useVideoZoom({ enabled: !eptzEnabled });
 
   // Refs
-  const videoRef = useRef(null);
-  const cellRef = useRef(null);
-  const hlsPlayerRef = useRef(null);
-  const detectionOverlayRef = useRef(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const cellRef = useRef<HTMLDivElement | null>(null);
+  const hlsPlayerRef = useRef<Hls | null>(null);
+  const detectionOverlayRef = useRef<DetectionOverlayHandle | null>(null);
   const fatalErrorCountRef = useRef(0);  // Track consecutive fatal error recovery attempts
   const recoveringRef = useRef(false);   // True when we're in the middle of error recovery (prevents counter reset)
-  const hlsUrlRef = useRef(null);        // Master manifest URL — stored for session-expiry recovery
+  const hlsUrlRef = useRef<string | null>(null);        // Master manifest URL — stored for session-expiry recovery
   const prevStatusRef = useRef(stream.status); // Track previous stream status for transition detection
-  const cellAbortRef = useRef(null);     // Cancels a queued/in-flight gated preflight on unmount
+  const cellAbortRef = useRef<AbortController | null>(null);     // Cancels a queued/in-flight gated preflight on unmount
   const handleMobileAudioToggle = () => {
     if (audioDisabled) return;
     const nextEnabled = !audioEnabled;
@@ -159,7 +166,7 @@ export function HLSVideoCell({
       });
 
       if (response.ok) {
-        const data = await response.json();
+        const data: unknown = await response.json();
         console.log(`Successfully refreshed go2rtc registration for stream ${stream.name}:`, data);
         return true;
       } else {
@@ -187,11 +194,11 @@ export function HLSVideoCell({
 
     // Track if component is still mounted - using ref for stable access in callbacks
     let isMounted = true;
-    let initTimeout = null;
+    let initTimeout: number | null = null;
 
     // Store event listener references for cleanup (native HLS case)
-    let nativeLoadedHandler = null;
-    let nativeErrorHandler = null;
+    let nativeLoadedHandler: (() => void) | null = null;
+    let nativeErrorHandler: (() => void) | null = null;
 
     // Async initialization function - MUST be defined before doInit to avoid TDZ errors
     const initHls = async () => {
@@ -321,7 +328,7 @@ export function HLSVideoCell({
           return;
         }
         // Network-level failure — let hls.js surface it through its own path
-        console.warn(`[HLS ${stream.name}] Manifest preflight failed (${err.message}), continuing to player`);
+        console.warn(`[HLS ${stream.name}] Manifest preflight failed (${(err as Error).message}), continuing to player`);
       }
       if (!isMounted) return;
 
@@ -368,7 +375,7 @@ export function HLSVideoCell({
         hlsPlayerRef.current = hls;
 
         hls.loadSource(hlsStreamUrl);
-        hls.attachMedia(videoRef.current);
+        hls.attachMedia(videoRef.current!);
 
         hls.on(Hls.Events.MANIFEST_PARSED, function() {
           if (!isMounted) return;
@@ -419,6 +426,7 @@ export function HLSVideoCell({
               hlsPlayerRef.current = null;
             }
             if (isMounted) {
+              // @ts-expect-error TS2552: go2rtcEnabled is block-scoped to the !forceNative branch above; at runtime this throws ReferenceError (logged bug in T6, left in place)
               if (usingGo2rtc && !go2rtcEnabled) {
                 // go2rtc was auto-detected but not force-enabled, fall back to native
                 console.warn(`[HLS ${stream.name}] Falling back to native HLS`);
@@ -472,6 +480,7 @@ export function HLSVideoCell({
               hlsPlayerRef.current = null;
             }
             if (isMounted) {
+              // @ts-expect-error TS2552: go2rtcEnabled is block-scoped to the !forceNative branch above; at runtime this throws ReferenceError (logged bug in T6, left in place)
               if (usingGo2rtc && !go2rtcEnabled) {
                 fatalErrorCountRef.current = 0;
                 setHlsMode('native');
@@ -485,10 +494,10 @@ export function HLSVideoCell({
         });
       }
       // Check if HLS is supported natively (Safari)
-      else if (videoRef.current.canPlayType('application/vnd.apple.mpegurl')) {
+      else if (videoRef.current!.canPlayType('application/vnd.apple.mpegurl')) {
         console.log(`Using native HLS support for stream ${stream.name}`);
         // Native HLS support (Safari)
-        videoRef.current.src = hlsStreamUrl;
+        videoRef.current!.src = hlsStreamUrl;
 
         // Store handlers for cleanup
         nativeLoadedHandler = function() {
@@ -500,6 +509,7 @@ export function HLSVideoCell({
         nativeErrorHandler = function() {
           if (!isMounted) return;
           if (usingGo2rtc) {
+            // @ts-expect-error TS2552: go2rtcEnabled is block-scoped to the !forceNative branch above; at runtime this throws ReferenceError (logged bug in T6, left in place)
             if (go2rtcEnabled) {
               console.error(`[HLS ${stream.name}] go2rtc HLS failed (native player) - no fallback (go2rtc enabled)`);
               setError(t('live.go2rtcHlsFailedRetry'));
@@ -516,8 +526,8 @@ export function HLSVideoCell({
           }
         };
 
-        videoRef.current.addEventListener('loadedmetadata', nativeLoadedHandler);
-        videoRef.current.addEventListener('error', nativeErrorHandler);
+        videoRef.current!.addEventListener('loadedmetadata', nativeLoadedHandler);
+        videoRef.current!.addEventListener('error', nativeErrorHandler);
       } else {
         // Fallback for truly unsupported browsers
         console.error(`HLS not supported for stream ${stream.name} - neither HLS.js nor native support available`);
@@ -673,7 +683,7 @@ export function HLSVideoCell({
       setShowPrivacyConfirm(false);
       queryClient.invalidateQueries({ queryKey: ['streams'] });
     } catch (err) {
-      showStatusMessage(`${t('live.pauseForPrivacy')}: ${err.message}`, 'error', 5000);
+      showStatusMessage(`${t('live.pauseForPrivacy')}: ${(err as Error).message}`, 'error', 5000);
       setShowPrivacyConfirm(false);
     } finally {
       setIsTogglingEnabled(false);
@@ -695,7 +705,7 @@ export function HLSVideoCell({
       setPrivacyActive(false);
       queryClient.invalidateQueries({ queryKey: ['streams'] });
     } catch (err) {
-      showStatusMessage(`${t('live.resumeStream')}: ${err.message}`, 'error', 5000);
+      showStatusMessage(`${t('live.resumeStream')}: ${(err as Error).message}`, 'error', 5000);
     } finally {
       setIsTogglingEnabled(false);
     }
@@ -725,7 +735,7 @@ export function HLSVideoCell({
   }, [stream?.name]);
 
   return (
-    <div
+    <div /* eslint-disable-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- pointer shortcut; the tile toolbar has a keyboard-reachable fullscreen button */
       className="video-cell"
       data-stream-name={stream.name}
       data-stream-id={streamId}
@@ -769,7 +779,7 @@ export function HLSVideoCell({
       }}
     >
       {/* Video element */}
-      <video
+      <video /* eslint-disable-line jsx-a11y/media-has-caption -- camera footage has no caption source */
         id={`video-${streamId.replace(/\s+/g, '-')}`}
         className="video-element"
         ref={videoRef}
@@ -884,6 +894,15 @@ export function HLSVideoCell({
             }`}
           />
           {stream.name}
+          <span style={{
+            fontSize: '10px',
+            padding: '1px 4px',
+            borderRadius: '3px',
+            backgroundColor: hlsMode === 'go2rtc' ? 'rgba(0, 150, 255, 0.7)' : 'rgba(100, 100, 100, 0.7)',
+            color: 'white'
+          }}>
+            {hlsMode === 'go2rtc' ? 'go2rtc' : 'HLS'}
+          </span>
         </div>
       )}
 
@@ -922,7 +941,7 @@ export function HLSVideoCell({
               const canvas = document.createElement('canvas');
               canvas.width = videoElement.videoWidth;
               canvas.height = videoElement.videoHeight;
-              const ctx = canvas.getContext('2d');
+              const ctx = canvas.getContext('2d')!;
 
               // Draw video frame at native resolution
               ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
@@ -967,6 +986,7 @@ export function HLSVideoCell({
         {canControlPrivacy && <button
           type="button"
           title={t('live.pauseForPrivacy')}
+          aria-label={t('live.pauseForPrivacy')}
           onClick={() => setShowPrivacyConfirm(true)}
           style={{
             backgroundColor: 'transparent',
@@ -981,7 +1001,9 @@ export function HLSVideoCell({
             justifyContent: 'center'
           }}
           onMouseOver={(e) => e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.2)'}
+          onFocus={(e) => e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.2)'}
           onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+          onBlur={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
         >
           <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M18.36 6.64A9 9 0 1 1 5.64 17.36"/>
@@ -1004,7 +1026,9 @@ export function HLSVideoCell({
               transition: 'background-color 0.2s ease'
             }}
             onMouseOver={(e) => e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.2)'}
+            onFocus={(e) => e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.2)'}
             onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+            onBlur={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
           >
             {showDetections ? (
               <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1035,7 +1059,9 @@ export function HLSVideoCell({
               transition: 'background-color 0.2s ease'
             }}
             onMouseOver={(e) => !showPTZControls && (e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.2)')}
+            onFocus={(e) => !showPTZControls && (e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.2)')}
             onMouseOut={(e) => !showPTZControls && (e.currentTarget.style.backgroundColor = 'transparent')}
+            onBlur={(e) => !showPTZControls && (e.currentTarget.style.backgroundColor = 'transparent')}
           >
             {/* PTZ/Joystick icon */}
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1063,7 +1089,9 @@ export function HLSVideoCell({
               transition: 'background-color 0.2s ease'
             }}
             onMouseOver={(e) => e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.2)'}
+            onFocus={(e) => e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.2)'}
             onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+            onBlur={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
           >
             {/* Refresh/reload icon */}
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1079,7 +1107,7 @@ export function HLSVideoCell({
           title={t('live.viewInTimeline')}
           aria-label={t('live.viewInTimeline')}
           onClick={(event) => {
-            const fromFullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement);
+            const fromFullscreen = !!(document.fullscreenElement || (document as VendorFullscreenDocument).webkitFullscreenElement);
             forceNavigation(formatUtils.getTimelineUrl(stream.name, new Date().toISOString(), fromFullscreen), event);
           }}
           style={{
@@ -1092,7 +1120,9 @@ export function HLSVideoCell({
             transition: 'background-color 0.2s ease'
           }}
           onMouseOver={(event) => (event.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.2)')}
+          onFocus={(event) => (event.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.2)')}
           onMouseOut={(event) => (event.currentTarget.style.backgroundColor = 'transparent')}
+          onBlur={(event) => (event.currentTarget.style.backgroundColor = 'transparent')}
         >
           <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 640 640" fill="white" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M320 128C426 128 512 214 512 320C512 426 426 512 320 512C254.8 512 197.1 479.5 162.4 429.7C152.3 415.2 132.3 411.7 117.8 421.8C103.3 431.9 99.8 451.9 109.9 466.4C156.1 532.6 233 576 320 576C461.4 576 576 461.4 576 320C576 178.6 461.4 64 320 64C234.3 64 158.5 106.1 112 170.7L112 144C112 126.3 97.7 112 80 112C62.3 112 48 126.3 48 144L48 256C48 273.7 62.3 288 80 288L104.6 288C105.1 288 105.6 288 106.1 288L192.1 288C209.8 288 224.1 273.7 224.1 256C224.1 238.3 209.8 224 192.1 224L153.8 224C186.9 166.6 249 128 320 128zM344 216C344 202.7 333.3 192 320 192C306.7 192 296 202.7 296 216L296 320C296 326.4 298.5 332.5 303 337L375 409C384.4 418.4 399.6 418.4 408.9 409C418.2 399.6 418.3 384.4 408.9 375.1L343.9 310.1L343.9 216z"/>
@@ -1109,6 +1139,7 @@ export function HLSVideoCell({
         <button
           className="fullscreen-btn"
           title={t('live.toggleFullscreen')}
+          aria-label={t('live.toggleFullscreen')}
           data-id={streamId}
           data-name={stream.name}
           onClick={(e) => onToggleFullscreen(stream.name, e, cellRef.current)}
@@ -1121,7 +1152,9 @@ export function HLSVideoCell({
             cursor: 'pointer'
           }}
           onMouseOver={(e) => e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.2)'}
+          onFocus={(e) => e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.2)'}
           onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+          onBlur={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
         >
           <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path></svg>
         </button>
@@ -1223,7 +1256,9 @@ export function HLSVideoCell({
                 transition: 'background-color 0.2s ease'
               }}
               onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#1d4ed8'}
+              onFocus={(e) => e.currentTarget.style.backgroundColor = '#1d4ed8'}
               onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#2563eb'}
+              onBlur={(e) => e.currentTarget.style.backgroundColor = '#2563eb'}
             >
               {autoRetryCountdown !== null && autoRetryCountdown > 0
                 ? t('live.autoRetryingIn', { seconds: autoRetryCountdown })
@@ -1235,7 +1270,7 @@ export function HLSVideoCell({
 
       {/* Play button overlay (for browsers that block autoplay) */}
       {!isPlaying && !isLoading && !error && (
-        <div
+        <div role="button" tabIndex={0} onKeyDown={clickOnActivationKey} aria-label={t('recordings.play')}
           className="play-overlay"
           style={{
             position: 'absolute',
