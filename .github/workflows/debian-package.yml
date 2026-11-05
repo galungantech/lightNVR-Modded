@@ -18,32 +18,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Debian sid (unstable) builds
-          #- runner: ubuntu-latest
-            #platform: linux/amd64
-            #deb_arch: amd64
-            #debian_suite: sid
-          #- runner: ubuntu-24.04-arm
-            #platform: linux/arm64
-            #deb_arch: arm64
-            #debian_suite: sid
-          #- runner: ubuntu-latest
-            #platform: linux/arm/v7
-            #deb_arch: armhf
-            #debian_suite: sid
           # Debian trixie (13/stable) builds
-          #- runner: ubuntu-latest
-            #platform: linux/amd64
-            #deb_arch: amd64
-            #debian_suite: trixie
           - runner: ubuntu-24.04-arm
             platform: linux/arm64
             deb_arch: arm64
             debian_suite: trixie
-          #- runner: ubuntu-latest
-            #platform: linux/arm/v7
-            #deb_arch: armhf
-            #debian_suite: trixie
 
     steps:
       - name: Checkout
@@ -89,7 +68,7 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           DEB_ARCH="${{ matrix.deb_arch }}"
           DEBIAN_SUITE="${{ matrix.debian_suite }}"
-          PKG_NAME="lightnvr-modded_${VERSION}_${DEBIAN_SUITE}_${DEB_ARCH}"
+          PKG_NAME="lightnvr_${VERSION}_${DEBIAN_SUITE}_${DEB_ARCH}"
           PKG_DIR="$(pwd)/pkg/${PKG_NAME}"
 
           # ── Directory structure ──────────────────────────────────────────────
@@ -213,16 +192,15 @@ jobs:
           # Un-indent the service file (heredoc indented for readability)
           sed -i 's/^          //' "${PKG_DIR}/lib/systemd/system/lightnvr.service"
 
-          # ── Suite-specific FFmpeg dependency names ─────────────────────────
+          # ── Dependencies on the library versions the binary actually links ─
+          LINKED_DEPS="$(scripts/deb-linked-deps.sh "${PKG_DIR}/usr/bin/lightnvr")"
+          echo "Linked library dependencies: ${LINKED_DEPS}"
+
           case "${DEBIAN_SUITE}" in
             sid)
-              FFMPEG_DEPS="libavcodec62 | libavcodec-extra, libavformat62, libavutil60, libswscale9, libavfilter11"
-              LLHTTP_DEP="libllhttp9.3"
               SUITE_NOTE="Note: This package targets Debian sid (unstable)."
               ;;
             trixie)
-              FFMPEG_DEPS="libavcodec61 | libavcodec-extra, libavformat61, libavutil59, libswscale8, libavfilter10"
-              LLHTTP_DEP="libllhttp9.2"
               SUITE_NOTE="Note: This package targets Debian 13 trixie (stable)."
               ;;
             *)
@@ -239,7 +217,7 @@ jobs:
           Architecture: ${DEB_ARCH}
           Maintainer: OpenSensor <support@opensensor.io>
           Installed-Size: ${INSTALLED_SIZE}
-          Depends: ffmpeg, ${FFMPEG_DEPS}, libuv1t64, libsqlite3-0, ${LLHTTP_DEP}, libcurl4t64 | libcurl4, libmbedtls21, libmosquitto1, libcjson1, libyaml-0-2, procps, tzdata
+          Depends: ffmpeg, ${LINKED_DEPS}, libuv1t64, libsqlite3-0, libcurl4t64 | libcurl4, libmbedtls21, libmosquitto1, libcjson1, libyaml-0-2, procps, tzdata
           Section: net
           Priority: optional
           Homepage: https://github.com/opensensor/lightNVR
