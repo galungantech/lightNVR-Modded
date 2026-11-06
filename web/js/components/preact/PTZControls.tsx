@@ -22,9 +22,8 @@ import type { PtzCapabilities, PtzDirection, PtzError, PtzPreset } from '../../t
 
 interface DirectionButtonProps {
   direction: PtzDirection;
-  onMouseDown: () => unknown;
-  onMouseUp: () => unknown;
-  onMouseLeave: () => unknown;
+  onPressStart: () => void;
+  onPressEnd: () => void;
   disabled?: boolean;
 }
 
@@ -44,13 +43,12 @@ interface Position {
 const DEFAULT_POSITION: Position = { x: 10, y: 10 };
 
 /**
- * Direction button component dengan ikon SVG modern & efek visual
+ * Direction button component dengan event handler tangguh
  */
 function DirectionButton({
   direction,
-  onMouseDown,
-  onMouseUp,
-  onMouseLeave,
+  onPressStart,
+  onPressEnd,
   disabled
 }: DirectionButtonProps) {
   const icons: Record<PtzDirection, JSX.Element> = {
@@ -91,16 +89,23 @@ function DirectionButton({
     )
   };
 
+  const handleMouseDown = (e: MouseEvent) => {
+    if (disabled || e.button !== 0) return;
+    onPressStart();
+  };
+
+  const handleTouchStart = (e: TouchEvent) => {
+    if (disabled) return;
+    if (e.cancelable) e.preventDefault(); // Mencegah scrolling/gestur default saat menekan kontrol PTZ
+    onPressStart();
+  };
+
   return (
     <button
       type="button"
       className={`ptz-btn ptz-btn-${direction}`}
-      onMouseDown={onMouseDown}
-      onMouseUp={onMouseUp}
-      onMouseLeave={onMouseLeave}
-      onTouchStart={onMouseDown}
-      onTouchEnd={onMouseUp}
-      onTouchCancel={onMouseUp}
+      onMouseDown={handleMouseDown as any}
+      onTouchStart={handleTouchStart as any}
       disabled={disabled}
       style={{
         width: '32px',
@@ -135,7 +140,6 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
   const [speed, setSpeed] = useState<number>(0.5);
   const [presets, setPresets] = useState<PtzPreset[]>([]);
   const [selectedPreset, setSelectedPreset] = useState<string>('');
-  const [isMoving, setIsMoving] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [capabilities, setCapabilities] = useState<PtzCapabilities | null>(null);
   const [canManage, setCanManage] = useState<boolean>(true);
@@ -143,6 +147,9 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
   const [showPresetForm, setShowPresetForm] = useState<boolean>(false);
   const [confirmSetHome, setConfirmSetHome] = useState<boolean>(false);
   const [saving, setSaving] = useState<boolean>(false);
+
+  // Synchronous ref untuk melacak pergerakan tanpa delay state
+  const isMovingRef = useRef<boolean>(false);
 
   // =========================
   // DRAG STATE & FUNCTIONS
@@ -335,26 +342,48 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
     }
   }, [stream?.name, saving, t, handleActionFailure]);
 
+  // ==========================================
+  // PTZ MOVE & STOP LOGIC PERBAIKAN BUG
+  // ==========================================
+  const handleMoveStop = useCallback(() => {
+    if (!stream?.name || !isMovingRef.current) return;
+    isMovingRef.current = false;
+    
+    ptzStop(stream.name)
+      .catch(err => console.error('PTZ stop error:', err));
+  }, [stream?.name]);
+
   const handleMoveStart = useCallback((pan: number, tilt: number, zoom: number) => {
     if (!stream?.name) return;
-    setIsMoving(true);
+    isMovingRef.current = true;
     setError(null);
     
     ptzMove(stream.name, pan * speed, tilt * speed, zoom * speed)
       .catch(err => {
-        setIsMoving(false);
+        isMovingRef.current = false;
         setError(t('live.ptzMoveFailed'));
         console.error('PTZ move error:', err);
       });
   }, [stream?.name, speed, t]);
 
-  const handleMoveStop = useCallback(() => {
-    if (!stream?.name || !isMoving) return;
-    setIsMoving(false);
-    
-    ptzStop(stream.name)
-      .catch(err => console.error('PTZ stop error:', err));
-  }, [stream?.name, isMoving]);
+  // Pasang global listener pada window saat tombol PTZ ditahan
+  useEffect(() => {
+    const handleGlobalRelease = () => {
+      if (isMovingRef.current) {
+        handleMoveStop();
+      }
+    };
+
+    window.addEventListener('mouseup', handleGlobalRelease);
+    window.addEventListener('touchend', handleGlobalRelease);
+    window.addEventListener('touchcancel', handleGlobalRelease);
+
+    return () => {
+      window.removeEventListener('mouseup', handleGlobalRelease);
+      window.removeEventListener('touchend', handleGlobalRelease);
+      window.removeEventListener('touchcancel', handleGlobalRelease);
+    };
+  }, [handleMoveStop]);
 
   const handleHome = useCallback(() => {
     if (!stream?.name) return;
@@ -487,17 +516,15 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
         <div></div>
         <DirectionButton
           direction="up"
-          onMouseDown={() => handleMoveStart(0, 1, 0)}
-          onMouseUp={handleMoveStop}
-          onMouseLeave={handleMoveStop}
+          onPressStart={() => handleMoveStart(0, 1, 0)}
+          onPressEnd={handleMoveStop}
         />
         <div></div>
 
         <DirectionButton
           direction="left"
-          onMouseDown={() => handleMoveStart(-1, 0, 0)}
-          onMouseUp={handleMoveStop}
-          onMouseLeave={handleMoveStop}
+          onPressStart={() => handleMoveStart(-1, 0, 0)}
+          onPressEnd={handleMoveStop}
         />
 
         {/* HOME BUTTON */}
@@ -530,17 +557,15 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
 
         <DirectionButton
           direction="right"
-          onMouseDown={() => handleMoveStart(1, 0, 0)}
-          onMouseUp={handleMoveStop}
-          onMouseLeave={handleMoveStop}
+          onPressStart={() => handleMoveStart(1, 0, 0)}
+          onPressEnd={handleMoveStop}
         />
 
         <div></div>
         <DirectionButton
           direction="down"
-          onMouseDown={() => handleMoveStart(0, -1, 0)}
-          onMouseUp={handleMoveStop}
-          onMouseLeave={handleMoveStop}
+          onPressStart={() => handleMoveStart(0, -1, 0)}
+          onPressEnd={handleMoveStop}
         />
         <div></div>
       </div>
@@ -558,9 +583,8 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
       >
         <DirectionButton
           direction="zoom-out"
-          onMouseDown={() => handleMoveStart(0, 0, -1)}
-          onMouseUp={handleMoveStop}
-          onMouseLeave={handleMoveStop}
+          onPressStart={() => handleMoveStart(0, 0, -1)}
+          onPressEnd={handleMoveStop}
         />
 
         <span
@@ -576,9 +600,8 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
 
         <DirectionButton
           direction="zoom-in"
-          onMouseDown={() => handleMoveStart(0, 0, 1)}
-          onMouseUp={handleMoveStop}
-          onMouseLeave={handleMoveStop}
+          onPressStart={() => handleMoveStart(0, 0, 1)}
+          onPressEnd={handleMoveStop}
         />
       </div>
 
