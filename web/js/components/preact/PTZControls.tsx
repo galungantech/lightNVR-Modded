@@ -43,7 +43,7 @@ interface Position {
 const DEFAULT_POSITION: Position = { x: 10, y: 10 };
 
 /**
- * Direction button component dengan event handler tangguh
+ * Direction button component with enhanced icons and robust event handlers
  */
 function DirectionButton({
   direction,
@@ -53,23 +53,23 @@ function DirectionButton({
 }: DirectionButtonProps) {
   const icons: Record<PtzDirection, JSX.Element> = {
     up: (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M18 15l-6-6-6 6" />
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="m18 15-6-6-6 6" />
       </svg>
     ),
     down: (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M6 9l6 6 6-6" />
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="m6 9 6 6 6-6" />
       </svg>
     ),
     left: (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M15 18l-6-6 6-6" />
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="m15 18-6-6 6-6" />
       </svg>
     ),
     right: (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M9 18l6-6-6-6" />
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="m9 18 6-6-6-6" />
       </svg>
     ),
     'zoom-in': (
@@ -132,7 +132,7 @@ function DirectionButton({
 }
 
 /**
- * PTZ Controls component (TS Version)
+ * PTZ Controls Component
  */
 export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsProps) {
   const { t } = useI18n();
@@ -148,7 +148,7 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
   const [confirmSetHome, setConfirmSetHome] = useState<boolean>(false);
   const [saving, setSaving] = useState<boolean>(false);
 
-  // Synchronous ref untuk melacak pergerakan tanpa delay state
+  // Synchronous ref to track movement state without delay
   const isMovingRef = useRef<boolean>(false);
 
   // =========================
@@ -191,13 +191,12 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
     };
   }, []);
 
-  // Perbaikan penanganan posisi saat Fullscreen / Resize HP
+  // Reset position layout on fullscreen change or mobile viewport resize
   useEffect(() => {
     const handleLayoutReset = () => {
       setPosition(DEFAULT_POSITION);
     };
 
-    // Reset posisi baik saat fullscreen state berubah maupun window resize (orientasi HP)
     document.addEventListener('fullscreenchange', handleLayoutReset);
     window.addEventListener('resize', handleLayoutReset);
 
@@ -439,7 +438,7 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
         pointerEvents: 'auto'
       }}
     >
-      {/* HEADER DRAG */}
+      {/* DRAG HEADER */}
       <div
         onMouseDown={(e) => startDrag(e as unknown as MouseEvent)}
         onTouchStart={(e) => startDrag(e as unknown as TouchEvent)}
@@ -455,13 +454,13 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
           boxSizing: 'border-box'
         }}
       >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="rgba(255,255,255,0.6)" style={{ marginRight: '6px', flexShrink: 0 }}>
-          <circle cx="9" cy="5" r="1.5" />
-          <circle cx="9" cy="12" r="1.5" />
-          <circle cx="9" cy="19" r="1.5" />
-          <circle cx="15" cy="5" r="1.5" />
-          <circle cx="15" cy="12" r="1.5" />
-          <circle cx="15" cy="19" r="1.5" />
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.7)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: '6px', flexShrink: 0 }}>
+          <circle cx="9" cy="5" r="1" />
+          <circle cx="9" cy="12" r="1" />
+          <circle cx="9" cy="19" r="1" />
+          <circle cx="15" cy="5" r="1" />
+          <circle cx="15" cy="12" r="1" />
+          <circle cx="15" cy="19" r="1" />
         </svg>
 
         <span
@@ -498,8 +497,8 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
             }}
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="18" y1="6" x2="6" y2="18" />
-              <line x1="6" y1="6" x2="18" y2="18" />
+              <path d="M18 6 6 18" />
+              <path d="m6 6 12 12" />
             </svg>
           </button>
         )}
@@ -554,7 +553,7 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
           }}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+            <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
             <polyline points="9 22 9 12 15 12 15 22" />
           </svg>
         </button>
@@ -695,7 +694,7 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
               type="button"
               onClick={handleDeletePreset}
               disabled={saving}
-              title={t('common.delete') || 'Hapus Preset'}
+              title={t('common.delete') || 'Delete Preset'}
               style={{
                 width: '32px',
                 minWidth: '32px',
@@ -715,15 +714,18 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
               }}
             >
               <svg
-                width="12"
+                width="14"
                 height="14"
                 viewBox="0 0 24 24"
                 fill="none"
-                stroke="white"
+                stroke="currentColor"
                 strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
               >
-                <polyline points="3 6 5 6 21 6"></polyline>
-                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                <path d="M3 6h18" />
+                <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+                <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
               </svg>
             </button>
           )}
@@ -819,9 +821,10 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
               transition: 'all 0.15s ease'
             }}
           >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="12" y1="5" x2="12" y2="19" />
-              <line x1="5" y1="12" x2="19" y2="12" />
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M12 8v8" />
+              <path d="M8 12h8" />
             </svg>
             <span>{t('live.ptzSaveCurrentPosition')}</span>
           </button>
@@ -864,8 +867,8 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
               transition: 'all 0.15s ease'
             }}
           >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0" />
               <circle cx="12" cy="10" r="3" />
             </svg>
             <span>{t('live.ptzSetCurrentPositionHome')}</span>
