@@ -53,27 +53,27 @@ function DirectionButton({
 }: DirectionButtonProps) {
   const icons: Record<PtzDirection, JSX.Element> = {
     up: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
         <path d="M18 15l-6-6-6 6" />
       </svg>
     ),
     down: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
         <path d="M6 9l6 6 6-6" />
       </svg>
     ),
     left: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
         <path d="M15 18l-6-6 6-6" />
       </svg>
     ),
     right: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
         <path d="M9 18l6-6-6-6" />
       </svg>
     ),
     'zoom-in': (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <circle cx="11" cy="11" r="8" />
         <line x1="21" y1="21" x2="16.65" y2="16.65" />
         <line x1="11" y1="8" x2="11" y2="14" />
@@ -81,7 +81,7 @@ function DirectionButton({
       </svg>
     ),
     'zoom-out': (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <circle cx="11" cy="11" r="8" />
         <line x1="21" y1="21" x2="16.65" y2="16.65" />
         <line x1="8" y1="11" x2="14" y2="11" />
@@ -96,7 +96,7 @@ function DirectionButton({
 
   const handleTouchStart = (e: TouchEvent) => {
     if (disabled) return;
-    if (e.cancelable) e.preventDefault(); // Mencegah scrolling/gestur default saat menekan kontrol PTZ
+    if (e.cancelable) e.preventDefault();
     onPressStart();
   };
 
@@ -108,8 +108,8 @@ function DirectionButton({
       onTouchStart={handleTouchStart as any}
       disabled={disabled}
       style={{
-        width: '32px',
-        height: '32px',
+        width: '38px',
+        height: '38px',
         borderRadius: '50%',
         border: '1px solid rgba(255, 255, 255, 0.2)',
         backgroundColor: 'rgba(255, 255, 255, 0.08)',
@@ -191,14 +191,19 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
     };
   }, []);
 
+  // Perbaikan penanganan posisi saat Fullscreen / Resize HP
   useEffect(() => {
-    const handleFullscreenChange = () => {
+    const handleLayoutReset = () => {
       setPosition(DEFAULT_POSITION);
     };
 
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    // Reset posisi baik saat fullscreen state berubah maupun window resize (orientasi HP)
+    document.addEventListener('fullscreenchange', handleLayoutReset);
+    window.addEventListener('resize', handleLayoutReset);
+
     return () => {
-      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('fullscreenchange', handleLayoutReset);
+      window.removeEventListener('resize', handleLayoutReset);
     };
   }, []);
 
@@ -343,7 +348,7 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
   }, [stream?.name, saving, t, handleActionFailure]);
 
   // ==========================================
-  // PTZ MOVE & STOP LOGIC PERBAIKAN BUG
+  // PTZ MOVE & STOP LOGIC
   // ==========================================
   const handleMoveStop = useCallback(() => {
     if (!stream?.name || !isMovingRef.current) return;
@@ -366,7 +371,6 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
       });
   }, [stream?.name, speed, t]);
 
-  // Pasang global listener pada window saat tombol PTZ ditahan
   useEffect(() => {
     const handleGlobalRelease = () => {
       if (isMovingRef.current) {
@@ -429,7 +433,7 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
         display: 'flex',
         flexDirection: 'column',
         gap: '8px',
-        minWidth: '140px',
+        minWidth: '155px',
         touchAction: 'none',
         userSelect: 'none',
         pointerEvents: 'auto'
@@ -506,9 +510,9 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
         dir="ltr" 
         style={{ 
           display: 'grid', 
-          gridTemplateColumns: 'repeat(3, 32px)', 
-          gridTemplateRows: 'repeat(3, 32px)',
-          gap: '4px', 
+          gridTemplateColumns: 'repeat(3, 38px)', 
+          gridTemplateRows: 'repeat(3, 38px)',
+          gap: '6px', 
           justifyContent: 'center',
           alignItems: 'center'
         }}
@@ -534,8 +538,8 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
           aria-label={t('live.goToHomePosition')}
           title={t('live.goToHomePosition')}
           style={{
-            width: '32px',
-            height: '32px',
+            width: '38px',
+            height: '38px',
             borderRadius: '50%',
             border: '1px solid rgba(59, 130, 246, 0.4)',
             backgroundColor: 'rgba(37, 99, 235, 0.25)',
@@ -549,7 +553,7 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
             margin: 'auto'
           }}
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
             <polyline points="9 22 9 12 15 12 15 22" />
           </svg>
