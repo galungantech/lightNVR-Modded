@@ -1,6 +1,6 @@
 /**
  * PTZ Controls Component
- * Pan-Tilt-Zoom controls for PTZ-enabled cameras (TypeScript version with Draggable Panel & Delete Preset)
+ * Pan-Tilt-Zoom controls for PTZ-enabled cameras
  */
 
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
@@ -43,7 +43,7 @@ interface Position {
 const DEFAULT_POSITION: Position = { x: 10, y: 10 };
 
 /**
- * Direction button component with darker background for maximum icon clarity
+ * Direction button component with direct event listeners for guaranteed ptzStop
  */
 function DirectionButton({
   direction,
@@ -89,25 +89,27 @@ function DirectionButton({
     )
   };
 
-  const handleMouseDown = (e: MouseEvent) => {
+  const handleStart = (e: Event) => {
     e.stopPropagation();
-    if (disabled || e.button !== 0) return;
+    if (disabled) return;
     onPressStart();
   };
 
-  const handleTouchStart = (e: TouchEvent) => {
+  const handleEnd = (e: Event) => {
     e.stopPropagation();
-    if (disabled) return;
-    if (e.cancelable) e.preventDefault();
-    onPressStart();
+    onPressEnd();
   };
 
   return (
     <button
       type="button"
       className={`ptz-btn ptz-btn-${direction}`}
-      onMouseDown={handleMouseDown as any}
-      onTouchStart={handleTouchStart as any}
+      onMouseDown={handleStart as any}
+      onMouseUp={handleEnd as any}
+      onMouseLeave={handleEnd as any}
+      onTouchStart={handleStart as any}
+      onTouchEnd={handleEnd as any}
+      onTouchCancel={handleEnd as any}
       disabled={disabled}
       style={{
         width: '38px',
@@ -151,7 +153,7 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
   const [confirmSetHome, setConfirmSetHome] = useState<boolean>(false);
   const [saving, setSaving] = useState<boolean>(false);
 
-  // Synchronous ref to track movement state without delay
+  // Synchronous ref to track movement state reliably
   const isMovingRef = useRef<boolean>(false);
 
   // =========================
@@ -194,7 +196,7 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
     };
   }, []);
 
-  // Direct synchronous position reset on fullscreen change and resize for all devices
+  // Reset position to DEFAULT_POSITION on fullscreen change and window resize for all devices
   useEffect(() => {
     const handleFullscreenChange = () => {
       setPosition(DEFAULT_POSITION);
@@ -209,7 +211,7 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
     };
   }, []);
 
-  // Strict Event Boundary Isolation - Isolates PTZ Panel events completely from camera swiper/browser
+  // Strict Event Boundary Isolation for panel dragging
   useEffect(() => {
     const panel = panelRef.current;
     if (!panel) return;
@@ -220,13 +222,11 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
 
     const handleTouchMoveBound = (e: TouchEvent) => {
       e.stopPropagation();
-      // Block pull-to-refresh & camera container swipe actions when dragging UI PTZ
       if (dragData.current.dragging && e.cancelable) {
         e.preventDefault();
       }
     };
 
-    // Attach listeners in Capture Phase to intercept before reaching parent elements
     panel.addEventListener('touchstart', stopPropagationOnly, { capture: true, passive: true });
     panel.addEventListener('touchmove', handleTouchMoveBound, { capture: true, passive: false });
     panel.addEventListener('touchend', stopPropagationOnly, { capture: true, passive: true });
@@ -415,24 +415,6 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
         console.error('PTZ move error:', err);
       });
   }, [stream?.name, speed, t]);
-
-  useEffect(() => {
-    const handleGlobalRelease = () => {
-      if (isMovingRef.current) {
-        handleMoveStop();
-      }
-    };
-
-    window.addEventListener('mouseup', handleGlobalRelease, { capture: true });
-    window.addEventListener('touchend', handleGlobalRelease, { capture: true });
-    window.addEventListener('touchcancel', handleGlobalRelease, { capture: true });
-
-    return () => {
-      window.removeEventListener('mouseup', handleGlobalRelease, { capture: true });
-      window.removeEventListener('touchend', handleGlobalRelease, { capture: true });
-      window.removeEventListener('touchcancel', handleGlobalRelease, { capture: true });
-    };
-  }, [handleMoveStop]);
 
   const handleHome = useCallback((e?: MouseEvent) => {
     if (e) e.stopPropagation();
