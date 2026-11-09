@@ -43,7 +43,7 @@ interface Position {
 const DEFAULT_POSITION: Position = { x: 10, y: 10 };
 
 /**
- * Direction button component with darker button backgrounds for high icon contrast
+ * Direction button component with darker background for maximum icon clarity
  */
 function DirectionButton({
   direction,
@@ -114,7 +114,7 @@ function DirectionButton({
         height: '38px',
         borderRadius: '50%',
         border: '1px solid rgba(255, 255, 255, 0.3)',
-        backgroundColor: 'rgba(15, 23, 42, 0.75)',
+        backgroundColor: 'rgba(15, 23, 42, 0.85)',
         color: '#ffffff',
         cursor: disabled ? 'not-allowed' : 'pointer',
         display: 'flex',
@@ -194,52 +194,49 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
     };
   }, []);
 
-  // Guarantee position reset across layout reflows (Fullscreen Exit & Resize)
+  // Direct synchronous position reset on fullscreen change and resize for all devices
   useEffect(() => {
-    const handleLayoutReset = () => {
-      // Force position reset immediately
+    const handleFullscreenChange = () => {
       setPosition(DEFAULT_POSITION);
-
-      // Re-apply post DOM reflow on mobile browsers
-      requestAnimationFrame(() => {
-        setPosition(DEFAULT_POSITION);
-        setTimeout(() => {
-          setPosition(DEFAULT_POSITION);
-        }, 150);
-      });
     };
 
-    document.addEventListener('fullscreenchange', handleLayoutReset);
-    window.addEventListener('resize', handleLayoutReset);
-    window.addEventListener('orientationchange', handleLayoutReset);
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    window.addEventListener('resize', handleFullscreenChange);
 
     return () => {
-      document.removeEventListener('fullscreenchange', handleLayoutReset);
-      window.removeEventListener('resize', handleLayoutReset);
-      window.removeEventListener('orientationchange', handleLayoutReset);
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      window.removeEventListener('resize', handleFullscreenChange);
     };
   }, []);
 
-  // Strict Event Boundary Isolation (Prevents camera swiping & browser pull-to-refresh)
+  // Strict Event Boundary Isolation - Isolates PTZ Panel events completely from camera swiper/browser
   useEffect(() => {
     const panel = panelRef.current;
     if (!panel) return;
 
-    const blockTouchLeakage = (e: TouchEvent) => {
+    const stopPropagationOnly = (e: Event) => {
       e.stopPropagation();
-      if (e.cancelable && dragData.current.dragging) {
+    };
+
+    const handleTouchMoveBound = (e: TouchEvent) => {
+      e.stopPropagation();
+      // Block pull-to-refresh & camera container swipe actions when dragging UI PTZ
+      if (dragData.current.dragging && e.cancelable) {
         e.preventDefault();
       }
     };
 
-    panel.addEventListener('touchstart', blockTouchLeakage, { passive: false });
-    panel.addEventListener('touchmove', blockTouchLeakage, { passive: false });
-    panel.addEventListener('touchend', blockTouchLeakage, { passive: false });
+    // Attach listeners in Capture Phase to intercept before reaching parent elements
+    panel.addEventListener('touchstart', stopPropagationOnly, { capture: true, passive: true });
+    panel.addEventListener('touchmove', handleTouchMoveBound, { capture: true, passive: false });
+    panel.addEventListener('touchend', stopPropagationOnly, { capture: true, passive: true });
+    panel.addEventListener('touchcancel', stopPropagationOnly, { capture: true, passive: true });
 
     return () => {
-      panel.removeEventListener('touchstart', blockTouchLeakage);
-      panel.removeEventListener('touchmove', blockTouchLeakage);
-      panel.removeEventListener('touchend', blockTouchLeakage);
+      panel.removeEventListener('touchstart', stopPropagationOnly, { capture: true });
+      panel.removeEventListener('touchmove', handleTouchMoveBound, { capture: true });
+      panel.removeEventListener('touchend', stopPropagationOnly, { capture: true });
+      panel.removeEventListener('touchcancel', stopPropagationOnly, { capture: true });
     };
   }, []);
 
@@ -303,12 +300,14 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
     window.addEventListener('mouseup', stopDrag, { capture: true });
     window.addEventListener('touchmove', onDrag, { passive: false, capture: true });
     window.addEventListener('touchend', stopDrag, { capture: true });
+    window.addEventListener('touchcancel', stopDrag, { capture: true });
 
     return () => {
       window.removeEventListener('mousemove', onDrag, { capture: true });
       window.removeEventListener('mouseup', stopDrag, { capture: true });
       window.removeEventListener('touchmove', onDrag, { capture: true });
       window.removeEventListener('touchend', stopDrag, { capture: true });
+      window.removeEventListener('touchcancel', stopDrag, { capture: true });
     };
   }, [clampPosition]);
 
@@ -324,7 +323,6 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
     setPresetName('');
     setShowPresetForm(false);
     setConfirmSetHome(false);
-    setPosition(DEFAULT_POSITION);
 
     getPtzCapabilities(stream.name)
       .then(data => { if (active) setCapabilities(data); })
@@ -425,14 +423,14 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
       }
     };
 
-    window.addEventListener('mouseup', handleGlobalRelease);
-    window.addEventListener('touchend', handleGlobalRelease);
-    window.addEventListener('touchcancel', handleGlobalRelease);
+    window.addEventListener('mouseup', handleGlobalRelease, { capture: true });
+    window.addEventListener('touchend', handleGlobalRelease, { capture: true });
+    window.addEventListener('touchcancel', handleGlobalRelease, { capture: true });
 
     return () => {
-      window.removeEventListener('mouseup', handleGlobalRelease);
-      window.removeEventListener('touchend', handleGlobalRelease);
-      window.removeEventListener('touchcancel', handleGlobalRelease);
+      window.removeEventListener('mouseup', handleGlobalRelease, { capture: true });
+      window.removeEventListener('touchend', handleGlobalRelease, { capture: true });
+      window.removeEventListener('touchcancel', handleGlobalRelease, { capture: true });
     };
   }, [handleMoveStop]);
 
@@ -472,12 +470,12 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
         position: 'absolute',
         left: `${position.x}px`,
         bottom: `${position.y}px`,
-        backgroundColor: 'rgba(0, 0, 0, 0.45)',
+        backgroundColor: 'rgba(0, 0, 0, 0.55)',
         backdropFilter: 'blur(8px)',
         WebkitBackdropFilter: 'blur(8px)',
         borderRadius: '16px',
         border: '1px solid rgba(255, 255, 255, 0.25)',
-        boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.5)',
+        boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.6)',
         padding: '10px 12px',
         zIndex: 10,
         display: 'flex',
