@@ -114,7 +114,7 @@ function DirectionButton({
         height: '38px',
         borderRadius: '50%',
         border: '1px solid rgba(255, 255, 255, 0.3)',
-        backgroundColor: 'rgba(15, 23, 42, 0.75)', // Dark background for high contrast
+        backgroundColor: 'rgba(15, 23, 42, 0.75)',
         color: '#ffffff',
         cursor: disabled ? 'not-allowed' : 'pointer',
         display: 'flex',
@@ -125,7 +125,8 @@ function DirectionButton({
         userSelect: 'none',
         boxShadow: '0 2px 6px rgba(0, 0, 0, 0.4)',
         backdropFilter: 'blur(4px)',
-        margin: 'auto'
+        margin: 'auto',
+        touchAction: 'none'
       }}
     >
       {icons[direction]}
@@ -193,13 +194,19 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
     };
   }, []);
 
-  // Robust default position reset on fullscreen change or mobile screen resize
+  // Guarantee position reset across layout reflows (Fullscreen Exit & Resize)
   useEffect(() => {
     const handleLayoutReset = () => {
-      // Delay reset slightly to wait for DOM/layout reflow on mobile browsers
-      setTimeout(() => {
+      // Force position reset immediately
+      setPosition(DEFAULT_POSITION);
+
+      // Re-apply post DOM reflow on mobile browsers
+      requestAnimationFrame(() => {
         setPosition(DEFAULT_POSITION);
-      }, 50);
+        setTimeout(() => {
+          setPosition(DEFAULT_POSITION);
+        }, 150);
+      });
     };
 
     document.addEventListener('fullscreenchange', handleLayoutReset);
@@ -213,8 +220,31 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
     };
   }, []);
 
+  // Strict Event Boundary Isolation (Prevents camera swiping & browser pull-to-refresh)
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!panel) return;
+
+    const blockTouchLeakage = (e: TouchEvent) => {
+      e.stopPropagation();
+      if (e.cancelable && dragData.current.dragging) {
+        e.preventDefault();
+      }
+    };
+
+    panel.addEventListener('touchstart', blockTouchLeakage, { passive: false });
+    panel.addEventListener('touchmove', blockTouchLeakage, { passive: false });
+    panel.addEventListener('touchend', blockTouchLeakage, { passive: false });
+
+    return () => {
+      panel.removeEventListener('touchstart', blockTouchLeakage);
+      panel.removeEventListener('touchmove', blockTouchLeakage);
+      panel.removeEventListener('touchend', blockTouchLeakage);
+    };
+  }, []);
+
   const startDrag = useCallback((e: MouseEvent | TouchEvent) => {
-    e.stopPropagation(); // Stop gesture event from triggering camera swiper/grid events
+    e.stopPropagation();
     
     const panel = panelRef.current;
     if (!panel) return;
@@ -241,7 +271,7 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
     const onDrag = (e: MouseEvent | TouchEvent) => {
       if (!dragData.current.dragging) return;
 
-      e.stopPropagation(); // Prevent touch drag propagation to parent elements
+      e.stopPropagation();
 
       const touchEvent = e as TouchEvent;
       const mouseEvent = e as MouseEvent;
@@ -256,6 +286,10 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
 
       const clamped = clampPosition(newX, newY);
       setPosition(clamped);
+
+      if (e.cancelable) {
+        e.preventDefault();
+      }
     };
 
     const stopDrag = (e: MouseEvent | TouchEvent) => {
@@ -468,7 +502,8 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
           borderRadius: '8px',
           border: '1px solid rgba(255, 255, 255, 0.15)',
           width: '100%',
-          boxSizing: 'border-box'
+          boxSizing: 'border-box',
+          touchAction: 'none'
         }}
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.7)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: '6px', flexShrink: 0 }}>
@@ -530,7 +565,8 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
           gridTemplateRows: 'repeat(3, 38px)',
           gap: '6px', 
           justifyContent: 'center',
-          alignItems: 'center'
+          alignItems: 'center',
+          touchAction: 'none'
         }}
       >
         <div></div>
@@ -558,7 +594,7 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
             height: '38px',
             borderRadius: '50%',
             border: '1px solid rgba(59, 130, 246, 0.6)',
-            backgroundColor: 'rgba(15, 23, 42, 0.85)', // Dark contrast background
+            backgroundColor: 'rgba(15, 23, 42, 0.85)',
             color: '#60a5fa',
             cursor: 'pointer',
             display: 'flex',
@@ -566,7 +602,8 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
             justifyContent: 'center',
             transition: 'all 0.15s ease',
             boxShadow: '0 2px 6px rgba(0, 0, 0, 0.4)',
-            margin: 'auto'
+            margin: 'auto',
+            touchAction: 'none'
           }}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -598,7 +635,8 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
           alignItems: 'center',
           gap: '8px',
           marginTop: '2px',
-          width: '100%'
+          width: '100%',
+          touchAction: 'none'
         }}
       >
         <DirectionButton
@@ -647,7 +685,7 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
           step="0.1"
           value={speed}
           onChange={(e) => setSpeed(parseFloat((e.target as HTMLInputElement).value))}
-          style={{ flex: 1, height: '4px', accentColor: '#3b82f6', cursor: 'pointer' }}
+          style={{ flex: 1, height: '4px', accentColor: '#3b82f6', cursor: 'pointer', touchAction: 'manipulation' }}
         />
 
         <span style={{ color: '#ffffff', fontSize: '10px', width: '26px', textAlign: 'right', fontWeight: '600', textShadow: '0 1px 3px rgba(0,0,0,0.9)' }}>
