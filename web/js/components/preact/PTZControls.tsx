@@ -43,7 +43,7 @@ interface Position {
 const DEFAULT_POSITION: Position = { x: 10, y: 10 };
 
 /**
- * Direction button component with direct event listeners for guaranteed ptzStop
+ * Direction button component matching original upstream event bindings
  */
 function DirectionButton({
   direction,
@@ -83,7 +83,6 @@ function DirectionButton({
     'zoom-out': (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <circle cx="11" cy="11" r="8" />
-        <line x1="21" y1="21" x2="16.65" y2="16.65" />
         <line x1="8" y1="11" x2="14" y2="11" />
       </svg>
     )
@@ -152,9 +151,6 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
   const [showPresetForm, setShowPresetForm] = useState<boolean>(false);
   const [confirmSetHome, setConfirmSetHome] = useState<boolean>(false);
   const [saving, setSaving] = useState<boolean>(false);
-
-  // Synchronous ref to track movement state reliably
-  const isMovingRef = useRef<boolean>(false);
 
   // =========================
   // DRAG STATE & FUNCTIONS
@@ -393,11 +389,10 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
   }, [stream?.name, saving, t, handleActionFailure]);
 
   // ==========================================
-  // PTZ MOVE & STOP LOGIC
+  // PTZ MOVE & STOP LOGIC (GUARENTEED STOP)
   // ==========================================
   const handleMoveStop = useCallback(() => {
-    if (!stream?.name || !isMovingRef.current) return;
-    isMovingRef.current = false;
+    if (!stream?.name) return;
     
     ptzStop(stream.name)
       .catch(err => console.error('PTZ stop error:', err));
@@ -405,12 +400,10 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
 
   const handleMoveStart = useCallback((pan: number, tilt: number, zoom: number) => {
     if (!stream?.name) return;
-    isMovingRef.current = true;
     setError(null);
     
     ptzMove(stream.name, pan * speed, tilt * speed, zoom * speed)
       .catch(err => {
-        isMovingRef.current = false;
         setError(t('live.ptzMoveFailed'));
         console.error('PTZ move error:', err);
       });
