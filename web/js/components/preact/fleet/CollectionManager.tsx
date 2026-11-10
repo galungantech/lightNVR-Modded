@@ -1,12 +1,12 @@
+import { getCameraCollectionMembers, previewCameraCollection } from '../../../api/fleet.ts';
 import { useCallback, useEffect, useState } from 'preact/hooks';
-import { fetchJSON } from '../../../query-client.ts';
+import { fleetWriteJSON } from '../../../api/fleetWrites.ts';
 import { showStatusMessage } from '../ToastContainer.tsx';
 import { ConfirmDialog } from '../common/ModalDialog.tsx';
 import { CollectionSelectorBuilder } from './CollectionSelectorBuilder.tsx';
 import { StaticCollectionMembers } from './StaticCollectionMembers.tsx';
 import type {
   CameraCollection,
-  CameraCollectionMembersResponse,
   CameraCollectionPayload,
   CameraCollectionPreview,
   CollectionEditorSpec,
@@ -57,7 +57,7 @@ function CollectionEditor({ spec, locations, tags, onSaved, onCancel, t }: Colle
         shared: form.shared,
       };
       if (form.type === 'smart') payload.selector = selector;
-      const saved = await fetchJSON<CameraCollection>(collection ? `/api/camera-collections/${collection.uuid}` : '/api/camera-collections', {
+      const saved = await fleetWriteJSON<CameraCollection>(collection ? `/api/camera-collections/${collection.uuid}` : '/api/camera-collections', {
         method: collection ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -65,7 +65,7 @@ function CollectionEditor({ spec, locations, tags, onSaved, onCancel, t }: Colle
         retries: 1,
       });
       if (form.type === 'static') {
-        await fetchJSON(`/api/camera-collections/${saved.uuid}/members`, {
+        await fleetWriteJSON(`/api/camera-collections/${saved.uuid}/members`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ camera_uuids: members }),
@@ -95,7 +95,7 @@ function CollectionEditor({ spec, locations, tags, onSaved, onCancel, t }: Colle
         </label>
         <label className="text-sm font-medium">
           {t('collections.type')}
-          <select className={`${fieldClasses} mt-1`} value={form.type} onChange={(event) => setForm({ ...form, type: event.currentTarget.value })}>
+          <select className={`${fieldClasses} mt-1`} value={form.type} onChange={(event) => setForm({ ...form, type: event.currentTarget.value === 'smart' ? 'smart' : 'static' })}>
             <option value="static">{t('collections.type.static')}</option>
             <option value="smart">{t('collections.type.smart')}</option>
           </select>
@@ -218,9 +218,7 @@ export function CollectionManager({ collections, loading, isAdmin, locations, ta
     }
     setPreviewingUuid(collection.uuid);
     try {
-      const result = await fetchJSON<CameraCollectionPreview>(`/api/camera-collections/${collection.uuid}/preview`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', timeout: 20000, retries: 1,
-      });
+      const result = await previewCameraCollection(collection.uuid, {timeout: 20000, retries: 1});
       setPreviews((current) => ({ ...current, [collection.uuid]: result }));
     } catch (error) {
       showStatusMessage(t('collections.preview.error', { message: (error as Error).message }), 'error', 8000);
@@ -234,7 +232,7 @@ export function CollectionManager({ collections, loading, isAdmin, locations, ta
     try {
       let members: string[] = [];
       if (collection.type === 'static') {
-        const response = await fetchJSON<CameraCollectionMembersResponse>(`/api/camera-collections/${collection.uuid}/members`, { timeout: 20000, retries: 1 });
+        const response = await getCameraCollectionMembers(collection.uuid, {timeout: 20000, retries: 1});
         members = response.camera_uuids || [];
       }
       setEditorSpec({ collection, members });
@@ -247,7 +245,7 @@ export function CollectionManager({ collections, loading, isAdmin, locations, ta
 
   const deleteCollection = async (collection: CameraCollection) => {
     try {
-      await fetchJSON(`/api/camera-collections/${collection.uuid}`, { method: 'DELETE', timeout: 15000, retries: 1 });
+      await fleetWriteJSON(`/api/camera-collections/${collection.uuid}`, { method: 'DELETE', timeout: 15000, retries: 1 });
       showStatusMessage(t('collections.deleted'), 'success');
       await onRefresh();
     } catch (error) {
@@ -256,7 +254,7 @@ export function CollectionManager({ collections, loading, isAdmin, locations, ta
   };
 
   return (
-    <div role="presentation" className="fixed inset-0 z-40 flex items-center justify-center bg-black/55 p-3" onMouseDown={(event) => { if (event.target === event.currentTarget && !editorLoading) onClose(); }}>
+    <div role="presentation" className="app-modal-overlay fixed inset-0 flex items-center justify-center bg-black/55 p-3" onMouseDown={(event) => { if (event.target === event.currentTarget && !editorLoading) onClose(); }}>
       <div role="dialog" aria-modal="true" aria-labelledby="collections-title" className="flex max-h-[94vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-2xl">
         <header className="flex items-start justify-between border-b border-border p-4">
           <div><h2 id="collections-title" className="text-xl font-bold">{t('collections.title')}</h2><p className="mt-1 text-sm text-muted-foreground">{t('collections.subtitle')}</p></div>

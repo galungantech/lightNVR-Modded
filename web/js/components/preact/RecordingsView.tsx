@@ -1,3 +1,4 @@
+import { listCameraCollections } from '../../api/fleet.ts';
 /**
  * LightNVR Web Interface RecordingsView Component
  * Preact component for the recordings page
@@ -18,6 +19,7 @@ import { usePullToRefresh } from './usePullToRefresh.ts';
 import { FiltersSidebar } from './recordings/FiltersSidebar.tsx';
 import { ActiveFilters } from './recordings/ActiveFilters.tsx';
 import { RecordingsTable } from './recordings/RecordingsTable.tsx';
+import { RecordingsNavigation } from './recordings/RecordingsNavigation.tsx';
 import { RecordingsGrid } from './recordings/RecordingsGrid.tsx';
 import { PaginationControls } from './recordings/PaginationControls.tsx';
 
@@ -88,9 +90,7 @@ function clearStoredSelectedRecordings() {
 export function RecordingsView() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
-  const { data: collectionData } = useQuery<RecordingsCollectionsResponse>(
-    ['camera-collections'], '/api/camera-collections', {}, { staleTime: 30000 }
-  );
+  const { data: collectionData } = useQuery<RecordingsCollectionsResponse>({queryKey: ['camera-collections'], queryFn: ({signal}) => listCameraCollections({signal}), staleTime: 30000 });
   const collections = useMemo(
     () => collectionData?.collections || [],
     [collectionData]
@@ -116,14 +116,19 @@ export function RecordingsView() {
     return urlState?.filters || urlUtils.createDefaultFilters();
   });
 
+  // Phone preferences must not replace the desktop's saved table/sidebar view.
+  const [phonePreferences] = useState(() => window.matchMedia('(max-width: 768px)').matches);
+  const filtersPreference = phonePreferences ? 'recordings_mobile_filters_collapsed' : 'recordings_filters_collapsed';
+  const viewPreference = phonePreferences ? 'recordings_mobile_view_mode' : 'recordings_view_mode';
+  const mobileFiltersButton = useRef<HTMLButtonElement>(null);
   // Initialize filters sidebar collapsed state
   const [collapsed, setCollapsed] = useState(() => {
-    try { return localStorage.getItem('recordings_filters_collapsed') === 'true'; }
-    catch { return false; }
+    try { const stored = localStorage.getItem(filtersPreference); return stored === null ? phonePreferences : stored === 'true'; }
+    catch { return phonePreferences; }
   });
   const toggleCollapsed = () => {
     setCollapsed((prev) => {
-      localStorage.setItem('recordings_filters_collapsed', String(!prev));
+      localStorage.setItem(filtersPreference, String(!prev));
       return !prev;
     });
   };
@@ -158,9 +163,9 @@ export function RecordingsView() {
     const p = new URLSearchParams(window.location.search);
     const urlView = p.get('view');
     if (urlView === 'grid' || urlView === 'table') return urlView;
-    return localStorage.getItem('recordings_view_mode') || 'table';
+    return localStorage.getItem(viewPreference) || (phonePreferences ? 'grid' : 'table');
   });
-  const [thumbnailsEnabled, setThumbnailsEnabled] = useState(true);
+  const [thumbnailsEnabled, setThumbnailsEnabled] = useState(false);
   // 1 = single first-frame thumb only (CPU-save, #364); 3 = start/middle/end with hover cycling.
   const [thumbnailsPerRecording, setThumbnailsPerRecording] = useState(3);
 
@@ -187,7 +192,7 @@ export function RecordingsView() {
   // Persist view mode preference
   const handleViewModeChange = (mode: string) => {
     setViewMode(mode);
-    localStorage.setItem('recordings_view_mode', mode);
+    localStorage.setItem(viewPreference, mode);
   };
 
   // Fetch generate_thumbnails + thumbnails_per_recording settings
@@ -197,10 +202,6 @@ export function RecordingsView() {
       .then((data: ClientConfig) => {
         if (data && typeof data.generate_thumbnails !== 'undefined') {
           setThumbnailsEnabled(data.generate_thumbnails);
-          // If thumbnails disabled and user had grid mode saved, fall back to table
-          if (!data.generate_thumbnails && viewMode === 'grid') {
-            handleViewModeChange('table');
-          }
         }
         if (data && typeof data.thumbnails_per_recording === 'number') {
           setThumbnailsPerRecording(data.thumbnails_per_recording <= 1 ? 1 : 3);
@@ -310,7 +311,7 @@ export function RecordingsView() {
 
   // Reactively sync all view state to URL via replaceState (no browser history entries).
   // This mirrors the approach used in LiveView and ensures refresh always preserves state.
-  useEffect(() => {
+  const recordingsUrl = useMemo(() => {
     const url = new URL(window.location.href);
 
     // Filters
@@ -371,12 +372,15 @@ export function RecordingsView() {
     url.searchParams.set('sort', sortField);
     url.searchParams.set('order', sortDirection);
 
-    // View mode — omit param when 'table' (the default) to keep URLs clean
-    if (viewMode !== 'table') url.searchParams.set('view', viewMode);
-    else url.searchParams.delete('view');
+    // An explicit URL choice must survive separate phone/desktop defaults.
+    url.searchParams.set('view', viewMode);
 
-    window.history.replaceState({}, '', url);
+    return `recordings.html${url.search}`;
   }, [filters, pagination.currentPage, pagination.pageSize, pagination.showAll, sortField, sortDirection, viewMode]);
+
+  useEffect(() => {
+    window.history.replaceState({}, '', recordingsUrl);
+  }, [recordingsUrl]);
 
   // When any filter changes, reset to page 1 so the user doesn't end up on
   // a page that doesn't exist for the new filter (fixes #179).
@@ -434,15 +438,15 @@ export function RecordingsView() {
       const recordingsArray = recordingsData.recordings || [];
 
       // When filtering for detection events, all returned recordings should have detections
-      if (filters.recordingType === 'detection') {
-        recordingsArray.forEach(recording => {
-          recording.has_detections = true;
-        });
-      }
+      // Derive updated objects to avoid mutating query-cached data
+      const displayRecordings =
+        filters.recordingType === 'detection'
+          ? recordingsArray.map(recording => ({ ...recording, has_detections: true }))
+          : recordingsArray;
 
       // Set the recordings state
-      setRecordings(recordingsArray);
-      setHasData(recordingsArray.length > 0);
+      setRecordings(displayRecordings);
+      setHasData(displayRecordings.length > 0);
 
       // Update pagination
       if (recordingsData.pagination) {
@@ -657,7 +661,7 @@ export function RecordingsView() {
         break;
     }
 
-    applyFilters();
+    // Refetch is driven by reactive state/query-key updates after filters settle.
   };
 
   // Sort by field — URL sync is handled by the reactive useEffect
@@ -750,7 +754,7 @@ export function RecordingsView() {
       return;
     }
     // Store current URL for "Refine Selections" back-link
-    sessionStorage.setItem(RECORDINGS_RETURN_URL_KEY, window.location.href);
+    sessionStorage.setItem(RECORDINGS_RETURN_URL_KEY, recordingsUrl);
     sessionStorage.setItem(RECORDINGS_SELECTED_IDS_KEY, JSON.stringify(selectedIds));
     sessionStorage.setItem(RECORDINGS_RESTORE_SELECTION_KEY, 'true');
     window.location.href = `timeline.html?ids=${selectedIds.join(',')}`;
@@ -806,6 +810,7 @@ export function RecordingsView() {
         start: String(paddedStart),
         end: String(paddedEnd),
         cursor: String(Math.floor(start)),
+        return_to: recordingsUrl,
       });
       window.location.href = `investigation.html?${params.toString()}`;
     } catch (requestError) {
@@ -856,6 +861,7 @@ export function RecordingsView() {
 
     if (mode === 'selected') {
       const result = await recordingsAPI.deleteSelectedRecordings(selectedRecordings);
+      if (result.status === 'cancelled') return;
 
       setSelectedRecordings({});
       setSelectAll(false);
@@ -865,7 +871,8 @@ export function RecordingsView() {
         reloadRecordingsWithPreservedParams(currentSortField, currentSortDirection, currentPage);
       }
     } else {
-      await recordingsAPI.deleteAllFilteredRecordings(filters);
+      const result = await recordingsAPI.deleteAllFilteredRecordings(filters);
+      if (result.status === 'cancelled') return;
 
       setSelectedRecordings({});
       setSelectAll(false);
@@ -994,7 +1001,11 @@ export function RecordingsView() {
       <div class="page-header flex justify-between items-center mb-4 p-4 bg-card text-card-foreground rounded-lg shadow">
         <h2 class="text-xl font-bold">{t('nav.recordings')}</h2>
         {/* Right: toolbar actions */}
-        <div class="flex items-center gap-2">
+        <div class="recordings-header-actions flex items-center gap-2">
+          <button type="button" ref={mobileFiltersButton} className="recordings-mobile-filters btn-secondary text-sm"
+            aria-expanded={!collapsed} aria-controls="filters-sidebar" onClick={toggleCollapsed}>
+            {t(collapsed ? 'recordings.showFilters' : 'recordings.hideFilters')}
+          </button>
           {/* Refresh pulls a fresh page of recordings without a full reload.
               Uses AsyncButton so the spinner + auto-disable mirrors the
               Apply-filters button below (PRD UXD_01 §5.1 / #399). */}
@@ -1046,58 +1057,11 @@ export function RecordingsView() {
         </div>
       </div>
 
-      {/* Sub-navigation tabs — matches System page style */}
-      <div class="mb-4 border-b border-border" role="tablist" aria-label={t('recordings.views')}>
-        <div class="flex overflow-x-auto whitespace-nowrap sm:gap-2 sm:overflow-visible">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={viewMode === 'table'}
-            class={`shrink-0 rounded-t-lg px-2 py-2 text-sm font-medium transition-colors sm:px-4 ${
-              viewMode === 'table'
-                ? 'bg-card text-card-foreground border border-border border-b-0 -mb-px'
-                : 'text-muted-foreground hover:text-foreground'
-            }`}
-            onClick={() => handleViewModeChange('table')}
-          >
-            {t('recordings.table')}
-          </button>
-          {thumbnailsEnabled && (
-            <button
-              type="button"
-              role="tab"
-              aria-selected={viewMode === 'grid'}
-              class={`shrink-0 rounded-t-lg px-2 py-2 text-sm font-medium transition-colors sm:px-4 ${
-                viewMode === 'grid'
-                  ? 'bg-card text-card-foreground border border-border border-b-0 -mb-px'
-                  : 'text-muted-foreground hover:text-foreground'
-              }`}
-              onClick={() => handleViewModeChange('grid')}
-            >
-              {t('recordings.grid')}
-            </button>
-          )}
-          {/* Timeline is a separate page — styled as a tab link for visual consistency */}
-          <a
-            href="timeline.html"
-            class="shrink-0 rounded-t-lg px-2 py-2 text-sm font-medium transition-colors sm:px-4 text-muted-foreground hover:text-foreground"
-          >
-            {t('nav.timeline')}
-          </a>
-          <a
-            href="investigation.html"
-            class="shrink-0 rounded-t-lg px-2 py-2 text-sm font-medium transition-colors sm:px-4 text-muted-foreground hover:text-foreground"
-          >
-            {t('nav.investigation')}
-          </a>
-          <a
-            href="plates.html"
-            class="shrink-0 rounded-t-lg px-2 py-2 text-sm font-medium transition-colors sm:px-4 text-muted-foreground hover:text-foreground"
-          >
-            {t('nav.plates')}
-          </a>
-        </div>
-      </div>
+      <RecordingsNavigation active={viewMode === 'grid' ? 'grid' : 'table'} onViewChange={handleViewModeChange}
+        recordingsUrl={recordingsUrl} streams={filters.streamIds}
+        cameras={streams.filter(stream => filters.streamIds.includes(stream.name)).map(stream => stream.camera_uuid)}
+        start={new Date(`${filters.startDate}T${filters.startTime}`).getTime() / 1000}
+        end={new Date(`${filters.endDate}T${filters.endTime}`).getTime() / 1000} />
 
       <div
         class="recordings-layout relative flex flex-col md:flex-row gap-4 w-full"
@@ -1125,7 +1089,15 @@ export function RecordingsView() {
             setPagination={setPagination}
             streams={streams}
             collections={collections}
-            applyFilters={applyFilters}
+            applyFilters={() => {
+              const pending = applyFilters();
+              if (window.matchMedia('(max-width: 768px)').matches) {
+                setCollapsed(true);
+                localStorage.setItem(filtersPreference, 'true');
+                mobileFiltersButton.current?.focus();
+              }
+              return pending;
+            }}
             resetFilters={resetFilters}
             handleDateRangeChange={handleDateRangeChange}
             setDefaultDateRange={setDefaultDateRange}
@@ -1139,13 +1111,32 @@ export function RecordingsView() {
             hasActiveFilters={hasActiveFilters}
           />
 
+          <div className="flex flex-wrap gap-2 items-center mb-3">
+            <label className="flex gap-2 items-center text-sm">
+              {t('streams.sortBy')}
+              <select aria-label={t('streams.sortBy')} value={sortField}
+                onChange={event => sortBy(event.currentTarget.value)}>
+                {['start_time', 'stream', 'duration', 'size'].map(field => <option key={field} value={field}>
+                  {t({start_time:'recordings.columnStartTime',stream:'recordings.columnStreamName',duration:'recordings.columnDuration',size:'recordings.columnSize'}[field]!)}
+                </option>)}
+              </select>
+            </label>
+            <button type="button" className="btn-secondary text-sm" onClick={() => sortBy(sortField)}
+              aria-label={t('recordings.reverseSort')}>
+              {t(sortDirection === 'asc' ? 'recordings.ascending' : 'recordings.descending')}
+            </button>
+          </div>
+          {recordingsError && <div role="alert" className="p-3 mb-3 border border-destructive rounded-lg">
+            <p>{t('recordings.errorLoadingRecordings', {message:recordingsError.message})}</p>
+            <AsyncButton className="btn-secondary" onClick={refreshRecordingList}>{t('common.retry')}</AsyncButton>
+          </div>}
           <ContentLoader
             isLoading={isLoadingRecordings}
             hasData={hasData}
             loadingMessage={t('recordings.loadingRecordings')}
-            emptyMessage={t('recordings.noRecordingsFoundMatchingCriteria')}
+            emptyMessage={recordingsError ? '' : t('recordings.noRecordingsFoundMatchingCriteria')}
           >
-            {viewMode === 'grid' && thumbnailsEnabled ? (
+            {viewMode === 'grid' ? (
               <RecordingsGrid
                 collapsed={collapsed}
                 toggleCollapsed={toggleCollapsed}
@@ -1168,6 +1159,7 @@ export function RecordingsView() {
                 toggleColumn={toggleColumn}
                 onTagsChanged={handleTagsChanged}
                 viewSelectedInTimeline={viewSelectedInTimeline}
+                thumbnailsEnabled={thumbnailsEnabled}
                 thumbnailsPerRecording={thumbnailsPerRecording}
               />
             ) : (

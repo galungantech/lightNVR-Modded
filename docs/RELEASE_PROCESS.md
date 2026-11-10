@@ -22,9 +22,9 @@ To create a new release, simply run:
 This single command will:
 1. Bump the version in all necessary files
 2. Commit the changes
-3. Create a git tag
-4. Push to GitHub
-5. Trigger GitHub Actions to build and publish Docker images
+3. Push the preparation commit to `main`
+4. Wait for Rust regeneration and successful CI on the final commit
+5. Create and push only the release tag, starting the C and Rust publishers
 
 ## Detailed Process
 
@@ -45,7 +45,7 @@ checkout staged with `git add -A` can silently undo a security update, as happen
 in [issue #680](https://github.com/opensensor/lightNVR/issues/680).
 
 Version-bump commits should contain only the tracked version files,
-`CMakeLists.txt` and `web/package.json`. Review the staged diff before committing;
+`CMakeLists.txt`, `web/package.json`, and `web/package-lock.json`. Review the staged diff before committing;
 it should not include submodule changes. The generated version files are ignored
 by git.
 
@@ -54,6 +54,7 @@ by git.
 The version is managed in the following files:
 - `CMakeLists.txt` - Main project version (line 2)
 - `web/package.json` - Web interface version
+- `web/package-lock.json` - Matching web package version metadata
 - `include/core/version.h` - Generated from template
 - `web/js/version.js` - Generated for web interface
 
@@ -67,7 +68,7 @@ If you need to bump the version without creating a release:
 
 This will:
 - Update `CMakeLists.txt` with the new version
-- Update `web/package.json` with the new version
+- Update `web/package.json` and its lockfile metadata with the new version
 - Regenerate `include/core/version.h` from the template
 - Regenerate `web/js/version.js` with the new version
 
@@ -107,37 +108,89 @@ The recommended way to create a release is using the automated script:
 
 #### What the Release Script Does
 
-1. **Pre-flight checks:**
-   - Verifies git working directory is clean
-   - Checks you're on the main branch (warns if not)
-   - Validates version format (MAJOR.MINOR.PATCH)
-   - Ensures the tag doesn't already exist
+The command requires Python 3, Git, an authenticated GitHub CLI (`gh`) with Actions
+read access, and permission to push `main` and tags through `origin`. Run it from
+a `main` checkout with no uncommitted tracked changes, containing the changes you
+intend to release. Untracked local notes and files are left alone and do not block
+the release; Git still refuses to overwrite them during a fast-forward. It refuses
+to silently pull new product changes into the release.
 
-2. **Version bumping:**
-   - Runs `bump-version.sh` to update all version files
+1. Validates the version, checkout and absence of both `X.Y.Z` and `vX.Y.Z` tags.
+2. Runs `bump-version.sh`, stages only `CMakeLists.txt`, `web/package.json`, and `web/package-lock.json`,
+   and commits the version bump. CMake is the release version authority; preparation
+   aligns legacy web package versions automatically without changing dependencies.
+   If that version is already prepared, it resumes.
+3. Pushes the preparation to `main`, without creating a tag.
+4. Follows generated `rust/` commits while CI runs. Any intervening commit that
+   changes files outside `rust/`, or a rewritten history, stops the release for review.
+5. Requires successful main-push runs on the exact final commit for Rust,
+   integration tests, sanitizers, static analysis, CodeQL and container scanning.
+   Any other main-push workflow that ran on that commit must also succeed.
+   Missing or unfinished runs wait; failed, cancelled or skipped runs stop publication.
+6. Checks that Rust CI's **Verify checked-in Rust is current** step succeeded.
+   A successful run that regenerated stale Rust does not qualify: its generated
+   commit must get its own successful CI run. CMake, web and Cargo versions must agree.
+7. Fast-forwards the local checkout to the verified commit, creates `vX.Y.Z`,
+   and pushes only that tag alongside a leased main ref in an atomic push.
+   Unrelated local tags are never pushed. Publishing the tag starts release builds;
+   it does not mean those builds have finished.
 
-3. **Git operations:**
-   - Stages only `CMakeLists.txt` and `web/package.json` and displays the staged diff
-   - Commits the version changes with message: "Bump version to X.Y.Z"
-   - Creates an annotated git tag: "vX.Y.Z"
-   - Pushes commits and tags to GitHub
-
-4. **CI/CD trigger:**
-   - GitHub Actions automatically starts building Docker images
-   - Web assets are built during the Docker build process
+The default CI wait is four hours, polling every 30 seconds. Timeouts or CI failures
+leave the preparation available to resume, without creating a tag. If a push loses
+its connection, the local tag is retained because the remote might have accepted it;
+inspect the remote before retrying.
 
 #### Release Script Options
 
 ```bash
-# Normal release (bumps version, commits, tags, and pushes)
+# Normal release: prepare, wait for generated Rust and CI, then tag and push
 ./scripts/release.sh 0.13.0
 
-# Dry run (prepares release locally but doesn't push)
-./scripts/release.sh 0.13.0 --no-push
+# Split preparation and publication across sessions
+./scripts/release.sh 0.13.0 --prepare-only
+./scripts/release.sh 0.13.0 --publish-only
 
-# Show help
+# Prepare a local commit only: does not push OR create a tag
+./scripts/release.sh 0.13.0 --no-push
+# Later, push that preparation and complete the release
+./scripts/release.sh 0.13.0 --publish-only
+
+# Optional: skip the prompt or change the CI wait limit (seconds)
+./scripts/release.sh 0.13.0 --publish-only --yes --timeout 14400
+
 ./scripts/release.sh --help
 ```
+
+`--no-push` is local preparation, not a dry run: it updates version files and
+creates a commit. Preflight still reads the remote to check main and existing tags.
+
+#### Rust regeneration follow-up
+
+A source or version change may need one generated Rust commit. Its main-push CI
+runs queue behind the source runs instead of cancelling them. Normal development
+pushes still cancel superseded work. The generated commit still gets its own full
+CI validation; this is required before tagging.
+
+On a generated main commit, Rust CI runs generation with `--check`, builds with
+`--locked`, and cannot push another regeneration commit. If the generated output
+is unstable, that verification fails instead of starting another regeneration
+cycle. The release coordinator continues to require the successful freshness
+step on the final commit. These rules cover the six repository-managed release
+CI workflows; GitHub-managed Code Quality scheduling is configured separately.
+
+#### Tag publication gate
+
+Docker, Debian, Rust and changelog workflows all call `release-preflight.yml`
+before publishing a tag. It verifies versions and the same exact-commit CI and
+Rust freshness proof, including for tags pushed manually. An existing tag never
+follows `main` to a newer commit. Branch `workflow_dispatch` packaging builds remain
+available without the release gate; dispatching on a tag still uses the gate.
+
+Do not use the old bump-and-immediately-tag sequence. A version bump changes the
+generated Cargo package and Rust sources too. Use `release.sh` to let CI finish
+regeneration first. These gates prevent publication from stale or untested commits;
+packaging workflows still run independently and a later build failure can require
+rerunning that publisher.
 
 ### 3. GitHub Actions Build Process
 
@@ -154,7 +207,7 @@ When you push a tag, GitHub Actions automatically:
    releases.
 
 2. **Builds web assets** during the Docker build:
-   - Installs Node.js 24.x LTS
+   - Installs Node.js 26.x LTS
    - Runs `npm ci --ignore-scripts` from the committed lockfile
    - Runs `npm run build` to build with Vite
    - Copies built assets to `/var/lib/lightnvr/www/` in the runtime image
@@ -218,9 +271,10 @@ Examples:
 
 ## Troubleshooting
 
-### "Git working directory is not clean"
+### "Tracked files have uncommitted changes"
 
-You have uncommitted changes. Either commit them or stash them:
+You have staged or unstaged changes to tracked files. Either commit them or stash
+them. Untracked files do not need to be committed, stashed or deleted for a release:
 
 ```bash
 git status
@@ -233,22 +287,24 @@ git stash
 If only a submodule checkout is stale, run `git submodule update --init --recursive`
 before staging anything. Stage and commit intentional changes explicitly.
 
-> **Known inconsistency — tag prefix.** `scripts/release.sh` creates annotated tags as
-> `v$VERSION` (`scripts/release.sh:172`), but every release since `0.17` is tagged
-> *without* the prefix — `0.37.2`, not `v0.37.2`. The publish workflow triggers on
-> `'*.*.*'`, which matches either, so both work; but the script and current practice
-> disagree, and the commands below assume the script's form. Reconcile before relying on
-> either.
+### CI failed, was cancelled, or the wait timed out
 
-### "Tag vX.Y.Z already exists"
+Inspect the reported run, fix the failure or rerun it, then resume:
 
-The version tag already exists. Either:
-- Use a different version number
-- Delete the existing tag (if it was a mistake):
-  ```bash
-  git tag -d v0.13.0
-  git push origin :refs/tags/v0.13.0
-  ```
+```bash
+./scripts/release.sh 0.13.0 --publish-only
+```
+
+If product changes landed on main while waiting, the script stops instead of
+including them silently. Review and pull those changes before resuming. Generated
+Rust-only follow-up commits are picked up automatically.
+
+### "Tag X.Y.Z already exists"
+
+The script uses annotated `vX.Y.Z` tags and checks both prefixed and unprefixed
+names to prevent duplicate versions. Historical unprefixed tags remain supported
+by the publishers. For a failed packaging job on a valid tag, rerun that job.
+Do not move an already published release tag to pick up a later regeneration commit.
 
 ### "Failed to extract version from CMakeLists.txt"
 
@@ -268,10 +324,10 @@ If the Docker build fails to find web assets:
 
 ### Local build doesn't match Docker build
 
-This can happen if you have different Node.js versions. The Docker build uses Node.js 24.x LTS. To match locally:
+This can happen if you have different Node.js versions. The Docker build uses Node.js 26.x LTS. To match locally:
 
 ```bash
-# Install the version pinned in .nvmrc (Node.js 24.x LTS)
+# Install the version pinned in .nvmrc (Node.js 26.x LTS)
 nvm install
 nvm use
 
@@ -313,7 +369,7 @@ The new release process is:
 
 1. **One command:** `./scripts/release.sh X.Y.Z`
 2. **Automatic builds:** GitHub Actions builds everything
-3. **No manual steps:** Version bumping, tagging, and pushing are automated
+3. **CI before tagging:** Rust regeneration and tests finish on the tagged commit
 4. **Clean repository:** No binary assets in git
 
 This ensures consistency, reduces errors, and makes releases faster and more reliable.

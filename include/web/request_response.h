@@ -89,7 +89,7 @@ const char* http_request_get_header(const http_request_t *req, const char *name)
  * @param name Parameter name
  * @param value Buffer to store the value
  * @param value_len Size of value buffer
- * @return Length of value on success, -1 if not found
+ * @return Decoded length (truncated to value_len - 1), -1 if not found or invalid
  */
 int http_request_get_query_param(const http_request_t *req, const char *name, char *value, size_t value_len);
 
@@ -103,7 +103,7 @@ int http_request_get_query_param(const http_request_t *req, const char *name, ch
 int http_request_get_body_str(const http_request_t *req, char *buf, size_t buf_len);
 
 /**
- * @brief Extract a URL-decoded path parameter from the URI (e.g., /api/streams/:id)
+ * @brief Extract a complete URL-decoded path parameter; reject encoded NUL or overflow
  * @param req HTTP request
  * @param prefix URL prefix to strip (e.g., "/api/streams/")
  * @param param_buf Buffer to store the extracted parameter
@@ -181,7 +181,7 @@ void http_response_init(http_response_t *res);
 void http_response_free(http_response_t *res);
 
 /**
- * @brief URL decode a string
+ * @brief URL decode a string, rejecting encoded NUL and clearing output on that error
  * @param src Source string
  * @param dst Destination buffer
  * @param dst_size Destination buffer size

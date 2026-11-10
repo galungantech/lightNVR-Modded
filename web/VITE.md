@@ -69,6 +69,15 @@ Vite compiles `.ts` and `.tsx` with Oxc using the same Preact JSX settings as
 `.jsx`, and only strips types. `npm run typecheck` is what checks them, and CI
 runs it in `static-analysis.yml`.
 
+Typechecking uses TypeScript 7.0.2 through the `@typescript/native` npm alias,
+which supplies `tsc`. The `typescript` alias supplies the TypeScript 6 compatibility
+API (and `tsc6`) required by `typescript-eslint`. This follows Microsoft's
+[side-by-side setup](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-6.0).
+Keep both aliases until the linter supports the native compiler API. The root
+package retains TypeScript 5.9 for the OpenAPI generator's compiler API and peer
+dependency; contract tests check generated types with both the root compiler and
+the frontend's TypeScript 7 compiler. Node typings use 26 to match `.nvmrc`.
+
 - `tsconfig.base.json` holds the shared strict options. Do not relax them.
 - `tsconfig.json` covers `js/**`; Vite's client types come from `js/env.d.ts`.
 - `tsconfig.tests.json` covers TS tests under `tests/` with Jest and Node types.
@@ -169,3 +178,25 @@ Vite uses a slightly different output structure than Snowpack:
 - The migration maintains the same functionality as the Snowpack build
 - Vite provides better performance and more features
 - The build process is faster with Vite
+
+## Generated API contracts
+
+`npm run contracts:generate -- --target=web` from the repository root generates
+`web/generated/api/schema.d.ts`, `validators.js` and `validators.d.ts` from the
+canonical OpenAPI JSON. The directory is entirely generated; put adapters and
+form-state helpers under `web/js/api/`, not in generated output. `contracts:check`
+fails on drift or extra files without modifying them.
+
+Standalone validator JS lives outside the handwritten `web/js` tree. It is not
+checked application TypeScript merely because adjacent declarations exist.
+Generator/drift tests and positive/negative runtime fixtures establish the
+boundary; declarations accept `unknown` and have strict consumer tests with
+library checking enabled. Preserve the existing handwritten JS allowlist and
+all application TS checks. No Ajv schema compiler is loaded in the browser.
+
+`swagger-ui-dist` is reserved for the separate API docs entry. Use the standalone
+prebundled distribution without routing its internal runtime through Preact
+aliases. Never import it from shared page entries. T15 supplies the docs-only
+entry and verifies that normal application pages do not fetch those assets.
+See [contract toolchain](../docs/api/contracts/toolchain.md) for commands and
+artifact interfaces.

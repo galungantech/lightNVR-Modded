@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <math.h>
 
 #include "web/api_handlers.h"
 #include "web/request_response.h"
@@ -39,8 +40,8 @@ static int authorize_recording_action(const http_request_t *req,
         http_response_set_json_error(res, 404, "Recording not found");
         return 0;
     }
-    return httpd_authorize_stream_action_with_context(
-        req, res, action, recording->stream_name, user, camera, evaluation);
+    return httpd_authorize_camera_identity_action_with_context(
+        req, res, action, recording->camera_uuid, recording->stream_name, user, camera, evaluation);
 }
 
 static void audit_recording_policy_operation(
@@ -161,6 +162,25 @@ void handle_put_stream_retention(const http_request_t *req, http_response_t *res
     if (get_stream_retention_config(stream_name, &config) != 0) {
         cJSON_Delete(json);
         http_response_set_json_error(res, 404, "Stream not found");
+        return;
+    }
+
+    /* Validate before narrowing or applying any member. In particular, negative
+     * or oversized doubles must never be converted to uint64_t. */
+    const char *fields[] = {"retention_days", "detection_retention_days", "max_storage_mb"};
+    bool valid = cJSON_IsObject(json);
+    for (size_t i = 0; valid && i < sizeof(fields) / sizeof(fields[0]); ++i) {
+        const cJSON *value = cJSON_GetObjectItemCaseSensitive(json, fields[i]);
+        if (!value) continue;
+        const double minimum = i == 2 ? 0.0 : -1.0;
+        const double maximum = i == 2 ? 9007199254740991.0 : 365.0;
+        valid = cJSON_IsNumber(value) && isfinite(value->valuedouble) &&
+                floor(value->valuedouble) == value->valuedouble &&
+                value->valuedouble >= minimum && value->valuedouble <= maximum;
+    }
+    if (!valid) {
+        cJSON_Delete(json);
+        http_response_set_json_error(res, 400, "Invalid retention configuration values");
         return;
     }
 
@@ -403,9 +423,13 @@ void handle_get_protected_recordings(const http_request_t *req, http_response_t 
 
     int count = -1;
     if (stream_name[0]) {
-        if (!httpd_authorize_stream_action(req, res, AUTHZ_RECORDINGS_REPLAY,
-                                           stream_name)) return;
-        count = get_protected_recordings_count(stream_name);
+        user_t user;
+        fleet_camera_t camera;
+        authorization_evaluation_t evaluation;
+        if (!httpd_authorize_camera_identity_action_with_context(req, res,
+                AUTHZ_RECORDINGS_REPLAY, NULL, stream_name, &user, &camera, &evaluation)) return;
+        const char *uuids[] = {camera.camera_uuid};
+        count = get_protected_recordings_count_for_cameras(uuids, 1);
     } else {
         user_t user;
         if (!httpd_check_action_access(req, &user)) {
@@ -429,8 +453,8 @@ void handle_get_protected_recordings(const http_request_t *req, http_response_t 
             http_response_set_json_error(res, 500, "Out of memory");
             return;
         }
-        for (int i = 0; i < camera_count; i++) names[i] = cameras[i].name;
-        count = get_protected_recordings_count_for_streams(names, camera_count);
+        for (int i = 0; i < camera_count; i++) names[i] = cameras[i].camera_uuid;
+        count = get_protected_recordings_count_for_cameras(names, camera_count);
         free(names);
         free(cameras);
     }
@@ -519,8 +543,8 @@ void handle_batch_protect_recordings(const http_request_t *req, http_response_t 
             continue;
         }
         authorization_evaluation_t evaluation;
-        int result = httpd_evaluate_stream_action(
-            &user, AUTHZ_EVIDENCE_PROTECT, recording.stream_name,
+        int result = httpd_evaluate_camera_identity_action(
+            &user, AUTHZ_EVIDENCE_PROTECT, recording.camera_uuid, recording.stream_name,
             &evaluation);
         if (result < 0) {
             audit_batch_policy_operation(
@@ -533,8 +557,12 @@ void handle_batch_protect_recordings(const http_request_t *req, http_response_t 
             return;
         }
         if (result > 0 || evaluation.decision != AUTHZ_DECISION_ALLOW) {
-            fail_count++;
-            continue;
+            audit_batch_policy_operation(req, &user, protected, item_count, 0, fail_count,
+                                         "failure", "unauthorized_member");
+            free(authorized_ids);
+            cJSON_Delete(json);
+            http_response_set_json_error(res, 403, "Forbidden");
+            return;
         }
         authorized_ids[authorized_count++] = id;
     }

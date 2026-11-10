@@ -27,9 +27,9 @@ static const authorization_action_metadata_t action_catalog[] = {
     {AUTHZ_LIVE_VIEW, "live.view", "Live video",
      "View a camera live stream", true, false, true},
     {AUTHZ_AUDIO_LISTEN, "audio.listen", "Live video",
-     "Listen to camera audio", true, false, false},
+     "Listen to camera audio", true, false, true},
     {AUTHZ_AUDIO_TALK, "audio.talk", "Live video",
-     "Transmit audio to a camera", true, false, false},
+     "Transmit audio to a camera", true, false, true},
     {AUTHZ_RECORDINGS_REPLAY, "recordings.replay", "Recordings",
      "Replay recorded video", true, false, true},
     {AUTHZ_RECORDINGS_EXPORT, "recordings.export", "Recordings",
@@ -62,6 +62,10 @@ static const authorization_action_metadata_t action_catalog[] = {
      "Export protected plate reads", true, false, true},
     {AUTHZ_LPR_DELETE, "lpr.delete", "License plates",
      "Permanently delete protected plate reads", true, true, true},
+    /* INT_01 P2 (migration 0096, bit 19). Enforced by
+     * PUT /api/observations/{id}/classifications/{namespace}/{name} (L14). */
+    {AUTHZ_OBSERVATIONS_ANNOTATE, "observations.annotate", "Integrations",
+     "Annotate detection observations with classifier results", true, false, true},
 };
 
 _Static_assert(sizeof(action_catalog) / sizeof(action_catalog[0]) ==
@@ -149,6 +153,8 @@ typedef struct {
 } grant_cache_entry_t;
 
 struct authorization_context {
+    sqlite3 *connection;
+    int64_t observed_at;
     bool legacy_policy_version_loaded;
     int64_t legacy_policy_version;
     grant_cache_entry_t *grants;
@@ -159,11 +165,28 @@ struct authorization_context {
     int collection_capacity;
     bool token_loaded;
     bool token_valid;
+    bool token_failed;
     api_token_t token;
 };
 
 authorization_context_t *authorization_context_create(void) {
     return calloc(1, sizeof(authorization_context_t));
+}
+
+authorization_context_t *authorization_context_create_on_connection(
+    sqlite3 *connection, int64_t observed_at) {
+    if (!connection || observed_at < 0) return NULL;
+    authorization_context_t *context = authorization_context_create();
+    if (!context) return NULL;
+    context->connection = connection;
+    context->observed_at = observed_at;
+    if (db_authorization_get_policy_version_on_connection(
+            connection, &context->legacy_policy_version) != 0) {
+        free(context);
+        return NULL;
+    }
+    context->legacy_policy_version_loaded = true;
+    return context;
 }
 
 void authorization_context_free(authorization_context_t *context) {
@@ -219,9 +242,11 @@ static const camera_collection_filter_t *context_collection_filter(
         &context->collections[context->collection_count++];
     memset(entry, 0, sizeof(*entry));
     safe_strcpy(entry->uuid, collection_uuid, sizeof(entry->uuid), 0);
-    entry->failed = camera_collection_filter_load_for_authorization(
-                        collection_uuid, &entry->filter) !=
-                    CAMERA_COLLECTION_FILTER_OK;
+    camera_collection_filter_result_t result = context->connection
+        ? camera_collection_filter_load_on_connection(context->connection,
+            collection_uuid, &entry->filter)
+        : camera_collection_filter_load_for_authorization(collection_uuid, &entry->filter);
+    entry->failed = result != CAMERA_COLLECTION_FILTER_OK;
     return entry->failed ? NULL : &entry->filter;
 }
 
@@ -260,9 +285,13 @@ static const grant_cache_entry_t *context_grants(
     entry->user_id = user_id;
     entry->action = action;
 
-    if (db_authorization_load_user_grants(user_id, action_key, &entry->grants,
-                                          &entry->grant_count,
-                                          &entry->policy_version) != 0) {
+    int result = context->connection
+        ? db_authorization_load_user_grants_on_connection(context->connection,
+            user_id, action_key, &entry->grants, &entry->grant_count,
+            &entry->policy_version)
+        : db_authorization_load_user_grants(user_id, action_key, &entry->grants,
+            &entry->grant_count, &entry->policy_version);
+    if (result != 0) {
         entry->failed = true;
         entry->grants = NULL;
         entry->grant_count = 0;
@@ -423,8 +452,11 @@ static const api_token_t *context_token(authorization_context_t *context,
         return context->token_valid ? &context->token : NULL;
     }
     context->token_loaded = true;
-    db_api_token_result_t result =
-        db_api_token_get_active(user->api_token_uuid, &context->token);
+    db_api_token_result_t result = context->connection
+        ? db_api_token_get_active_on_connection(context->connection,
+            context->observed_at, user->api_token_uuid, &context->token)
+        : db_api_token_get_active(user->api_token_uuid, &context->token);
+    context->token_failed = result == DB_API_TOKEN_ERROR;
     context->token_valid =
         result == DB_API_TOKEN_OK && context->token.user_id == user->id;
     return context->token_valid ? &context->token : NULL;
@@ -452,6 +484,10 @@ int authorization_evaluate_in_context(authorization_context_t *context,
 
     const api_token_t *token = context_token(context, user);
     if (!token) {
+        if (context->connection && context->token_failed) {
+            authorization_context_free(owned);
+            return -1;
+        }
         evaluation->decision = AUTHZ_DECISION_DENY;
         evaluation->source = AUTHZ_SOURCE_NONE;
         safe_strcpy(evaluation->explanation,

@@ -16,6 +16,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+/* go2rtc_parse_external_candidates() lives in utils so builds without
+ * go2rtc (ENABLE_GO2RTC=OFF) can still validate the setting. */
+#include "utils/webrtc_candidates.h"
+
 /**
  * @brief Initialize the go2rtc process manager
  * 
@@ -98,6 +102,11 @@ int go2rtc_process_generate_override_file(const char *override_path);
  * @return Pointer to a stable internal string, or NULL when uninitialized.
  */
 const char *go2rtc_process_get_override_path(void);
+
+/** Copy the final listener policy used by the managed child. Returns false
+ * when no managed launch is recorded (including external services), or the
+ * output buffer is too small. The policy contains no credentials. */
+bool go2rtc_process_get_listener_policy(char *policy, size_t capacity);
 
 /**
  * @brief Return the path to the lightNVR-generated base config, or NULL when

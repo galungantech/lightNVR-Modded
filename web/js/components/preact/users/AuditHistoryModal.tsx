@@ -1,6 +1,5 @@
+import { administrationJSON, exportAuditEvents } from '../../../api/administration.ts';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { fetchJSON } from '../../../query-client.ts';
-import { enhancedFetch } from '../../../fetch-utils.ts';
 import { useI18n } from '../../../i18n.ts';
 import { showStatusMessage } from '../ToastContainer.tsx';
 import { AuditDecisionModes } from './AuditDecisionModes.tsx';
@@ -124,7 +123,7 @@ export function AuditHistoryModal({ users = [], onClose, getAuthHeaders }: Audit
     setLoading(true);
     setError('');
     try {
-      const response = await fetchJSON<Partial<AuditEventsPage>>(`/api/audit/events?${queryString}`, {
+      const response = await administrationJSON<AuditEventsPage>(`/api/audit/events?${queryString}`, {
         headers: getAuthHeaders(),
         cache: 'no-store',
         timeout: 20000,
@@ -142,7 +141,7 @@ export function AuditHistoryModal({ users = [], onClose, getAuthHeaders }: Audit
 
   useEffect(() => { loadEvents(); }, [loadEvents]);
   useEffect(() => {
-    fetchJSON<AuditSettings>('/api/audit/settings', {
+    administrationJSON<AuditSettings>('/api/audit/settings', {
       headers: getAuthHeaders(), cache: 'no-store', timeout: 15000, retries: 0,
     }).then((loadedSettings) => {
       setSettings(loadedSettings);
@@ -197,7 +196,7 @@ export function AuditHistoryModal({ users = [], onClose, getAuthHeaders }: Audit
     }
     setSavingRetention(true);
     try {
-      const response = await fetchJSON<AuditSettings>('/api/audit/settings', {
+      const response = await administrationJSON<AuditSettings>('/api/audit/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ retention_days: days }),
@@ -219,10 +218,7 @@ export function AuditHistoryModal({ users = [], onClose, getAuthHeaders }: Audit
   const exportPage = async () => {
     setExporting(true);
     try {
-      const response = await enhancedFetch(`/api/audit/events/export?${queryString}`, {
-        headers: getAuthHeaders(), cache: 'no-store', timeout: 30000, retries: 0,
-      });
-      const blob = await response.blob();
+      const blob = await exportAuditEvents(queryString, {headers:getAuthHeaders(), timeout:30000});
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
       anchor.href = url;
@@ -243,7 +239,7 @@ export function AuditHistoryModal({ users = [], onClose, getAuthHeaders }: Audit
   const hasNext = bounds.end < bounds.total;
 
   return (
-    <div role="presentation" className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-2 sm:p-3" onClick={() => !savingRetention && !exporting && onClose()}>
+    <div role="presentation" className="app-modal-overlay fixed inset-0 flex items-center justify-center bg-black/50 p-2 sm:p-3" onClick={() => !savingRetention && !exporting && onClose()}>
       <section /* eslint-disable-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions -- only keeps clicks inside the dialog from reaching the backdrop */ role="dialog" aria-modal="true" aria-labelledby="audit-history-title" className="flex max-h-[96vh] w-full max-w-7xl flex-col overflow-hidden rounded-lg bg-card text-card-foreground shadow-xl" onClick={(event) => event.stopPropagation()}>
         <header className="flex items-start justify-between gap-4 border-b border-border p-4 sm:p-5">
           <div><h2 id="audit-history-title" className="text-xl font-bold">{t('audit.title')}</h2><p className="mt-1 text-sm text-muted-foreground">{t('audit.description')}</p></div>

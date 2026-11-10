@@ -29,6 +29,9 @@
 #include "video/go2rtc/go2rtc_integration.h"
 #include "video/unified_detection_thread.h"
 #include "database/database_manager.h"
+#include "database/db_observation_classifications.h"
+#include "web/api_handlers_observations.h"
+#include "utils/uuid.h"
 
 // Minimum/default window for live-view detection queries (seconds).
 // The actual window is max(MIN_DETECTION_AGE, stream_detection_interval * 2) so
@@ -49,8 +52,11 @@ void handle_get_detection_results(const http_request_t *req, http_response_t *re
         return;
     }
     api_phase_timer_t phase = api_phase_begin(req, "detection camera authorization");
-    bool authorized = httpd_authorize_stream_action(req, res, AUTHZ_LIVE_VIEW,
-                                                   stream_name);
+    user_t user;
+    fleet_camera_t camera;
+    authorization_evaluation_t evaluation;
+    bool authorized = httpd_authorize_stream_action_with_context(
+        req, res, AUTHZ_LIVE_VIEW, stream_name, &user, &camera, &evaluation);
     api_phase_end(&phase);
     if (!authorized) return;
 
@@ -115,7 +121,7 @@ void handle_get_detection_results(const http_request_t *req, http_response_t *re
     // Get persisted event ranges. Ordinary model detections have identical
     // start/end values; external motion start/stop events may span segments.
     phase = api_phase_begin(req, "detection result database snapshot");
-    int count = get_detection_results_readonly(stream_name, &result,
+    int count = get_detection_results_for_camera_readonly(camera.camera_uuid, stream_name, &result,
                                                timestamps, end_timestamps,
                                                max_age, start_time, end_time);
     api_phase_end(&phase);
@@ -185,6 +191,28 @@ void handle_get_detection_results(const http_request_t *req, http_response_t *re
         cJSON_AddStringToObject(response, "stream_status", status_str);
     }
 
+    // INT_01 L15: link each detection to the observation captured by this
+    // already-authorized camera (live.view above) in the same second +/-1 with
+    // the same label, so the UI can show a classification without one request
+    // per detection. Additive: unlinked detections carry no "observation".
+    // Heap, not stack: each link embeds a full annotation (~0.6 KiB).
+    observation_detection_link_t *links = NULL;
+    if (result.count > 0 && lightnvr_uuid_is_valid(camera.camera_uuid))
+        links = calloc((size_t)result.count, sizeof(*links));
+    if (links) {
+        observation_detection_ref_t refs[MAX_DETECTIONS];
+        for (int i = 0; i < result.count; i++) {
+            refs[i].label = result.detections[i].label;
+            refs[i].timestamp = (int64_t)timestamps[i];
+        }
+        phase = api_phase_begin(req, "detection observation link");
+        if (db_observation_link_detections(camera.camera_uuid, refs, (size_t)result.count,
+                                           links) != DB_OBS_OK) {
+            log_warn("Observation links unavailable for stream %s", stream_name);
+        }
+        api_phase_end(&phase);
+    }
+
     // Add each detection to the array
     for (int i = 0; i < result.count; i++) {
         cJSON *detection = cJSON_CreateObject();
@@ -202,10 +230,14 @@ void handle_get_detection_results(const http_request_t *req, http_response_t *re
         cJSON_AddNumberToObject(detection, "height", result.detections[i].height);
         cJSON_AddNumberToObject(detection, "timestamp", (double)timestamps[i]);
         cJSON_AddNumberToObject(detection, "end_timestamp", (double)end_timestamps[i]);
+        cJSON *observation = links ? observation_detection_link_to_json(&links[i]) : NULL;
+        if (observation) cJSON_AddItemToObject(detection, "observation", observation);
         
         cJSON_AddItemToArray(detections_array, detection);
     }
     
+    free(links);
+
     // Convert to string
     char *json_str = cJSON_PrintUnformatted(response);
     if (!json_str) {

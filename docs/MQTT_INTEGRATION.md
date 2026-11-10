@@ -206,6 +206,45 @@ active even when the existing `[mqtt]` default destination is disabled. See
 }
 ```
 
+### Observation change events (INT_01)
+
+Cameras with observation evidence turned on (off by default; see
+[Detection engines](DETECTION_ENGINES.md#observation-evidence-int_01)) also
+publish `io.lightnvr.detection.observation_changed.v1` on:
+
+`{topic_prefix}/v1/events/io.lightnvr.detection.observation_changed.v1/{camera_uuid}`
+
+Each message announces a new revision of one durable observation: it was
+created, its evidence image became ready, unavailable or expired, or a
+classification annotation changed. The data is a small trigger (`observation_id`,
+`revision`, `change_cause`, `evidence_state` and `snapshot_url` when the image
+is ready); consumers read the full observation from
+`GET /api/observations/{id}`. The payload rules are in the
+[observations contract](integrations/OBSERVATIONS_CONTRACT.md#6-change-event-iolightnvrdetectionobservation_changedv1).
+
+- The envelope `id` is a deterministic UUIDv5 of the source, observation and
+  revision, so a redelivery repeats the same `id`. Delivery is at least once;
+  deduplicate on `source + id`.
+- Changes are staged in SQLite with the observation itself and relayed to the
+  durable outbox in order. A broker outage delays them; it does not lose them
+  until the one-hour delivery expiry. Missed changes stay available through
+  the cursor API, `GET /api/observations`.
+- **Routes.** With no event routes stored, these events are published like
+  every other normalized event. Once routes exist, add one that lists
+  `io.lightnvr.detection.observation_changed.v1` **without** a detection
+  predicate. `labels_any`, `zone_ids_any` and `min_confidence` only match
+  `io.lightnvr.detection.object.v1`, so a route with a predicate never matches
+  observation events; those changes are recorded as `relayed_no_route` and are
+  not published. Avoid debounce, cooldown and grouping on this route: they are
+  keyed per camera and would drop revisions.
+- The observation type may hold at most 2,000 undelivered outbox rows, so a
+  long outage cannot crowd out other events.
+- The legacy `{topic_prefix}/detections/{stream_name}`, snapshot and Home
+  Assistant topics are unchanged and carry no observation data.
+
+For a complete consumer setup (scoped token, routes, detector, retention and
+diagnostics), see the [YA-WAMF deployment recipe](integrations/YA_WAMF.md).
+
 ## Legacy Detection Format
 
 The existing topic and payload remain available during migration for Home
@@ -351,6 +390,37 @@ automation:
                 password: "your_lightnvr_password"
 ```
 
+## Home Assistant Auto-Discovery
+
+With discovery on, Home Assistant creates LightNVR's entities itself; no YAML needed.
+
+```ini
+[mqtt]
+enabled = true
+broker_host = 192.168.1.10
+ha_discovery = true
+ha_discovery_prefix = homeassistant   ; must match Home Assistant's discovery prefix
+ha_snapshot_interval = 30             ; seconds between camera images, 0 = off
+```
+
+For each stream, LightNVR publishes retained discovery configs under
+`{ha_discovery_prefix}/.../lightnvr/...` for:
+
+| Entity | State topic | Behaviour |
+|---|---|---|
+| Camera `<stream>` | `{topic_prefix}/cameras/<stream>/snapshot` | A JPEG snapshot every `ha_snapshot_interval` seconds |
+| Binary sensor `<stream> Motion` (`device_class: motion`) | `{topic_prefix}/cameras/<stream>/motion` | `ON` when a detection arrives, `OFF` 30 seconds after the last one |
+| Sensor `<stream> Detections` | `{topic_prefix}/cameras/<stream>/detection_count` | Objects in the latest detection |
+
+Per-class counts are also published to `{topic_prefix}/cameras/<stream>/<label>` (for
+example `.../cameras/driveway/person`). Two installation-wide sensors, **System Health**
+and **Active Health Incidents**, come from the [health presence](mqtt/system-health.md)
+messages. Every entity uses `{topic_prefix}/availability` (`online`/`offline`) for
+availability, so it goes unavailable when LightNVR disconnects.
+
+Stream names are sanitized for topics. Discovery configs are retained, so deleting a stream
+in LightNVR leaves its entities in Home Assistant until you remove them there.
+
 ## Integration Examples
 
 ### Home Assistant
@@ -359,7 +429,8 @@ automation:
 > see [LightNVR on Home Assistant](HOME_ASSISTANT.md). The MQTT setup below is the same
 > either way.
 
-Add the following to your `configuration.yaml`:
+Prefer [auto-discovery](#home-assistant-auto-discovery) above. To define entities by
+hand instead, add the following to your `configuration.yaml`:
 
 ```yaml
 mqtt:

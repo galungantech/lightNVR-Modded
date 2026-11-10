@@ -7,6 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
   packages: write
 
@@ -16,8 +17,17 @@ env:
   REGISTRY_IMAGE: ghcr.io/opensensor/lightnvr
 
 
+# Superseded commits do not need to finish the same workflow.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  release-preflight:
+    uses: ./.github/workflows/release-preflight.yml
+
   build:
+    needs: release-preflight
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

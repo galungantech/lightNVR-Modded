@@ -4,11 +4,20 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Keep the same gates on the explicitly stacked hardening PRs.
+    branches: [main, 'codex/hardening-*']
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# A generated Rust follow-up queues behind its source run instead of cancelling
+# work that just passed. Other pushes and PR updates still supersede older runs.
+# Match commit metadata: deploy-key pushes are attributed to the key owner.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: >-
+    ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.author.email == '41898282+github-actions[bot]@users.noreply.github.com' && startsWith(github.event.head_commit.message, 'lightnvr-rs: regenerate from C')) }}
 
 jobs:
   web-jsx-a11y:
@@ -21,9 +30,22 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
       - name: Install web dependencies
         run: npm ci --prefix web
+      - name: Install root contract and browser test types
+        run: npm ci
+      - name: Validate deterministic API contracts
+        run: |
+          npm run contracts:lint
+          npm run contracts:check
+          npm run contracts:test-tools
+          npm run contracts:typecheck
+          node --test tests/contracts/fixtures/schema/validate.mjs
+      - name: Type-check root integration and load tooling
+        run: npm run test:typecheck
       - name: Type-check web UI
         run: npm run typecheck --prefix web
       - name: Lint web UI

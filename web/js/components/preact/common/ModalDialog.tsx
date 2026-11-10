@@ -1,6 +1,8 @@
 import type { ComponentChildren, RefObject } from 'preact';
 import { createPortal } from 'preact/compat';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { useAsyncAction } from '../../../hooks/useAsyncAction.ts';
+import { useI18n } from '../../../i18n.ts';
 
 const FOCUSABLE_SELECTOR = [
   'button:not([disabled])',
@@ -23,7 +25,7 @@ interface ModalShellProps {
   initialFocusRef?: RefObject<HTMLElement | null>;
 }
 
-function ModalShell({
+export function ModalShell({
   isOpen,
   onClose,
   title,
@@ -33,13 +35,15 @@ function ModalShell({
   initialFocusRef,
 }: ModalShellProps) {
   const dialogRef = useRef<HTMLElement>(null);
+  const closeState = useRef({ onClose, closeDisabled });
+  closeState.current = { onClose, closeDisabled };
   const idRef = useRef<string>(null);
   if (!idRef.current) {
     nextDialogId += 1;
     idRef.current = `lightnvr-dialog-${nextDialogId}`;
   }
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isOpen) return undefined;
 
     const previouslyFocused = document.activeElement as HTMLElement | null;
@@ -53,7 +57,7 @@ function ModalShell({
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
-        if (!closeDisabled) onClose();
+        if (!closeState.current.closeDisabled) closeState.current.onClose();
         return;
       }
       if (event.key !== 'Tab' || !dialogRef.current) return;
@@ -83,7 +87,12 @@ function ModalShell({
         previouslyFocused.focus();
       }
     };
-  }, [closeDisabled, initialFocusRef, isOpen, onClose]);
+  }, [initialFocusRef, isOpen]);
+
+  useLayoutEffect(() => {
+    // Disabling the focused action must not leave keyboard focus outside the modal.
+    if (isOpen && closeDisabled) dialogRef.current?.focus();
+  }, [closeDisabled, isOpen]);
 
   if (!isOpen) return null;
 
@@ -96,7 +105,7 @@ function ModalShell({
 
   return createPortal(
     <div role="presentation"
-      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/55 p-4"
+      className="app-modal-overlay app-modal-overlay--dialog fixed inset-0 flex items-center justify-center bg-black/55 p-4"
       data-keyboard-nav-preserve
       onMouseDown={handleBackdropMouseDown}
       onClick={(event) => event.stopPropagation()}
@@ -128,6 +137,7 @@ function ModalShell({
 export interface ConfirmDialogProps {
   isOpen: boolean;
   onClose: () => void;
+  /** Resolving to exactly `false` keeps the dialog open. */
   onConfirm: () => unknown;
   title: ComponentChildren;
   message: ComponentChildren;
@@ -138,7 +148,12 @@ export interface ConfirmDialogProps {
 }
 
 /** A reusable confirmation modal for warning and destructive actions. */
-export function ConfirmDialog({
+export function ConfirmDialog(props: ConfirmDialogProps) {
+  // A newly opened dialog owns a fresh action; an old completion cannot close it.
+  return props.isOpen ? <ConfirmDialogContent {...props} /> : null;
+}
+
+function ConfirmDialogContent({
   isOpen,
   onClose,
   onConfirm,
@@ -151,17 +166,20 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const cancelRef = useRef<HTMLButtonElement>(null);
   const danger = variant === 'danger';
-
-  const handleConfirm = () => {
-    onConfirm();
-    onClose();
-  };
+  const { t } = useI18n();
+  const mounted = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
+  const confirmation = useAsyncAction(async () => {
+    const result = await onConfirm();
+    if (mounted.current && result !== false) onClose();
+  });
 
   return (
     <ModalShell
       isOpen={isOpen}
       onClose={onClose}
       title={title}
+      closeDisabled={confirmation.pending}
       initialFocusRef={cancelRef}
     >
       <div className="px-5 py-4">
@@ -179,15 +197,17 @@ export function ConfirmDialog({
           <p className="pt-1.5 text-sm text-muted-foreground">{message}</p>
         </div>
       </div>
+      {confirmation.error && <p role="alert" className="px-5 pb-4 text-sm text-destructive">{t('common.actionFailed')}</p>}
       <footer className="flex justify-end gap-3 border-t border-border px-5 py-4">
-        <button ref={cancelRef} type="button" className="btn-secondary" onClick={onClose}>
+        <button ref={cancelRef} type="button" className="btn-secondary" disabled={confirmation.pending} onClick={onClose}>
           {cancelLabel}
         </button>
         <button
           type="button"
           className={danger ? 'btn-danger' : 'btn-primary'}
-          disabled={confirmDisabled}
-          onClick={handleConfirm}
+          disabled={confirmDisabled || confirmation.pending}
+          aria-busy={confirmation.pending}
+          onClick={() => { void confirmation.run(); }}
         >
           {confirmLabel}
         </button>
@@ -214,7 +234,12 @@ export interface TextInputDialogProps {
 }
 
 /** A modal form backed by a real text input, optionally with one checkbox. */
-export function TextInputDialog({
+export function TextInputDialog(props: TextInputDialogProps) {
+  // Each opening owns its action so a previous completion cannot affect it.
+  return props.isOpen ? <TextInputDialogContent {...props} /> : null;
+}
+
+function TextInputDialogContent({
   isOpen,
   onClose,
   onSubmit,
@@ -232,26 +257,19 @@ export function TextInputDialog({
   const inputRef = useRef<HTMLInputElement>(null);
   const [value, setValue] = useState(initialValue);
   const [checked, setChecked] = useState(checkboxInitialValue);
-  const [submitting, setSubmitting] = useState(false);
+  const { t } = useI18n();
+  const mounted = useRef(true);
+  useLayoutEffect(() => () => { mounted.current = false; }, []);
+  const submission = useAsyncAction(async (trimmed: string, checkboxValue: boolean) => {
+    const result = await onSubmit(trimmed, checkboxValue);
+    if (mounted.current && result !== false) onClose();
+  });
 
-  useEffect(() => {
-    if (!isOpen) return;
-    setValue(initialValue);
-    setChecked(checkboxInitialValue);
-    setSubmitting(false);
-  }, [checkboxInitialValue, initialValue, isOpen]);
-
-  const submit = async (event: Event) => {
+  const submit = (event: Event) => {
     event.preventDefault();
     const trimmed = value.trim();
-    if (!trimmed || submitting) return;
-    setSubmitting(true);
-    try {
-      const result = await onSubmit(trimmed, checked);
-      if (result !== false) onClose();
-    } finally {
-      setSubmitting(false);
-    }
+    if (!trimmed) return;
+    void submission.run(trimmed, checked);
   };
 
   return (
@@ -260,7 +278,7 @@ export function TextInputDialog({
       onClose={onClose}
       title={title}
       description={description}
-      closeDisabled={submitting}
+      closeDisabled={submission.pending}
       initialFocusRef={inputRef}
     >
       <form onSubmit={submit}>
@@ -275,7 +293,7 @@ export function TextInputDialog({
               placeholder={placeholder}
               maxLength={maxLength}
               required
-              disabled={submitting}
+              disabled={submission.pending}
               onInput={(event) => setValue(event.currentTarget.value)}
             />
           </label>
@@ -285,20 +303,23 @@ export function TextInputDialog({
                 type="checkbox"
                 className="mt-0.5 h-4 w-4"
                 checked={checked}
-                disabled={submitting}
+                disabled={submission.pending}
                 onChange={(event) => setChecked(event.currentTarget.checked)}
               />
               <span>{checkboxLabel}</span>
             </label>
           )}
         </div>
-        <footer className="flex justify-end gap-3 border-t border-border px-5 py-4">
-          <button type="button" className="btn-secondary" disabled={submitting} onClick={onClose}>
-            {cancelLabel}
-          </button>
-          <button type="submit" className="btn-primary" disabled={submitting || !value.trim()}>
-            {confirmLabel}
-          </button>
+        <footer className="border-t border-border px-5 py-4">
+          {submission.error && <p role="alert" className="mb-3 text-sm text-destructive">{t('common.actionFailed')}</p>}
+          <div className="flex justify-end gap-3">
+            <button type="button" className="btn-secondary" disabled={submission.pending} onClick={onClose}>
+              {cancelLabel}
+            </button>
+            <button type="submit" className="btn-primary" disabled={submission.pending || !value.trim()} aria-busy={submission.pending}>
+              {confirmLabel}
+            </button>
+          </div>
         </footer>
       </form>
     </ModalShell>

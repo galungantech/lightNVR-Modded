@@ -20,6 +20,7 @@
 #include "web/libuv_connection.h"
 #include "web/http_server.h"
 #include "web/api_handlers.h"
+#include "web/api_handlers_openapi.h"
 #include "web/api_handlers_health.h"
 #include "web/api_handlers_settings.h"
 #include "web/api_handlers_system.h"
@@ -66,6 +67,7 @@
 #include "web/api_handlers_operator_floor_plans.h"
 #include "web/api_handlers_lpr.h"
 #include "web/api_handlers_detection_engines.h"
+#include "web/api_handlers_observations.h"
 #define LOG_COMPONENT "HTTP"
 #include "core/logger.h"
 #include "core/config.h"
@@ -91,6 +93,8 @@ int register_all_libuv_handlers(http_server_handle_t server) {
     }
 
     log_info("Registering API handlers with libuv server");
+
+    http_server_register_handler(server, "/api/openapi.json", "GET", handle_get_openapi);
 
     // Setup wizard API (no authentication guard – must be accessible before auth is configured)
     http_server_register_handler(server, "/api/setup/status", "GET",  handle_get_setup_status);
@@ -300,6 +304,17 @@ int register_all_libuv_handlers(http_server_handle_t server) {
     // Detection event snapshots (saved on MQTT publish, see issue #449)
     http_server_register_handler(server, "/api/snapshots/#/#", "GET", handle_get_detection_snapshot);
 
+    // INT_01 observations, evidence snapshots and integration capabilities
+    // (docs/integrations/OBSERVATIONS_CONTRACT.md)
+    http_server_register_handler(server, "/api/integrations/capabilities", "GET",
+                                 handle_get_integration_capabilities);
+    http_server_register_handler(server, "/api/observations", "GET", handle_get_observations);
+    http_server_register_handler(server, "/api/observations/#/snapshot", "GET",
+                                 handle_get_observation_snapshot);
+    http_server_register_handler(server, "/api/observations/#/classifications/#/#", "PUT",
+                                 handle_put_observation_classification);
+    http_server_register_handler(server, "/api/observations/#", "GET", handle_get_observation);
+
     // Storage Management API
     http_server_register_handler(server, "/api/storage/health", "GET", handle_get_storage_health);
     http_server_register_handler(server, "/api/storage/cleanup", "POST", handle_post_storage_cleanup);
@@ -503,6 +518,9 @@ int register_all_libuv_handlers(http_server_handle_t server) {
     // HLS Streaming (backend-agnostic handler)
     // Pattern uses # for single-segment wildcards: /hls/{stream_name}/{filename}
     http_server_register_handler(server, "/hls/#/#", "GET", handle_direct_hls_request);
+
+    // Loopback-only opaque media lease callback, not a public API operation.
+    http_server_register_handler(server, "/api/internal/media-lease", "GET", handle_internal_media_lease);
 
     // Scoped go2rtc proxy. WebRTC SDP uses the authenticated HTTP origin;
     // the negotiated media connection still goes directly to go2rtc.

@@ -33,10 +33,10 @@ test.describe('Investigation player regressions @ui @investigation', () => {
       json: {
         start_time: START_TIME,
         end_time: END_TIME,
-        max_active_decoders: 4,
+        max_active_decoders: 4,camera_count:1,
         tracks: [{
           camera_uuid: CAMERA_UUID,
-          name: 'front-door',
+          name: 'front-door',stream_name:'front-door',returned_interval_count:1,aggregation_bucket_seconds:1,coverage:{identity_resolved:true,requested_start:START_TIME,requested_end:END_TIME},
           segment_count: 1,
           truncated: false,
           aggregated: false,
@@ -44,24 +44,24 @@ test.describe('Investigation player regressions @ui @investigation', () => {
             id: 568,
             start_time: START_TIME,
             end_time: END_TIME,
-            has_detection: true,
+            has_detection: true,duration:60,size_bytes:100,protected:false,media_available:true,capture_method:'continuous',
           }],
         }],
       },
     }));
     await page.route('**/api/investigations/search', route => route.fulfill({
       json: {
-        results: [],
-        page: { total: 0, has_more: false, next_cursor: null },
+        camera_count:1,selector_applied:false,summary_complete:true,results: [],
+        page: {limit:100,returned:0, total: 0, has_more: false, next_cursor: null },
         facets: {
           event_types: [], locations: [], labels: [], zones: [], sources: [],
-          capture_methods: [], recording_tags: [],
+          capture_methods: [], recording_tags: [],cameras:[],protection:[],
         },
-        histogram: { buckets: [] },
+        histogram: {bucket_seconds:1, buckets: [] },
         coverage: {
-          unresolved_legacy_rows: 0,
+          requested_start:START_TIME,requested_end:END_TIME,searched_start:START_TIME,searched_end:END_TIME,complete:true,incomplete_reasons:[],unresolved_legacy_rows: 0,
           spatial_metadata: {
-            requested: false, rows_with_boxes: 0, rows_without_boxes: 0,
+            requested: false,
           },
         },
       },
@@ -91,7 +91,7 @@ test.describe('Investigation player regressions @ui @investigation', () => {
     const controls = player.locator('.investigation-player-controls');
 
     await expect(video).toBeVisible();
-    await expect.poll(() => video.evaluate(element => ({
+    await expect.poll(() => video.evaluate((element: HTMLVideoElement) => ({
       width: element.videoWidth,
       height: element.videoHeight,
       metadataLoaded: element.readyState >= HTMLMediaElement.HAVE_METADATA,
@@ -106,8 +106,8 @@ test.describe('Investigation player regressions @ui @investigation', () => {
       return bounds.width / bounds.height;
     })).toBeCloseTo(4 / 3, 2);
     // Only the page's own control bar is shown; native controls would duplicate it (#568).
-    await expect.poll(() => video.evaluate(element => element.controls)).toBe(false);
-    await expect.poll(() => video.evaluate(element =>
+    await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.controls)).toBe(false);
+    await expect.poll(() => video.evaluate((element: HTMLVideoElement) =>
       getComputedStyle(element).objectFit)).toBe('contain');
 
     await expect(controls).toBeVisible();
@@ -128,26 +128,26 @@ test.describe('Investigation player regressions @ui @investigation', () => {
     const video = player.locator('video');
     const sharedPlay = page.locator('.investigation-play-button');
     const localControls = player.locator('.investigation-player-controls');
-    await expect.poll(() => video.evaluate(el => el.readyState)).toBeGreaterThanOrEqual(2);
+    await expect.poll(() => video.evaluate((el: HTMLVideoElement) => el.readyState)).toBeGreaterThanOrEqual(2);
 
     // These are real media events, as emitted by the browser's native controls.
-    await video.evaluate(el => el.play());
+    await video.evaluate((el: HTMLVideoElement) => el.play());
     await expect(sharedPlay).toContainText('Pause');
     await expect(localControls.getByRole('button', { name: 'Pause' })).toBeVisible();
-    await video.evaluate(el => el.pause());
+    await video.evaluate((el: HTMLVideoElement) => el.pause());
     await expect(sharedPlay).toContainText('Play');
     await expect(localControls.getByRole('button', { name: 'Play', exact: true })).toBeVisible();
 
     await sharedPlay.click();
-    await expect.poll(() => video.evaluate(el => el.paused)).toBe(false);
+    await expect.poll(() => video.evaluate((el: HTMLVideoElement) => el.paused)).toBe(false);
     // load() emits pause while resetting the media element. It must not pause
     // the shared investigation clock or other cameras.
-    await video.evaluate(el => el.load());
-    await expect.poll(() => video.evaluate(el => el.readyState)).toBeGreaterThanOrEqual(2);
-    await expect.poll(() => video.evaluate(el => el.paused)).toBe(false);
+    await video.evaluate((el: HTMLVideoElement) => el.load());
+    await expect.poll(() => video.evaluate((el: HTMLVideoElement) => el.readyState)).toBeGreaterThanOrEqual(2);
+    await expect.poll(() => video.evaluate((el: HTMLVideoElement) => el.paused)).toBe(false);
     await expect(sharedPlay).toContainText('Pause');
 
-    await video.evaluate(el => el.pause());
+    await video.evaluate((el: HTMLVideoElement) => el.pause());
     await expect(sharedPlay).toContainText('Play');
   });
 

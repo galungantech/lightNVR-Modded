@@ -4,15 +4,45 @@
  * Run with: npm --prefix web run test:e2e -- --testPathPatterns='liveNavigator\.browser\.spec\.js$'
  */
 const path = require('node:path');
+const { fleetLocations, floorPlan, liveLayout } = require('./fleetFixtures');
+const {validateWorkspacesResponse,validateEvidenceSearch} = require('../../generated/api/validators.js');
 
 const streams = [
-  { camera_uuid: 'cam-1', name: 'Gate', availability: 'live', location_uuid: null },
-  { camera_uuid: 'cam-2', name: 'Barn', availability: 'live', location_uuid: null },
-  { camera_uuid: 'cam-3', name: 'Shed', availability: 'live', location_uuid: null },
-  { camera_uuid: 'cam-4', name: 'Office', availability: 'live', location_uuid: null },
+  { camera_uuid: '30000000-0000-4000-8000-000000000001', name: 'Gate', availability: 'live', location_uuid: null },
+  { camera_uuid: '30000000-0000-4000-8000-000000000002', name: 'Barn', availability: 'live', location_uuid: null },
+  { camera_uuid: '30000000-0000-4000-8000-000000000003', name: 'Shed', availability: 'live', location_uuid: null },
+  { camera_uuid: '30000000-0000-4000-8000-000000000004', name: 'Office', availability: 'live', location_uuid: null },
 ];
 
-async function openNavigator() {
+function fixture(guard, body) {
+  if (!guard(body)) throw new Error(`Invalid native navigator fixture: ${JSON.stringify(guard.errors)}`);
+  return body;
+}
+const workspaces = fixture(validateWorkspacesResponse, {
+  scope: 'user', configurable: true,
+  workspaces: ['live.navigator', 'investigation'].map(key => ({
+    key, label: key, description: 'Fixture workspace', visible: true,
+    configurable: true, authorization_unchanged: true,
+  })),
+});
+const observed = Math.floor(Date.now() / 1000) - 5;
+const search = fixture(validateEvidenceSearch, {
+  camera_count: streams.length, selector_applied: false, summary_complete: true,
+  results: [{result_id: 'detection:1', event_type: 'detection', camera_uuid: streams[0].camera_uuid,
+    start_time: observed, end_time: observed, media_available: false, known_gap: true, recording_id: null,
+    detection: {id: 1, label: 'person', confidence: 0.9, source: 'lightnvr', zone_uuid: null, track_id: null, bounding_box: null},
+    camera: {name: 'Gate', location_uuid: null, location_name: null, location_path: null},
+    thumbnail: {status: 'unavailable'}, recording: {capture_method: null, protected: null},
+  }],
+  page: {limit: 20, returned: 1, total: 1, has_more: false, next_cursor: null},
+  facets: {cameras: [], labels: [], zones: [], sources: [], event_types: [], locations: [], capture_methods: [], recording_tags: [], protection: []},
+  histogram: {bucket_seconds: 60, buckets: []},
+  coverage: {requested_start: observed - 3600, requested_end: observed + 5,
+    searched_start: observed - 3600, searched_end: observed + 5, unresolved_legacy_rows: 0,
+    spatial_metadata: {requested: false}, incomplete_reasons: [], complete: true},
+});
+
+async function openNavigator({ investigation = true } = {}) {
   const { chromium } = require('../../../node_modules/playwright');
   const { build } = require('esbuild');
   const webRoot = path.resolve(__dirname, '../..');
@@ -24,35 +54,44 @@ async function openNavigator() {
   import { h, render } from 'preact';
   import { QueryClient, QueryClientProvider } from './js/query-client.ts';
   import { LiveOperatorNavigator } from './js/components/preact/live/LiveOperatorNavigator.tsx';
-  const streams = ${JSON.stringify(streams)};
+  let streams = ${JSON.stringify(streams)};
   window.calls = { searches: 0, layoutPuts: [], applied: [] };
   const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
   window.fetch = async (url, options = {}) => {
     const target = String(url);
-    if (target === '/api/ui/workspaces') return json({});
-    if (target === '/api/locations') return json({ locations: [{ uuid: 'loc-1', name: 'Orchard', parent_uuid: null, sort_order: 0 }] });
-    if (target === '/api/live/plans') return json({ can_modify: true, plans: [{ uuid: 'p1', name: 'orchard48', location_uuid: 'loc-1',
-      cameras: [{ camera_uuid: 'cam-1', x: 0.2, y: 0.2 }, { camera_uuid: 'cam-2', x: 0.4, y: 0.4 }, { camera_uuid: 'cam-3', x: 0.6, y: 0.6 }] }] });
+    if (target === '/api/ui/workspaces') return json(${JSON.stringify({...workspaces,workspaces:workspaces.workspaces.map(workspace=>workspace.key==='investigation'?{...workspace,visible:investigation}:workspace)})});
+    if (target === '/api/locations') return json(${JSON.stringify(fleetLocations([{ uuid: '00000000-0000-4000-8000-000000000001', name: 'Orchard' }]))});
+    if (target === '/api/live/plans') return json({can_modify:true,plans:[${JSON.stringify(floorPlan({name:'orchard48',location_uuid:'00000000-0000-4000-8000-000000000001',cameras:streams.slice(0,3).map((stream,index)=>({camera_uuid:stream.camera_uuid,x:0.2*(index+1),y:0.2*(index+1)}))}))}]});
+    const layout=${JSON.stringify(liveLayout({name:'Yard',revision:3,camera_slots:[{camera_uuid:streams[0].camera_uuid}]}))};
     if (target.startsWith('/api/live/layouts/') && options.method === 'PUT') {
       const body = JSON.parse(options.body);
       window.calls.layoutPuts.push(body);
-      return json({ uuid: 'v1', owned: true, revision: 4, ...body });
+      return json({...layout,...body,revision:4});
     }
-    if (target === '/api/live/layouts') return json({ can_modify: true, can_share: false, layouts: [{
-      uuid: 'v1', name: 'Yard', owned: true, revision: 3, columns: 2, rows: 1, availability: 'live',
-      is_shared: false, location_uuid: null, camera_slots: [{ camera_uuid: 'cam-1' }] }] });
+    if (target === '/api/live/layouts') return json({can_modify:true,can_share:false,count:1,layouts:[layout]});
     if (target === '/api/investigations/search') {
       window.calls.searches += 1;
       if (window.calls.searches === 1) return json({ error: 'search backend down' }, 500);
-      return json({ results: [{ result_id: 'r1', event_type: 'detection', start_time: 1700000000,
-        detection: { label: 'person' }, camera: { name: 'Gate' } }] });
+      const request = JSON.parse(options.body);
+      const result = ${JSON.stringify(search)};
+      result.camera_count = request.selector.expression.values.length;
+      result.selector_applied = true;
+      result.summary_complete = request.include_summary !== false;
+      result.page.limit = request.limit;
+      result.coverage.requested_start = result.coverage.searched_start = request.start_time;
+      result.coverage.requested_end = result.coverage.searched_end = request.end_time;
+      return json(result);
     }
     return new Response('', { status: 404 });
   };
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  window.setAvailability = (uuid, availability) => {
+    streams = streams.map(stream => stream.camera_uuid === uuid ? {...stream, availability} : stream);
+    window.mount();
+  };
   window.mount = () => render(h(QueryClientProvider, { client }, h(LiveOperatorNavigator, {
     streams, orderedStreams: streams.slice(0, 2), columns: 2, rows: 1, operatorSurface: 'grid',
-    selectedPlanUuid: '', onFilterChange: () => {}, onSurfaceChange: () => {}, onSelectPlan: () => {},
+    selectedPlanUuid: '', onFilterChange: () => {}, onSurfaceChange: value => {window.surface=value;}, onSelectPlan: () => {},
     onApplyLayout: (layout) => window.calls.applied.push(layout),
   })), document.getElementById('root'));
  `,
@@ -118,7 +157,8 @@ it('groups plan cameras, never spins on an empty Events scope, and updates views
     await page.locator('.live-location-row', { hasText: 'live.navigator.allCameras' }).click();
     await tab(page, 'events').click();
     await page.getByRole('alert').waitFor();
-    expect(await page.getByRole('alert').textContent()).toContain('search backend down');
+    expect(await page.getByRole('alert').textContent()).toContain('searchEvidence failed (HTTP 500).');
+    expect(await page.getByRole('alert').textContent()).not.toContain('search backend down');
     await page.getByRole('alert').getByRole('button', { name: 'live.navigator.retry' }).click();
     await page.locator('.live-event-row', { hasText: 'person' }).waitFor();
 
@@ -132,9 +172,58 @@ it('groups plan cameras, never spins on an empty Events scope, and updates views
     const [put] = await page.evaluate(() => window.calls.layoutPuts);
     expect(put).toMatchObject({
       name: 'Yard', revision: 3, columns: 2, rows: 1,
-      camera_slots: [{ camera_uuid: 'cam-1' }, { camera_uuid: 'cam-2' }],
+      camera_slots: [{ camera_uuid: '30000000-0000-4000-8000-000000000001' }, { camera_uuid: '30000000-0000-4000-8000-000000000002' }],
     });
   } finally {
     await browser.close();
   }
 }, 30000);
+
+it('counts plan cameras from all streams and refreshes when availability changes', async () => {
+  const { browser, page } = await openNavigator();
+  try {
+    await tab(page, 'plans').click();
+    // The plan has three cameras, while the current grid has only two.
+    await page.getByText('live.navigator.planCameraCounts{"live":3,"total":3}', { exact: false }).waitFor();
+    await page.evaluate(uuid => window.setAvailability(uuid, 'offline'), streams[1].camera_uuid);
+    await page.getByText('live.navigator.planCameraCounts{"live":2,"total":3}', { exact: false }).waitFor();
+  } finally {
+    await browser.close();
+  }
+}, 30000);
+
+it.each([true,false])('tab focus, panel relationships and wrapping with investigation=%s', async investigation => {
+  const {browser,page}=await openNavigator({investigation});
+  try {
+    const tabs=page.getByRole('tablist');
+    const cameras=tab(page,'cameras'), plans=tab(page,'plans');
+    const last=tab(page,investigation?'events':'views');
+    await cameras.waitFor();await cameras.focus();
+    expect(await tabs.getAttribute('aria-label')).toBe('live.navigator.title');
+    for (const button of await tabs.getByRole('tab').all()) {
+      const panelId=await button.getAttribute('aria-controls');
+      expect(await page.locator('#'+panelId).getAttribute('aria-labelledby')).toBe(await button.getAttribute('id'));
+    }
+    await page.keyboard.press('ArrowRight');
+    await page.waitForFunction(()=>document.activeElement?.id==='live-navigator-tab-plans');
+    expect(await plans.getAttribute('aria-selected')).toBe('true');
+    expect(await page.evaluate(()=>window.surface)).toBe('plan');
+    expect(await cameras.getAttribute('tabindex')).toBe('-1');
+    await page.keyboard.press('Tab');
+    expect(await page.getByRole('tabpanel').evaluate(el=>el===document.activeElement)).toBe(true);
+    await plans.focus();await page.keyboard.press('End');
+    expect(await last.evaluate(el=>el===document.activeElement)).toBe(true);
+    await page.keyboard.press('ArrowRight');
+    expect(await cameras.evaluate(el=>el===document.activeElement)).toBe(true);
+    await page.keyboard.press('ArrowLeft');
+    expect(await last.evaluate(el=>el===document.activeElement)).toBe(true);
+    await page.keyboard.press('Home');
+    expect(await cameras.evaluate(el=>el===document.activeElement)).toBe(true);
+    await page.evaluate(()=>{document.documentElement.dir='rtl';});
+    await page.keyboard.press('ArrowLeft');
+    expect(await plans.evaluate(el=>el===document.activeElement)).toBe(true);
+    await page.keyboard.press('ArrowRight');
+    expect(await cameras.evaluate(el=>el===document.activeElement)).toBe(true);
+    expect(await tabs.locator('[tabindex="0"]').count()).toBe(1);
+  } finally {await browser.close();}
+},30000);

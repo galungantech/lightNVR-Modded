@@ -11,6 +11,7 @@
 
 #include <cjson/cJSON.h>
 #include <string.h>
+#include <stdio.h>
 #include "unity.h"
 #include "web/request_response.h"
 #include "web/libuv_connection.h"
@@ -18,8 +19,15 @@
 #include "utils/strings.h"
 
 /* ---- Unity boilerplate ---- */
-void setUp(void)    {}
-void tearDown(void) {}
+static bool fail_next_allocation;
+void *__real_malloc(size_t size);
+void *__wrap_malloc(size_t size) {
+    if (fail_next_allocation) { fail_next_allocation = false; return NULL; }
+    return __real_malloc(size);
+}
+
+void setUp(void)    { fail_next_allocation = false; }
+void tearDown(void) { fail_next_allocation = false; }
 
 /* ================================================================
  * url_decode
@@ -47,6 +55,192 @@ void test_url_decode_no_encoding(void) {
     char out[64];
     TEST_ASSERT_EQUAL_INT(0, url_decode("plain", out, sizeof(out)));
     TEST_ASSERT_EQUAL_STRING("plain", out);
+}
+
+void test_url_decode_requires_two_hex_digits(void) {
+    const struct { const char *encoded; const char *expected; } cases[] = {
+        {"101%0Gjunk", "101%0Gjunk"}, {"101%0xjunk", "101%0xjunk"},
+        {"101%-0junk", "101%-0junk"}, {"101%+0junk", "101% 0junk"},
+        {"101% 0junk", "101% 0junk"}, {"101%1Gjunk", "101%1Gjunk"},
+        {"101%GGjunk", "101%GGjunk"}, {"101%0", "101%0"}, {"101%", "101%"},
+        {"101%2500", "101%00"},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char out[64];
+        TEST_ASSERT_EQUAL_INT(0, url_decode(cases[i].encoded, out, sizeof(out)));
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(cases[i].expected, out, cases[i].encoded);
+    }
+}
+
+void test_url_decode_preserves_every_nonzero_encoded_byte(void) {
+    for (unsigned int byte = 1; byte <= 255; byte++) {
+        for (int uppercase = 0; uppercase < 2; uppercase++) {
+            char encoded[16], out[16];
+            snprintf(encoded, sizeof(encoded), uppercase ? "%%%02Xtail" : "%%%02xtail", byte);
+            memset(out, 0x7f, sizeof(out));
+            TEST_ASSERT_EQUAL_INT(0, url_decode(encoded, out, sizeof(out)));
+            TEST_ASSERT_EQUAL_UINT8(byte, (unsigned char)out[0]);
+            TEST_ASSERT_EQUAL_MEMORY("tail", out + 1, 5);
+        }
+    }
+}
+
+void test_query_decode_uses_full_input_and_bounds_output(void) {
+    http_request_t req;
+    http_request_init(&req);
+    safe_strcpy(req.query_string, "value=%41%42%43%44&next=ignored", sizeof(req.query_string), 0);
+    char out[4];
+    TEST_ASSERT_EQUAL_INT(3, http_request_get_query_param(&req, "value", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("ABC", out);
+    char one[1] = {'x'};
+    TEST_ASSERT_EQUAL_INT(0, http_request_get_query_param(&req, "value", one, sizeof(one)));
+    TEST_ASSERT_EQUAL_CHAR('\0', one[0]);
+    char larger[32];
+    TEST_ASSERT_EQUAL_INT(4, http_request_get_query_param(&req, "value", larger, sizeof(larger)));
+    TEST_ASSERT_EQUAL_STRING("ABCD", larger);
+    safe_strcpy(req.query_string, "value=%4&next=1", sizeof(req.query_string), 0);
+    TEST_ASSERT_EQUAL_INT(2, http_request_get_query_param(&req, "value", larger, sizeof(larger)));
+    TEST_ASSERT_EQUAL_STRING("%4", larger);
+}
+
+void test_query_decode_near_request_capacity_needs_no_allocation(void) {
+    http_request_t req;
+    http_request_init(&req);
+    memcpy(req.query_string, "value=", 6);
+    for (int i = 0; i < 330; i++) memcpy(req.query_string + 6 + i * 3, "%41", 3);
+    memcpy(req.query_string + 996, "&next=ignored", 14);
+    char out[331];
+    fail_next_allocation = true;
+    int length = http_request_get_query_param(&req, "value", out, sizeof(out));
+    bool allocation_unused = fail_next_allocation;
+    fail_next_allocation = false;
+    TEST_ASSERT_EQUAL_INT(330, length);
+    TEST_ASSERT_TRUE(allocation_unused);
+    for (int i = 0; i < 330; i++) TEST_ASSERT_EQUAL_CHAR('A', out[i]);
+    TEST_ASSERT_EQUAL_CHAR('\0', out[330]);
+}
+
+void test_path_decode_does_not_consume_query_or_trimmed_slash(void) {
+    http_request_t req;
+    http_request_init(&req);
+    char out[32];
+    safe_strcpy(req.path, "/api/streams/%34%32/?note=ignored", sizeof(req.path), 0);
+    TEST_ASSERT_EQUAL_INT(0, http_request_extract_path_param(&req, "/api/streams/", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("42", out);
+    safe_strcpy(req.path, "/api/streams/%4?2=ignored", sizeof(req.path), 0);
+    TEST_ASSERT_EQUAL_INT(0, http_request_extract_path_param(&req, "/api/streams/", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("%4", out);
+}
+
+void test_response_body_replacement_supports_aliases_and_allocation_failure(void) {
+    http_response_t res;
+    http_response_init(&res);
+    TEST_ASSERT_EQUAL_INT(0, http_response_set_body(&res, "prefix payload"));
+    TEST_ASSERT_EQUAL_INT(0, http_response_set_body(&res, res.body));
+    TEST_ASSERT_EQUAL_STRING("prefix payload", res.body);
+    TEST_ASSERT_EQUAL_INT(0, http_response_set_body(&res, (char *)res.body + 7));
+    TEST_ASSERT_EQUAL_STRING("payload", res.body);
+    void *previous = res.body;
+    size_t previous_length = res.body_length;
+    fail_next_allocation = true;
+    int result = http_response_set_body(&res, "replacement");
+    fail_next_allocation = false;
+    TEST_ASSERT_EQUAL_INT(-1, result);
+    TEST_ASSERT_EQUAL_PTR(previous, res.body);
+    TEST_ASSERT_EQUAL_UINT(previous_length, res.body_length);
+    TEST_ASSERT_TRUE(res.body_allocated);
+    TEST_ASSERT_EQUAL_STRING("payload", res.body);
+    http_response_free(&res);
+    TEST_ASSERT_NULL(res.body);
+    http_response_free(&res);
+}
+
+
+void test_decoders_reject_encoded_nul_and_clear_partial_output(void) {
+    const char *values[] = {"%00", "42%00junk", "42%00", "long-prefix%00tail"};
+    http_request_t req;
+    http_request_init(&req);
+    for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+        for (size_t capacity = 1; capacity <= 32; capacity++) {
+            char out[32];
+            memset(out, 'x', sizeof(out));
+            TEST_ASSERT_EQUAL_INT(-1, url_decode(values[i], out, capacity));
+            TEST_ASSERT_EQUAL_CHAR('\0', out[0]);
+            snprintf(req.query_string, sizeof(req.query_string), "value=%s&next=ok", values[i]);
+            memset(out, 'x', sizeof(out));
+            TEST_ASSERT_EQUAL_INT(-1, http_request_get_query_param(&req, "value", out, capacity));
+            TEST_ASSERT_EQUAL_CHAR('\0', out[0]);
+            snprintf(req.path, sizeof(req.path), "/api/streams/%s", values[i]);
+            memset(out, 'x', sizeof(out));
+            TEST_ASSERT_EQUAL_INT(-1, http_request_extract_path_param(&req, "/api/streams/", out, capacity));
+            TEST_ASSERT_EQUAL_CHAR('\0', out[0]);
+        }
+    }
+    char out[32];
+    safe_strcpy(req.query_string, "value=ok&next=%00", sizeof(req.query_string), 0);
+    TEST_ASSERT_EQUAL_INT(2, http_request_get_query_param(&req, "value", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("ok", out);
+    safe_strcpy(req.path, "/api/streams/42/?next=%00", sizeof(req.path), 0);
+    TEST_ASSERT_EQUAL_INT(0, http_request_extract_path_param(&req, "/api/streams/", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("42", out);
+}
+
+void test_path_decode_accepts_exact_fit_and_rejects_truncation(void) {
+    const char *values[] = {"ABC", "%41%42%43"};
+    http_request_t req;
+    http_request_init(&req);
+    for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+        snprintf(req.path, sizeof(req.path), "/api/streams/%s", values[i]);
+        for (size_t capacity = 1; capacity <= 5; capacity++) {
+            char out[5];
+            memset(out, 'x', sizeof(out));
+            int result = http_request_extract_path_param(&req, "/api/streams/", out, capacity);
+            TEST_ASSERT_EQUAL_INT(capacity >= 4 ? 0 : -1, result);
+            TEST_ASSERT_EQUAL_STRING(capacity >= 4 ? "ABC" : "", out);
+        }
+    }
+}
+
+void test_json_failure_preserves_complete_response(void) {
+    http_response_t res;
+    http_response_init(&res);
+    res.status_code = 202;
+    safe_strcpy(res.content_type, "text/plain", sizeof(res.content_type), 0);
+    TEST_ASSERT_EQUAL_INT(0, http_response_add_header(&res, "X-Keep", "yes"));
+    TEST_ASSERT_EQUAL_INT(0, http_response_set_body(&res, "previous"));
+    http_response_t before = res;
+    fail_next_allocation = true;
+    int result = http_response_set_json(&res, 500, "{}");
+    fail_next_allocation = false;
+    TEST_ASSERT_EQUAL_INT(-1, result);
+    TEST_ASSERT_EQUAL_MEMORY(&before, &res, sizeof(res));
+    TEST_ASSERT_EQUAL_STRING("previous", res.body);
+    const int invalid_counts[] = {-1, MAX_HEADERS - 7, MAX_HEADERS, MAX_HEADERS + 1};
+    for (size_t i = 0; i < sizeof(invalid_counts) / sizeof(invalid_counts[0]); i++) {
+        res.num_headers = invalid_counts[i];
+        before = res;
+        TEST_ASSERT_EQUAL_INT(-1, http_response_set_json(&res, 500, "{}"));
+        TEST_ASSERT_EQUAL_MEMORY(&before, &res, sizeof(res));
+        TEST_ASSERT_EQUAL_STRING("previous", res.body);
+    }
+    http_response_free(&res);
+}
+
+void test_json_exact_header_capacity_and_aliased_body(void) {
+    http_response_t res;
+    http_response_init(&res);
+    TEST_ASSERT_EQUAL_INT(0, http_response_set_body(&res, "prefix {}"));
+    while (res.num_headers < MAX_HEADERS - 8) {
+        TEST_ASSERT_EQUAL_INT(0, http_response_add_header(&res, "X-Keep", "yes"));
+    }
+    TEST_ASSERT_EQUAL_INT(0, http_response_set_json(&res, 201, (char *)res.body + 7));
+    TEST_ASSERT_EQUAL_INT(MAX_HEADERS, res.num_headers);
+    TEST_ASSERT_EQUAL_INT(201, res.status_code);
+    TEST_ASSERT_EQUAL_STRING("application/json", res.content_type);
+    TEST_ASSERT_EQUAL_STRING("{}", res.body);
+    TEST_ASSERT_EQUAL_STRING("X-Keep", res.headers[0].name);
+    TEST_ASSERT_EQUAL_STRING("Expires", res.headers[MAX_HEADERS - 1].name);
+    http_response_free(&res);
 }
 
 /* ================================================================
@@ -94,8 +288,12 @@ void test_request_init_generates_unique_correlation_ids(void) {
     http_request_init(&first);
     http_request_init(&second);
 
-    TEST_ASSERT_EQUAL_UINT(36, strlen(first.request_id));
-    TEST_ASSERT_EQUAL_UINT(36, strlen(second.request_id));
+    size_t first_length = strnlen(first.request_id, sizeof(first.request_id));
+    size_t second_length = strnlen(second.request_id, sizeof(second.request_id));
+    TEST_ASSERT_TRUE_MESSAGE(first_length > 0 && first_length < sizeof(first.request_id),
+                             "First request ID must be nonempty and NUL-terminated");
+    TEST_ASSERT_TRUE_MESSAGE(second_length > 0 && second_length < sizeof(second.request_id),
+                             "Second request ID must be nonempty and NUL-terminated");
     TEST_ASSERT_NOT_EQUAL(0, strcmp(first.request_id, second.request_id));
 }
 
@@ -223,6 +421,80 @@ void test_response_set_json_error(void) {
     http_response_free(&res);
 }
 
+
+void test_header_helpers_bound_invalid_counts(void) {
+    http_request_t req;
+    http_request_init(&req);
+    safe_strcpy(req.headers[MAX_HEADERS - 1].name, "X-Last", sizeof(req.headers[0].name), 0);
+    safe_strcpy(req.headers[MAX_HEADERS - 1].value, "last", sizeof(req.headers[0].value), 0);
+    req.num_headers = MAX_HEADERS + 1;
+    TEST_ASSERT_EQUAL_STRING("last", http_request_get_header(&req, "x-last"));
+    TEST_ASSERT_NULL(http_request_get_header(&req, "X-Missing"));
+    req.num_headers = -1;
+    TEST_ASSERT_NULL(http_request_get_header(&req, "X-Last"));
+
+    http_response_t res;
+    http_response_init(&res);
+    const int counts[] = {-1, MAX_HEADERS, MAX_HEADERS + 1};
+    for (size_t i = 0; i < sizeof(counts) / sizeof(counts[0]); i++) {
+        res.num_headers = counts[i];
+        http_response_t before = res;
+        TEST_ASSERT_EQUAL_INT(-1, http_response_add_header(&res, "X-New", "value"));
+        TEST_ASSERT_EQUAL_MEMORY(&before, &res, sizeof(res));
+    }
+}
+
+void test_json_replaces_standard_headers_at_full_capacity(void) {
+    http_response_t res;
+    http_response_init(&res);
+    while (res.num_headers < MAX_HEADERS - 8) {
+        TEST_ASSERT_EQUAL_INT(0, http_response_add_header(&res, "Set-Cookie", "session=keep"));
+    }
+    TEST_ASSERT_EQUAL_INT(0, http_response_set_json(&res, 200, "{}"));
+    TEST_ASSERT_EQUAL_INT(MAX_HEADERS, res.num_headers);
+
+    // A failed replacement must not compact headers or alter body/metadata.
+    http_response_t before = res;
+    fail_next_allocation = true;
+    int result = http_response_set_json(&res, 500, "{}");
+    fail_next_allocation = false;
+    TEST_ASSERT_EQUAL_INT(-1, result);
+    TEST_ASSERT_EQUAL_MEMORY(&before, &res, sizeof(res));
+
+    for (int repeat = 0; repeat < 3; repeat++) {
+        TEST_ASSERT_EQUAL_INT(0, http_response_set_json(&res, 201, res.body));
+        TEST_ASSERT_EQUAL_INT(MAX_HEADERS, res.num_headers);
+        TEST_ASSERT_EQUAL_STRING("{}", res.body);
+        for (int i = 0; i < MAX_HEADERS - 8; i++) {
+            TEST_ASSERT_EQUAL_STRING("Set-Cookie", res.headers[i].name);
+            TEST_ASSERT_EQUAL_STRING("session=keep", res.headers[i].value);
+        }
+    }
+    http_response_free(&res);
+}
+
+void test_json_replaces_mixed_case_duplicate_standard_headers(void) {
+    http_response_t res;
+    http_response_init(&res);
+    TEST_ASSERT_EQUAL_INT(0, http_response_add_header(&res, "cache-control", "public"));
+    TEST_ASSERT_EQUAL_INT(0, http_response_add_header(&res, "X-Keep", "yes"));
+    TEST_ASSERT_EQUAL_INT(0, http_response_add_header(&res, "CACHE-CONTROL", "max-age=99"));
+    TEST_ASSERT_EQUAL_INT(0, http_response_add_header(&res, "access-control-allow-origin", "old"));
+    TEST_ASSERT_EQUAL_INT(0, http_response_set_json(&res, 200, "{}"));
+    TEST_ASSERT_EQUAL_INT(9, res.num_headers);
+    TEST_ASSERT_EQUAL_STRING("X-Keep", res.headers[0].name);
+    TEST_ASSERT_EQUAL_STRING("yes", res.headers[0].value);
+    TEST_ASSERT_EQUAL_STRING("Access-Control-Allow-Origin", res.headers[1].name);
+    TEST_ASSERT_EQUAL_STRING("*", res.headers[1].value);
+    TEST_ASSERT_EQUAL_STRING("Cache-Control", res.headers[6].name);
+    TEST_ASSERT_EQUAL_STRING("private, no-cache, no-store, must-revalidate", res.headers[6].value);
+    TEST_ASSERT_EQUAL_INT(0, http_response_set_json_error(&res, 400, "Invalid credential ID"));
+    TEST_ASSERT_EQUAL_INT(9, res.num_headers);
+    TEST_ASSERT_EQUAL_STRING("Cache-Control", res.headers[6].name);
+    TEST_ASSERT_EQUAL_STRING("private, no-cache, no-store, must-revalidate", res.headers[6].value);
+    http_response_free(&res);
+}
+
 void test_response_add_header(void) {
     http_response_t res;
     http_response_init(&res);
@@ -236,8 +508,21 @@ void test_response_add_cors_headers(void) {
     http_response_t res;
     http_response_init(&res);
     http_response_add_cors_headers(&res);
-    /* Expect at least one CORS header added */
-    TEST_ASSERT_GREATER_THAN_INT(0, res.num_headers);
+    bool wildcard = false, exposed = false;
+    for (int i = 0; i < res.num_headers; i++) {
+        TEST_ASSERT_NOT_EQUAL(0, strcmp("Access-Control-Allow-Credentials", res.headers[i].name));
+        if (strcmp("Access-Control-Allow-Origin", res.headers[i].name) == 0) {
+            TEST_ASSERT_EQUAL_STRING("*", res.headers[i].value);
+            wildcard = true;
+        }
+        if (strcmp("Access-Control-Expose-Headers", res.headers[i].name) == 0) {
+            TEST_ASSERT_NOT_NULL(strstr(res.headers[i].value, "X-Request-ID"));
+            TEST_ASSERT_NOT_NULL(strstr(res.headers[i].value, "Content-Disposition"));
+            exposed = true;
+        }
+    }
+    TEST_ASSERT_TRUE(wildcard);
+    TEST_ASSERT_TRUE(exposed);
     http_response_free(&res);
 }
 
@@ -277,10 +562,20 @@ int main(void) {
 
     UNITY_BEGIN();
 
+    RUN_TEST(test_decoders_reject_encoded_nul_and_clear_partial_output);
+    RUN_TEST(test_path_decode_accepts_exact_fit_and_rejects_truncation);
+    RUN_TEST(test_json_failure_preserves_complete_response);
+    RUN_TEST(test_json_exact_header_capacity_and_aliased_body);
     RUN_TEST(test_url_decode_percent_20);
     RUN_TEST(test_url_decode_percent_2F);
     RUN_TEST(test_url_decode_plus_as_space);
     RUN_TEST(test_url_decode_no_encoding);
+    RUN_TEST(test_query_decode_uses_full_input_and_bounds_output);
+    RUN_TEST(test_query_decode_near_request_capacity_needs_no_allocation);
+    RUN_TEST(test_path_decode_does_not_consume_query_or_trimmed_slash);
+    RUN_TEST(test_response_body_replacement_supports_aliases_and_allocation_failure);
+    RUN_TEST(test_url_decode_requires_two_hex_digits);
+    RUN_TEST(test_url_decode_preserves_every_nonzero_encoded_byte);
 
     RUN_TEST(test_get_header_found);
     RUN_TEST(test_get_header_case_insensitive);
@@ -300,6 +595,9 @@ int main(void) {
     RUN_TEST(test_response_init_and_free);
     RUN_TEST(test_response_set_json);
     RUN_TEST(test_response_set_json_error);
+    RUN_TEST(test_header_helpers_bound_invalid_counts);
+    RUN_TEST(test_json_replaces_standard_headers_at_full_capacity);
+    RUN_TEST(test_json_replaces_mixed_case_duplicate_standard_headers);
     RUN_TEST(test_response_add_header);
     RUN_TEST(test_response_add_cors_headers);
     RUN_TEST(test_libuv_connection_reset_preserves_client_ip);

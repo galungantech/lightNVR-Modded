@@ -373,6 +373,17 @@ void handle_auth_login(const http_request_t *req, http_response_t *res) {
     bool must_change_password =
         authenticated_user.must_change_password && !g_config.demo_mode;
 
+    // Form login cannot complete a challenge. Send MFA accounts to the JSON
+    // login UI instead of creating a password-only authenticated session.
+    if (is_form && authenticated_user.totp_enabled) {
+        audit_log_login(req, &authenticated_user, username, "password", "denied", "mfa_required");
+        http_response_add_header(res, "Location", "/login.html");
+        res->status_code = 302;
+        res->body = NULL;
+        res->body_length = 0;
+        return;
+    }
+
     // Check if user has TOTP enabled (only for API/JSON requests)
     // A pending password change must never weaken MFA: an account carrying
     // both still completes its TOTP challenge first, and only then gets the
@@ -405,30 +416,12 @@ void handle_auth_login(const http_request_t *req, http_response_t *res) {
 
                 if (!trusted_device_used) {
                     // Verify the TOTP code
-                    if (totp_verify(totp_secret, totp_code) != 0) {
-                        record_failed_attempt(username);
-                        log_warn("Force MFA: invalid TOTP code for user: %s", username);
-                        audit_log_login(req, &authenticated_user, username,
-                                        "password_totp", "denied",
-                                        "invalid_mfa_code");
-                        http_response_set_json_error(res, 401, "Invalid credentials");
-                        return;
-                    }
                     totp_verified = true;
-                    log_info("Force MFA: TOTP verified for user: %s", username);
+                    log_debug("Force MFA: inline code supplied for user: %s", username);
                 }
                 // Fall through to create session
             } else {
                 if (totp_code[0] != '\0') {
-                    if (totp_verify(totp_secret, totp_code) != 0) {
-                        record_failed_attempt(username);
-                        log_warn("Invalid inline TOTP code for user: %s", username);
-                        audit_log_login(req, &authenticated_user, username,
-                                        "password_totp", "denied",
-                                        "invalid_mfa_code");
-                        http_response_set_json_error(res, 401, "Invalid credentials");
-                        return;
-                    }
                     totp_verified = true;
                 } else if (trusted_device_valid) {
                     trusted_device_used = true;
@@ -437,7 +430,7 @@ void handle_auth_login(const http_request_t *req, http_response_t *res) {
                 // Standard two-step MFA flow
                 // Create a short-lived pending MFA session (5 minutes)
                 char totp_token[33];
-                rc = db_auth_create_session(user_id, effective_client_ip, req->user_agent, 300, totp_token, sizeof(totp_token));
+                rc = db_auth_create_mfa_challenge_verified(user_id, password, effective_client_ip, req->user_agent, totp_token, sizeof(totp_token));
                 if (rc != 0) {
                     log_error("Failed to create pending MFA session for user: %s", username);
                     audit_log_login(req, &authenticated_user, username,
@@ -471,34 +464,34 @@ void handle_auth_login(const http_request_t *req, http_response_t *res) {
         }
     }
 
-    // Clear rate limit on successful login
-    (void)auth_clear_login_rate_limit_for_username(username);
-
-    // Create a session token using the configured absolute session lifetime.
-    char token[33];
-    rc = db_auth_create_session(user_id, effective_client_ip, req->user_agent,
-                                0, token, sizeof(token));
-
+    /* Issue credentials with password/MFA rechecks and replay consumption in
+     * the same transaction, so revocation cannot race a new session into being. */
+    char token[33], trusted_token[33] = {0};
+    if (totp_verified) {
+        int trusted_seconds = remember_device ? httpd_trusted_device_lifetime_seconds() : 0;
+        rc = db_auth_complete_totp_login(user_id, totp_code, NULL, password,
+                                         effective_client_ip, req->user_agent,
+                                         trusted_seconds, token, trusted_token);
+    } else {
+        char existing_trusted[128] = {0};
+        if (trusted_device_used && httpd_trusted_device_lifetime_seconds() > 0)
+            (void)httpd_get_cookie_value(req, "trusted_device", existing_trusted, sizeof(existing_trusted));
+        rc = db_auth_create_password_session(user_id, password, existing_trusted,
+                                             effective_client_ip, req->user_agent, token);
+    }
     if (rc != 0) {
-        log_error("Failed to create session for user: %s", username);
-        audit_log_login(req, &authenticated_user, username, "password",
-                        "error", "session_create_failed");
-        http_response_set_json_error(res, 500, "Failed to create session");
+        if (rc == DB_AUTH_IDENTITY_INVALID) record_failed_attempt(username);
+        audit_log_login(req, &authenticated_user, username, "password_totp", "denied",
+                        rc == DB_AUTH_IDENTITY_LIMITED ? "rate_limited" : "credential_issue_failed");
+        http_response_set_json_error(res,
+            rc == DB_AUTH_IDENTITY_LIMITED ? 429 : rc == DB_AUTH_IDENTITY_ERROR ? 500 : 401,
+            rc == DB_AUTH_IDENTITY_LIMITED ? "Too many TOTP attempts. Please try again later."
+            : rc == DB_AUTH_IDENTITY_ERROR ? "Failed to create session" : "Invalid credentials");
         return;
     }
-
+    (void)auth_clear_login_rate_limit_for_username(username);
     httpd_add_session_cookie(res, token);
-
-    if (totp_verified && remember_device && !trusted_device_used && httpd_trusted_device_lifetime_seconds() > 0) {
-        char trusted_token[33];
-        if (db_auth_create_trusted_device(user_id, effective_client_ip, req->user_agent,
-                                          httpd_trusted_device_lifetime_seconds(),
-                                          trusted_token, sizeof(trusted_token)) == 0) {
-            httpd_add_trusted_device_cookie(res, trusted_token);
-        } else {
-            log_warn("Failed to create trusted device for user: %s", username);
-        }
-    }
+    if (trusted_token[0]) httpd_add_trusted_device_cookie(res, trusted_token);
 
     if (is_form) {
         // For form submissions, redirect to index.html
@@ -670,12 +663,38 @@ void handle_auth_login_config(const http_request_t *req, http_response_t *res) {
     cJSON_Delete(response);
 }
 
+/* Credential management is personal self-service, never a synthetic principal. */
+static bool credential_owner(const http_request_t *req, http_response_t *res, user_t *user) {
+    http_response_add_header(res, "Cache-Control", "private, no-store");
+    if (!httpd_get_authenticated_user(req, user)) {
+        http_response_set_json_error(res, 401, "Unauthorized");
+        return false;
+    }
+    if (user->id <= 0) {
+        http_response_set_json_error(res, 403, "A personal account is required");
+        return false;
+    }
+    return true;
+}
+
+/* IDs are JSON numbers: require canonical positive decimal in the exact JS range. */
+static bool credential_id(const http_request_t *req, const char *prefix, int64_t *id) {
+    size_t length = strlen(prefix);
+    if (strncmp(req->path, prefix, length) != 0) return false;
+    const char *p = req->path + length;
+    if (*p < '1' || *p > '9') return false;
+    int64_t value = 0;
+    for (; *p && *p != '?'; ++p) {
+        if (*p < '0' || *p > '9' || value > (INT64_C(9007199254740991) - (*p - '0')) / 10) return false;
+        value = value * 10 + (*p - '0');
+    }
+    *id = value;
+    return true;
+}
+
 void handle_auth_sessions_list(const http_request_t *req, http_response_t *res) {
     user_t user;
-    if (!httpd_get_authenticated_user(req, &user)) {
-        http_response_set_json_error(res, 401, "Unauthorized");
-        return;
-    }
+    if (!credential_owner(req, res, &user)) return;
 
     session_t sessions[32];
     int count = db_auth_list_user_sessions(user.id, sessions, 32);
@@ -710,48 +729,30 @@ void handle_auth_sessions_list(const http_request_t *req, http_response_t *res) 
 
 void handle_auth_sessions_delete(const http_request_t *req, http_response_t *res) {
     user_t user;
-    if (!httpd_get_authenticated_user(req, &user)) {
-        http_response_set_json_error(res, 401, "Unauthorized");
+    if (!credential_owner(req, res, &user)) return;
+
+    int64_t id;
+    if (!credential_id(req, "/api/auth/sessions/", &id)) {
+        http_response_set_json_error(res, 400, "Invalid session ID");
         return;
     }
-
-    char id_str[64] = {0};
-    if (http_request_extract_path_param(req, "/api/auth/sessions/", id_str, sizeof(id_str)) != 0) {
-        http_response_set_json_error(res, 400, "Missing session ID");
-        return;
-    }
-
-    int64_t session_id = strtoll(id_str, NULL, 10);
     char current_token[128] = {0};
-    bool deleted_current_session = false;
-    session_t sessions[32];
-    int count = db_auth_list_user_sessions(user.id, sessions, 32);
     httpd_get_session_token(req, current_token, sizeof(current_token));
-    for (int i = 0; i < count; i++) {
-        if (sessions[i].id == session_id && current_token[0] != '\0' && strcmp(current_token, sessions[i].token) == 0) {
-            deleted_current_session = true;
-            break;
-        }
-    }
-
-    if (session_id <= 0 || db_auth_delete_session_by_id(user.id, session_id) != 0) {
-        http_response_set_json_error(res, 404, "Session not found");
+    bool deleted_current = false;
+    int result = db_auth_revoke_session(user.id, id, current_token, &deleted_current);
+    if (result != 0) {
+        http_response_set_json_error(res, result > 0 ? 404 : 500,
+            result > 0 ? "Credential not found" : "Failed to revoke credential");
         return;
     }
-
-    if (deleted_current_session) {
-        httpd_clear_session_cookie(res);
-    }
+    if (deleted_current) httpd_clear_session_cookie(res);
 
     http_response_set_json(res, 200, "{\"success\":true}");
 }
 
 void handle_auth_trusted_devices_list(const http_request_t *req, http_response_t *res) {
     user_t user;
-    if (!httpd_get_authenticated_user(req, &user)) {
-        http_response_set_json_error(res, 401, "Unauthorized");
-        return;
-    }
+    if (!credential_owner(req, res, &user)) return;
 
     trusted_device_t devices[32];
     int count = db_auth_list_trusted_devices(user.id, devices, 32);
@@ -788,41 +789,23 @@ void handle_auth_trusted_devices_list(const http_request_t *req, http_response_t
 
 void handle_auth_trusted_devices_delete(const http_request_t *req, http_response_t *res) {
     user_t user;
-    if (!httpd_get_authenticated_user(req, &user)) {
-        http_response_set_json_error(res, 401, "Unauthorized");
+    if (!credential_owner(req, res, &user)) return;
+
+    int64_t id;
+    if (!credential_id(req, "/api/auth/trusted-devices/", &id)) {
+        http_response_set_json_error(res, 400, "Invalid trusted device ID");
         return;
     }
-
-    char id_str[64] = {0};
-    if (http_request_extract_path_param(req, "/api/auth/trusted-devices/", id_str, sizeof(id_str)) != 0) {
-        http_response_set_json_error(res, 400, "Missing trusted device ID");
-        return;
-    }
-
-    int64_t device_id = strtoll(id_str, NULL, 10);
     char current_token[128] = {0};
-    int64_t current_device_id = 0;
-    bool deleted_current_device = false;
-    trusted_device_t devices[32];
-    int count = db_auth_list_trusted_devices(user.id, devices, 32);
-    if (httpd_get_cookie_value(req, "trusted_device", current_token, sizeof(current_token)) == 0) {
-        db_auth_get_trusted_device_id(user.id, current_token, &current_device_id);
-    }
-    for (int i = 0; i < count; i++) {
-        if (devices[i].id == device_id && current_device_id > 0 && current_device_id == devices[i].id) {
-            deleted_current_device = true;
-            break;
-        }
-    }
-
-    if (device_id <= 0 || db_auth_delete_trusted_device_by_id(user.id, device_id) != 0) {
-        http_response_set_json_error(res, 404, "Trusted device not found");
+    httpd_get_cookie_value(req, "trusted_device", current_token, sizeof(current_token));
+    bool deleted_current = false;
+    int result = db_auth_revoke_trusted_device(user.id, id, current_token, &deleted_current);
+    if (result != 0) {
+        http_response_set_json_error(res, result > 0 ? 404 : 500,
+            result > 0 ? "Credential not found" : "Failed to revoke credential");
         return;
     }
-
-    if (deleted_current_device) {
-        httpd_clear_trusted_device_cookie(res);
-    }
+    if (deleted_current) httpd_clear_trusted_device_cookie(res);
 
     http_response_set_json(res, 200, "{\"success\":true}");
 }

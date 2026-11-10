@@ -58,33 +58,47 @@ static void generate_request_id(char output[REQUEST_ID_MAX]) {
              (unsigned long long)(counter ^ (uint64_t)getpid()));
 }
 
-// URL decode function
-int url_decode(const char *src, char *dst, size_t dst_size) {
-    if (!src || !dst || dst_size == 0) {
-        return -1;
-    }
+static int hex_digit_value(unsigned char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
 
-    size_t src_len = strlen(src);
-    size_t i, j = 0;
+// Decode only this input span; output size must not define input boundaries.
+static int url_decode_span(const char *src, size_t src_len, char *dst,
+                           size_t dst_size, bool allow_truncation) {
+    if (!src || !dst || dst_size == 0) return -1;
 
-    for (i = 0; i < src_len && j < dst_size - 1; i++) {
+    size_t j = 0;
+    for (size_t i = 0; i < src_len; i++) {
+        unsigned char decoded = (unsigned char)src[i];
         if (src[i] == '%' && i + 2 < src_len) {
-            unsigned int value;
-            if (sscanf(src + i + 1, "%2x", &value) == 1) { // NOLINT(cert-err34-c)
-                dst[j++] = (char)value;
+            int high = hex_digit_value((unsigned char)src[i + 1]);
+            int low = hex_digit_value((unsigned char)src[i + 2]);
+            // Only complete hex escapes are decoded; malformed escapes stay literal.
+            if (high >= 0 && low >= 0) {
+                decoded = (unsigned char)((high << 4) | low);
                 i += 2;
-            } else {
-                dst[j++] = src[i];
             }
         } else if (src[i] == '+') {
-            dst[j++] = ' ';
-        } else {
-            dst[j++] = src[i];
+            decoded = ' ';
         }
+        // These APIs return C strings: embedded NUL must never hide a suffix.
+        // Validate even the part of a query value beyond the output capacity.
+        if (decoded == 0 || (j == dst_size - 1 && !allow_truncation)) {
+            dst[0] = '\0';
+            return -1;
+        }
+        if (j < dst_size - 1) dst[j++] = (char)decoded;
     }
-
     dst[j] = '\0';
     return 0;
+}
+
+int url_decode(const char *src, char *dst, size_t dst_size) {
+    if (!src) return -1;
+    return url_decode_span(src, strlen(src), dst, dst_size, true);
 }
 
 void http_request_init(http_request_t *req) {
@@ -127,7 +141,11 @@ void http_response_free(http_response_t *res) {
 const char* http_request_get_header(const http_request_t *req, const char *name) {
     if (!req || !name) return NULL;
 
-    for (int i = 0; i < req->num_headers; i++) {
+    int header_count = req->num_headers;
+    if (header_count < 0) return NULL;
+    if (header_count > MAX_HEADERS) header_count = MAX_HEADERS;
+
+    for (int i = 0; i < header_count; i++) {
         if (strcasecmp(req->headers[i].name, name) == 0) {
             return req->headers[i].value;
         }
@@ -152,20 +170,7 @@ int http_request_get_query_param(const http_request_t *req, const char *name,
             const char *val_end = strchr(val_start, '&');
             size_t val_len = val_end ? (size_t)(val_end - val_start) : strlen(val_start);
 
-            if (val_len >= value_len) {
-                val_len = value_len - 1;
-            }
-
-            // URL decode the value
-            char encoded[1024] = {0};
-            if (val_len < sizeof(encoded)) {
-                memcpy(encoded, val_start, val_len);
-                encoded[val_len] = '\0';
-                url_decode(encoded, value, value_len);
-            } else {
-                memcpy(value, val_start, val_len);
-                value[val_len] = '\0';
-            }
+            if (url_decode_span(val_start, val_len, value, value_len, true) != 0) return -1;
 
             return (int)strlen(value);
         }
@@ -210,19 +215,14 @@ int http_request_extract_path_param(const http_request_t *req, const char *prefi
     // Strip trailing slashes
     while (param_len > 0 && param[param_len - 1] == '/') param_len--;
 
-    if (param_len == 0 || param_len >= buf_size) return -1;
+    if (param_len == 0) return -1;
 
-    // Decode param_len bytes into the output buffer. The +1 is needed because
-    // url_decode expects the length to include a null byte, but does not actually
-    // copy that null byte. Limiting url_decode to param_len ensures that the
-    // query string is not decoded or copied into *param.
-    url_decode(param, param_buf, param_len+1);
-    return 0;
+    return url_decode_span(param, param_len, param_buf, buf_size, false);
 }
 
 int http_response_add_header(http_response_t *res, const char *name, const char *value) {
     if (!res || !name || !value) return -1;
-    if (res->num_headers >= MAX_HEADERS) return -1;
+    if (res->num_headers < 0 || res->num_headers >= MAX_HEADERS) return -1;
 
     safe_strcpy(res->headers[res->num_headers].name, name,
             sizeof(res->headers[res->num_headers].name), 0);
@@ -235,19 +235,48 @@ int http_response_add_header(http_response_t *res, const char *name, const char 
 int http_response_set_body(http_response_t *res, const char *body) {
     if (!res || !body) return -1;
 
+    size_t len = strlen(body);
+    char *new_body = malloc(len + 1);
+    if (!new_body) return -1;
+
+    memcpy(new_body, body, len + 1);
+
     // Free previous body if it was allocated by us
     if (res->body_allocated && res->body) {
         free(res->body);
     }
 
-    size_t len = strlen(body);
-    res->body = malloc(len + 1);
-    if (!res->body) return -1;
-
-    memcpy(res->body, body, len + 1);
+    res->body = new_body;
     res->body_length = len;
     res->body_allocated = true;
     return 0;
+}
+
+static bool is_standard_json_header_name(const char *name) {
+    if (!name) return false;
+    return strcasecmp(name, "Access-Control-Allow-Origin") == 0 ||
+           strcasecmp(name, "Access-Control-Allow-Methods") == 0 ||
+           strcasecmp(name, "Access-Control-Allow-Headers") == 0 ||
+           strcasecmp(name, "Access-Control-Expose-Headers") == 0 ||
+           strcasecmp(name, "Access-Control-Max-Age") == 0 ||
+           strcasecmp(name, "Cache-Control") == 0 ||
+           strcasecmp(name, "Pragma") == 0 ||
+           strcasecmp(name, "Expires") == 0;
+}
+
+static void http_response_remove_standard_json_headers(http_response_t *res) {
+    if (!res || res->num_headers <= 0) return;
+
+    int write_idx = 0;
+    for (int read_idx = 0; read_idx < res->num_headers; read_idx++) {
+        if (!is_standard_json_header_name(res->headers[read_idx].name)) {
+            if (write_idx != read_idx) {
+                res->headers[write_idx] = res->headers[read_idx];
+            }
+            write_idx++;
+        }
+    }
+    res->num_headers = write_idx;
 }
 
 void http_response_add_cors_headers(http_response_t *res) {
@@ -260,23 +289,38 @@ void http_response_add_cors_headers(http_response_t *res) {
     http_response_add_header(
         res, "Access-Control-Expose-Headers",
         "X-Request-ID, X-Total-Count, Content-Disposition");
-    http_response_add_header(res, "Access-Control-Allow-Credentials", "true");
     http_response_add_header(res, "Access-Control-Max-Age", "86400");
 }
 
 int http_response_set_json(http_response_t *res, int status_code, const char *json_str) {
     if (!res || !json_str) return -1;
 
+    if (res->num_headers < 0 || res->num_headers > MAX_HEADERS) return -1;
+    // Existing helper-managed headers will be replaced, so only retained
+    // headers need room alongside the five CORS and three cache headers.
+    int retained_headers = 0;
+    for (int i = 0; i < res->num_headers; i++) {
+        if (!is_standard_json_header_name(res->headers[i].name)) retained_headers++;
+    }
+    if (retained_headers > MAX_HEADERS - 8) return -1;
+    // Copy first: failure must preserve the complete previous response, and
+    // json_str may alias the existing body.
+    if (http_response_set_body(res, json_str) != 0) return -1;
+
     res->status_code = status_code;
     safe_strcpy(res->content_type, "application/json", sizeof(res->content_type), 0);
 
-    // Add standard headers
+    // Replace helper-managed standard headers while preserving caller-provided headers.
+    http_response_remove_standard_json_headers(res);
+
+    // JSON may contain personal credentials or user-scoped data. Keep the
+    // canonical policy private even when replacing caller-provided headers.
     http_response_add_cors_headers(res);
-    http_response_add_header(res, "Cache-Control", "no-cache, no-store, must-revalidate");
+    http_response_add_header(res, "Cache-Control", "private, no-cache, no-store, must-revalidate");
     http_response_add_header(res, "Pragma", "no-cache");
     http_response_add_header(res, "Expires", "0");
 
-    return http_response_set_body(res, json_str);
+    return 0;
 }
 
 int http_response_set_json_error(http_response_t *res, int status_code, const char *error_message) {

@@ -88,7 +88,7 @@ Key files:
 - Direct camera connections (RTSP, ONVIF, HTTP, etc.)
 - WebRTC streaming for ultra-low-latency live viewing
 - RTSP server for local re-streaming (used by MP4/HLS recorders)
-- HLS segment generation
+- RTSP output consumed by LightNVR writers (including the HLS Writer that generates `.ts` segments)
 - Frame extraction via `frame.jpeg` endpoint (used for detection)
 - Two-way audio (backchannel) support
 
@@ -156,7 +156,7 @@ LightNVR supports four recording modes based on the `record` and `detection_base
 In **annotation mode**, the unified detection thread runs but does NOT create separate MP4 files. Instead, detections are stored in the database with a `recording_id` foreign key linking to the ongoing continuous recording.
 
 Key files:
-- `src/video/unified_detection_thread.c`: Unified per-stream detection thread with buffering and annotation mode
+- `src/video/unified_detection_thread.c`: Unified per-stream detection thread with buffering and annotation mode; reads the camera, buffers, runs detection, and records (detection- and ONVIF-triggered recording both run here)
 - `src/video/detection.c`: Core detection logic
 - `src/video/detection_config.c`: Detection configuration management
 - `src/video/detection_embedded.c`: Embedded detection (SOD/TFLite)
@@ -168,9 +168,9 @@ Key files:
 - `src/video/sod_integration.c`: SOD library integration
 - `src/video/sod_realnet.c`: SOD RealNet face detection
 - `src/video/onvif_detection.c`: ONVIF event-based detection
-- `src/video/onvif_motion_recording.c`: ONVIF motion-triggered recording
+- `src/video/onvif_event.c`: Parsing ONVIF event notifications, including licence-plate reads
 - `src/video/motion_detection.c`: Motion detection processing
-- `src/video/motion_storage_manager.c`: Motion recording storage management
+- `src/video/cross_stream_motion_trigger.c`: Lets motion on one stream trigger recording on others
 - `src/video/packet_buffer.c`: Pre-detection packet ring buffer, flushed into the recording when a detection starts
 - `src/database/db_detections.c`: Detection storage with optional recording_id linkage
 
@@ -322,15 +322,15 @@ Camera (RTSP/ONVIF)
                                        ▼                     ▼
                                HLS Segments (.ts)      MP4 Files
                                        │                     │
-                               (Detection Thread          Database
-                                analyzes segments)        Metadata
+                               (Detection uses             Database
+                                go2rtc frame.jpeg)       Metadata
 ```
 
 1. **Camera → go2rtc**: go2rtc connects to cameras via RTSP/ONVIF/HTTP
 2. **go2rtc → Browser**: WebRTC for low-latency live viewing
 3. **go2rtc → HLS Writer**: Consumes go2rtc's RTSP output, writes .ts segments
 4. **go2rtc → MP4 Recorder**: Consumes go2rtc's RTSP output, writes MP4 files
-5. **HLS Segments → Detection**: Detection thread analyzes newest segments
+5. **go2rtc frame.jpeg → Detection**: Detection thread analyzes JPEG frames from go2rtc snapshots
 6. **Detection → Recording Trigger**: Detections can start/stop MP4 recordings
 
 ### Web Interface Flow
@@ -339,12 +339,12 @@ Camera (RTSP/ONVIF)
 2. Web server authenticates the user (session token or Basic Auth)
 3. Web server serves the SPA (Single Page Application)
 4. Client-side Preact app makes API requests
-5. **Live viewing**: Browser connects directly to go2rtc for WebRTC/HLS
+5. **Live viewing**: Browser connects to LightNVR's authenticated media endpoints, which proxy WebRTC/MSE/HLS/snapshot requests to loopback-bound go2rtc
 6. **Recording playback**: Browser requests MP4/HLS from LightNVR API
 
 ## Database Schema
 
-LightNVR uses SQLite for data storage. The schema is managed via numbered migration files in `db/migrations/` (0001 through 0022). Below is the cumulative schema after all migrations.
+LightNVR uses SQLite for data storage. The schema is managed via numbered migration files in `db/migrations/` (currently 0001 through 0094). The migration files are the source of truth for the exact current schema; the SQL excerpts below are representative for architectural context.
 
 ### Streams Table
 
@@ -559,7 +559,7 @@ See [API.md](API.md) for detailed API documentation.
 
 ## Frontend Architecture
 
-The frontend is a multi-page application with Preact components, built with Vite:
+The frontend is a single-page application (SPA) with Preact components, built with Vite, where the files under `web/js/pages/` represent route views/feature entry modules rather than separate HTML documents:
 
 - **Preact** for component-based UI development
 - **Tailwind CSS** for styling and responsive design with theme customization
@@ -645,9 +645,9 @@ LightNVR implements a robust shutdown coordination system to ensure clean and or
 
 The shutdown coordination system follows a priority-based approach to ensure components shut down in the correct dependency order:
 
-1. **Detection Threads** (highest priority - 100): Shut down first since they depend on both MP4 writers and HLS streaming
-2. **MP4 Writers** (medium priority - 80): Shut down second since they depend on HLS streaming
-3. **HLS Streaming Threads** (lowest priority - 60): Shut down last as they are the foundation
+1. **Detection Threads** (highest priority - 100): Shut down first to stop generating new recording/event triggers during teardown
+2. **MP4 Writers** (medium priority - 80): Shut down next so active recordings can finalize after detection has stopped creating new work
+3. **HLS Streaming Threads** (lowest priority - 60): Shut down after other consumers; they are an independent consumer of go2rtc output
 4. **go2rtc Process** (final): Terminated after all consumers are stopped
 
 ### Key Components

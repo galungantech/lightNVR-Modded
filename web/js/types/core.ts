@@ -1,3 +1,4 @@
+import type { components } from '../../generated/api/schema';
 /**
  * Shared domain types for the LightNVR web UI. Field lists come from the JSON
  * the C handlers in src/web/ build; the handler is named on each type.
@@ -256,22 +257,7 @@ export interface BatchDeleteCounts {
 export type UserRoleName = 'admin' | 'user' | 'viewer' | 'api' | 'unknown';
 
 /** Item of GET /api/auth/users. `role` is numeric here; see role_name. */
-export interface User {
-  id: number;
-  username: string;
-  email: string;
-  role: number;
-  role_name: UserRoleName;
-  created_at: number;
-  updated_at: number;
-  last_login: number;
-  is_active: boolean;
-  password_change_locked: boolean;
-  must_change_password: boolean;
-  totp_enabled: boolean;
-  authorization_mode: string;
-  allowed_login_cidrs: string | null;
-}
+export type User = components['schemas']['AdminUser'];
 
 /**
  * GET /api/auth/verify (handle_auth_verify). `role` is a role name here, unlike
@@ -296,6 +282,8 @@ export interface AuthVerifyResponse {
 
 /** What validateSession() in utils/auth-utils.ts resolves with. */
 export interface SessionInfo {
+  /** Unavailable is not rejection; callers must not clear credentials for it. */
+  status: 'valid' | 'invalid' | 'unavailable';
   valid: boolean;
   authenticated?: boolean;
   demo_mode?: boolean;
@@ -311,7 +299,7 @@ export interface SessionInfo {
 }
 
 /** What getUserInfo() in utils/auth-utils.ts resolves with. */
-export type SessionUser = Omit<SessionInfo, 'valid' | 'authenticated' | 'demo_mode' | 'auth_enabled'>;
+export type SessionUser = Omit<SessionInfo, 'status' | 'valid' | 'authenticated' | 'demo_mode' | 'auth_enabled'>;
 
 // ---------------------------------------------------------------------------
 // Client configuration: api_handlers_settings.c
@@ -366,6 +354,14 @@ export interface WorkspacesResponse {
 // Detections: api_handlers_detection.c
 // ---------------------------------------------------------------------------
 
+/**
+ * INT_01 L15: optional observation linked to a detection by the server
+ * (same camera, same second ±1, same label). `classification` is the
+ * annotation to display (owner decision first) or null.
+ */
+export type DetectionObservation = components['schemas']['EvidenceDetectionObservation'];
+export type ObservationClassification = components['schemas']['ObservationClassification'];
+
 export interface Detection {
   label: string;
   confidence: number;
@@ -375,6 +371,7 @@ export interface Detection {
   height: number;
   timestamp?: number;
   end_timestamp?: number;
+  observation?: DetectionObservation;
 }
 
 /** GET /api/detection/results/:stream. */

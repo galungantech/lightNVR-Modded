@@ -23,6 +23,7 @@
 #include <dirent.h>
 #include <time.h>
 #include <pthread.h>
+#include <errno.h>
 #include <cjson/cJSON.h>
 
 #include "web/api_handlers_timeline.h"
@@ -33,7 +34,6 @@
 #include "core/logger.h"
 #include "core/config.h"
 #include "core/path_utils.h"
-#include "core/url_utils.h"
 #include "utils/strings.h"
 #include "utils/uuid.h"
 #include "database/database_manager.h"
@@ -48,11 +48,44 @@
 // (e.g., 10-second segments = 8640 per day)
 #define MAX_TIMELINE_SEGMENTS 8640
 
+/* Keep existing numeric IDs where JavaScript can represent them exactly. */
+static void add_timeline_recording_id(cJSON *segment, uint64_t id) {
+    char decimal[21];
+    snprintf(decimal, sizeof(decimal), "%llu", (unsigned long long)id);
+    if (id <= UINT64_C(9007199254740991)) {
+        /* cJSON's floating-point formatter can round even safe 16-digit IDs.
+         * This trusted decimal integer is valid JSON and needs no conversion. */
+        cJSON_AddRawToObject(segment, "id", decimal);
+    } else {
+        cJSON_AddStringToObject(segment, "id", decimal);
+    }
+}
+
 // Maximum number of segments in a manifest
 #define MAX_MANIFEST_SEGMENTS 100
 
 // Mutex for manifest creation
 static pthread_mutex_t manifest_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Callers provide a nonempty, already-authorized segment inventory. */
+static int closest_timeline_segment(const timeline_segment_t *segments, int count,
+                                    time_t start_time) {
+    int selected = 0;
+    double min_distance = -1;
+    for (int i = 0; i < count; i++) {
+        if (start_time >= segments[i].start_time && start_time <= segments[i].end_time) {
+            return i;
+        }
+        double distance = start_time < segments[i].start_time
+            ? difftime(segments[i].start_time, start_time)
+            : difftime(start_time, segments[i].end_time);
+        if (min_distance < 0 || distance < min_distance) {
+            min_distance = distance;
+            selected = i;
+        }
+    }
+    return selected;
+}
 
 static int get_timeline_segments_for_identity(
     const char *identity, bool by_camera_uuid, time_t start_time,
@@ -129,14 +162,14 @@ static int get_timeline_segments_for_identity(
         "r.start_time, r.end_time, "
         "r.size_bytes, "
         "CASE WHEN r.trigger_type = 'detection' THEN 1 "
-        "     WHEN EXISTS (SELECT 1 FROM detections d WHERE d.recording_id = r.id) THEN 1 "
+        "     WHEN EXISTS (SELECT 1 FROM detections d WHERE d.recording_id = r.id AND " DB_CAPTURE_CAMERA_MATCH_SQL("d", "r") ") THEN 1 "
         "     WHEN EXISTS (SELECT 1 FROM detections d "
-        "                  WHERE d.camera_uuid = r.camera_uuid "
+        "                  WHERE " DB_CAPTURE_CAMERA_FILTER_SQL("d", "?1") " "
         "                    AND d.source != 'external_motion' "
         "                    AND d.timestamp >= r.start_time "
         "                    AND d.timestamp <= COALESCE(NULLIF(r.end_time, 0), CAST(strftime('%s','now') AS INTEGER))) THEN 1 "
         "     WHEN EXISTS (SELECT 1 FROM detections d "
-        "                  WHERE d.camera_uuid = r.camera_uuid "
+        "                  WHERE " DB_CAPTURE_CAMERA_FILTER_SQL("d", "?1") " "
         "                    AND d.source = 'external_motion' "
         "                    AND d.timestamp <= COALESCE(NULLIF(r.end_time, 0), CAST(strftime('%s','now') AS INTEGER)) "
         "                    AND COALESCE(d.event_end_time, CAST(strftime('%s','now') AS INTEGER)) >= r.start_time) THEN 1 "
@@ -148,7 +181,7 @@ static int get_timeline_segments_for_identity(
         "  OR (r.is_complete = 0 AND COALESCE(r.end_time, 0) = 0 "
         "      AND r.start_time >= CAST(strftime('%s','now') AS INTEGER)"
         "          - (2 * COALESCE(NULLIF(s.segment_duration, 0), 900))))"
-        "  AND r.camera_uuid = ? "
+        "  AND " DB_CAPTURE_CAMERA_FILTER_SQL("r", "?1") " "
         "  AND r.start_time < ? "
         "  AND COALESCE(NULLIF(r.end_time, 0), CAST(strftime('%s','now') AS INTEGER)) > ? "
         "ORDER BY r.start_time ASC "
@@ -172,7 +205,8 @@ static int get_timeline_segments_for_identity(
 
     const time_t live_now = time(NULL);
     int count = 0;
-    while (sqlite3_step(stmt) == SQLITE_ROW && count < max_segments) {
+    int step_result;
+    while ((step_result = sqlite3_step(stmt)) == SQLITE_ROW && count < max_segments) {
         memset(&segments[count], 0, sizeof(segments[count]));
         segments[count].id = (uint64_t)sqlite3_column_int64(stmt, 0);
 
@@ -213,6 +247,8 @@ static int get_timeline_segments_for_identity(
 
     sqlite3_finalize(stmt);
     db_close_readonly_connection(db);
+
+    if (step_result != SQLITE_DONE && step_result != SQLITE_ROW) return -1;
 
     log_info("get_timeline_segments: found %d segments for %s '%s' in range [%ld, %ld]",
              count, by_camera_uuid ? "camera" : "stream", identity,
@@ -279,8 +315,19 @@ int get_timeline_coverage_by_camera_uuid(
      * get_timeline_segments for the freshness/self-expiry rationale. */
     const char *sql =
         "SELECT r.id, r.start_time, r.end_time, r.size_bytes, "
-        "r.trigger_type = 'detection' OR EXISTS ("
-        "  SELECT 1 FROM detections d WHERE d.recording_id = r.id), "
+        "CASE WHEN r.trigger_type = 'detection' THEN 1 "
+        "     WHEN EXISTS (SELECT 1 FROM detections d WHERE d.recording_id = r.id AND " DB_CAPTURE_CAMERA_MATCH_SQL("d", "r") ") THEN 1 "
+        "     WHEN EXISTS (SELECT 1 FROM detections d "
+        "                  WHERE " DB_CAPTURE_CAMERA_FILTER_SQL("d", "?1") " "
+        "                    AND d.source != 'external_motion' "
+        "                    AND d.timestamp >= r.start_time "
+        "                    AND d.timestamp <= COALESCE(NULLIF(r.end_time, 0), CAST(strftime('%s','now') AS INTEGER))) THEN 1 "
+        "     WHEN EXISTS (SELECT 1 FROM detections d "
+        "                  WHERE " DB_CAPTURE_CAMERA_FILTER_SQL("d", "?1") " "
+        "                    AND d.source = 'external_motion' "
+        "                    AND d.timestamp <= COALESCE(NULLIF(r.end_time, 0), CAST(strftime('%s','now') AS INTEGER)) "
+        "                    AND COALESCE(d.event_end_time, CAST(strftime('%s','now') AS INTEGER)) >= r.start_time) THEN 1 "
+        "     ELSE 0 END AS has_detection, "
         "r.protected, r.is_complete "
         "FROM recordings r "
         "LEFT JOIN streams s ON s.name = r.stream_name "
@@ -288,7 +335,7 @@ int get_timeline_coverage_by_camera_uuid(
         "  OR (r.is_complete = 0 AND COALESCE(r.end_time, 0) = 0 "
         "      AND r.start_time >= CAST(strftime('%s','now') AS INTEGER)"
         "          - (2 * COALESCE(NULLIF(s.segment_duration, 0), 900))))"
-        "  AND r.camera_uuid = ? AND r.start_time < ? "
+        "  AND " DB_CAPTURE_CAMERA_FILTER_SQL("r", "?1") " AND r.start_time < ? "
         "  AND COALESCE(NULLIF(r.end_time, 0), CAST(strftime('%s','now') AS INTEGER)) > ? "
         "ORDER BY r.start_time ASC;";
     sqlite3_stmt *stmt = NULL;
@@ -322,8 +369,13 @@ int get_timeline_coverage_by_camera_uuid(
         time_t clipped_start = segment_start < start_time
             ? start_time : segment_start;
         time_t clipped_end = segment_end > end_time ? end_time : segment_end;
+        /* Half-open interval [clipped_start, clipped_end): skip empty coverage. */
+        if (clipped_end <= clipped_start) {
+            continue;
+        }
         int first = (int)(((int64_t)clipped_start - start_time) / resolution);
-        int last = (int)(((int64_t)clipped_end - start_time) / resolution);
+        /* Use the final covered instant to avoid spilling into the next bucket. */
+        int last = (int)((((int64_t)clipped_end - 1) - start_time) / resolution);
         if (first < 0) first = 0;
         if (last >= bucket_count) last = bucket_count - 1;
         for (int index = first; index <= last; index++) {
@@ -415,6 +467,9 @@ static time_t parse_iso8601_time(const char *time_str) {
 
     // URL-decode the time string (replace %3A with :)
     char decoded_time[64];
+    // Query extraction truncates to 63 bytes; reject a full buffer rather than
+    // validating a prefix whose original suffix may have been lost.
+    if (strlen(time_str) >= sizeof(decoded_time) - 1) return 0;
     safe_strcpy(decoded_time, time_str, sizeof(decoded_time), 0);
 
     // Replace %3A with :
@@ -426,31 +481,56 @@ static time_t parse_iso8601_time(const char *time_str) {
 
     log_info("Parsing time string (decoded): %s", decoded_time);
 
-    struct tm tm = {0};
-    // Try different time formats
-    if (strptime(decoded_time, "%Y-%m-%dT%H:%M:%S", &tm) != NULL ||
-        strptime(decoded_time, "%Y-%m-%dT%H:%M:%S.000Z", &tm) != NULL ||
-        strptime(decoded_time, "%Y-%m-%dT%H:%M:%S.000", &tm) != NULL ||
-        strptime(decoded_time, "%Y-%m-%dT%H:%M:%SZ", &tm) != NULL) {
-        // Convert to UTC timestamp - assume input is already in UTC
+    const char *formats[] = {
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d"
+    };
+
+    for (size_t i = 0; i < sizeof(formats) / sizeof(formats[0]); i++) {
+        struct tm tm = {0};
+        char *end = strptime(decoded_time, formats[i], &tm);
+        if (end == NULL) continue;
+
+        if (i == 0) {
+            // Browser ISO strings may contain any fractional second, including
+            // .999Z day-end bounds. Storage uses whole seconds, so discard the
+            // fraction after validating it rather than accepting arbitrary tails.
+            if (*end == '.') {
+                end++;
+                if (*end < '0' || *end > '9') continue;
+                while (*end >= '0' && *end <= '9') end++;
+            }
+            if (*end == 'Z') end++;
+        }
+        if (*end != '\0') continue;
         tm.tm_isdst = 0; // No DST for UTC
+
+        struct tm parsed_tm = tm;
         time_t result = timegm(&tm);
+        if (result == (time_t)-1) {
+            continue;
+        }
+
+        struct tm normalized_tm = {0};
+        if (gmtime_r(&result, &normalized_tm) == NULL) {
+            continue;
+        }
+
+        if (normalized_tm.tm_year != parsed_tm.tm_year ||
+            normalized_tm.tm_mon != parsed_tm.tm_mon ||
+            normalized_tm.tm_mday != parsed_tm.tm_mday ||
+            normalized_tm.tm_hour != parsed_tm.tm_hour ||
+            normalized_tm.tm_min != parsed_tm.tm_min ||
+            normalized_tm.tm_sec != parsed_tm.tm_sec) {
+            continue;
+        }
+
         log_info("Parsed time: %ld", (long)result);
         return result;
-    } else if (strptime(decoded_time, "%Y-%m-%d", &tm) != NULL) {
-        // Handle date-only format (YYYY-MM-DD)
-        // Set time to 00:00:00
-        tm.tm_hour = 0;
-        tm.tm_min = 0;
-        tm.tm_sec = 0;
-        tm.tm_isdst = 0; // No DST for UTC
-        time_t result = timegm(&tm);
-        log_info("Parsed date-only time: %ld", (long)result);
-        return result;
-    } else {
-        log_error("Failed to parse time string: %s", decoded_time);
-        return 0;
     }
+
+    log_error("Failed to parse time string: %s", decoded_time);
+    return 0;
 }
 
 /**
@@ -488,8 +568,12 @@ void handle_get_timeline_segments(const http_request_t *req, http_response_t *re
                                          "stream or camera_uuid is required");
             return;
         }
-        if (!httpd_authorize_stream_action(req, res, AUTHZ_RECORDINGS_REPLAY,
-                                           stream_name)) return;
+        user_t user;
+        fleet_camera_t camera;
+        authorization_evaluation_t evaluation;
+        if (!httpd_authorize_camera_identity_action_with_context(req, res,
+                AUTHZ_RECORDINGS_REPLAY, NULL, stream_name, &user, &camera, &evaluation)) return;
+        safe_strcpy(camera_uuid, camera.camera_uuid, sizeof(camera_uuid), 0);
     }
 
     // Extract start and end parameters (optional)
@@ -503,7 +587,8 @@ void handle_get_timeline_segments(const http_request_t *req, http_response_t *re
     if (start_time_str[0] != '\0') {
         start_time = parse_iso8601_time(start_time_str);
         if (start_time == 0) {
-            log_error("Failed to parse start time: %s", start_time_str);
+            http_response_set_json_error(res, 400, "Invalid start parameter");
+            return;
         }
     } else {
         // Default to 24 hours ago
@@ -513,7 +598,8 @@ void handle_get_timeline_segments(const http_request_t *req, http_response_t *re
     if (end_time_str[0] != '\0') {
         end_time = parse_iso8601_time(end_time_str);
         if (end_time == 0) {
-            log_error("Failed to parse end time: %s", end_time_str);
+            http_response_set_json_error(res, 400, "Invalid end parameter");
+            return;
         }
         // For date-only format, set to end of day
         if (strlen(end_time_str) == 10) {  // YYYY-MM-DD format
@@ -532,11 +618,8 @@ void handle_get_timeline_segments(const http_request_t *req, http_response_t *re
         return;
     }
     
-    int count = by_camera_uuid
-        ? get_timeline_segments_by_camera_uuid(
-              camera_uuid, start_time, end_time, segments, MAX_TIMELINE_SEGMENTS)
-        : get_timeline_segments(
-              stream_name, start_time, end_time, segments, MAX_TIMELINE_SEGMENTS);
+    int count = get_timeline_segments_by_camera_uuid(
+        camera_uuid, start_time, end_time, segments, MAX_TIMELINE_SEGMENTS);
 
     if (count < 0) {
         log_error("Failed to get timeline segments");
@@ -577,13 +660,15 @@ void handle_get_timeline_segments(const http_request_t *req, http_response_t *re
                                                   sizeof(*intervals));
         int interval_count = -1;
         if (intervals) {
-            interval_count = by_camera_uuid
-                ? get_external_motion_detection_intervals_by_camera_uuid(
-                      camera_uuid, start_time, end_time, intervals,
-                      MAX_TIMELINE_SEGMENTS)
-                : get_external_motion_detection_intervals(
-                      stream_name, start_time, end_time, intervals,
-                      MAX_TIMELINE_SEGMENTS);
+            interval_count = get_external_motion_detection_intervals_by_camera_uuid(
+                camera_uuid, start_time, end_time, intervals, MAX_TIMELINE_SEGMENTS);
+        }
+        if (interval_count < 0) {
+            free(intervals);
+            free(segments);
+            cJSON_Delete(response);
+            http_response_set_json_error(res, 500, "Failed to get detection intervals");
+            return;
         }
         if (interval_count > 0) {
             for (int i = 0; i < interval_count; i++) {
@@ -661,7 +746,7 @@ void handle_get_timeline_segments(const http_request_t *req, http_response_t *re
             snprintf(size_str, sizeof(size_str), "%.1f GB", (double)segments[i].size_bytes / (1024.0 * 1024.0 * 1024.0));
         }
 
-        cJSON_AddNumberToObject(segment, "id", (double)segments[i].id);
+        add_timeline_recording_id(segment, segments[i].id);
         cJSON_AddStringToObject(segment, "stream", segments[i].stream_name);
         if (segments[i].camera_uuid[0] != '\0') {
             cJSON_AddStringToObject(segment, "camera_uuid",
@@ -734,8 +819,11 @@ void handle_timeline_manifest(const http_request_t *req, http_response_t *res) {
         http_response_set_json_error(res, 400, "Missing required parameter: stream");
         return;
     }
-    if (!httpd_authorize_stream_action(req, res, AUTHZ_RECORDINGS_REPLAY,
-                                       stream_name)) return;
+    user_t user;
+    fleet_camera_t camera;
+    authorization_evaluation_t evaluation;
+    if (!httpd_authorize_camera_identity_action_with_context(req, res,
+            AUTHZ_RECORDINGS_REPLAY, NULL, stream_name, &user, &camera, &evaluation)) return;
 
     // Extract start and end parameters (optional)
     http_request_get_query_param(req, "start", start_time_str, sizeof(start_time_str));
@@ -749,6 +837,8 @@ void handle_timeline_manifest(const http_request_t *req, http_response_t *res) {
         start_time = parse_iso8601_time(start_time_str);
         if (start_time == 0) {
             log_error("Failed to parse start time: %s", start_time_str);
+            http_response_set_json_error(res, 400, "Invalid start time format");
+            return;
         }
     } else {
         // Default to 24 hours ago
@@ -759,6 +849,8 @@ void handle_timeline_manifest(const http_request_t *req, http_response_t *res) {
         end_time = parse_iso8601_time(end_time_str);
         if (end_time == 0) {
             log_error("Failed to parse end time: %s", end_time_str);
+            http_response_set_json_error(res, 400, "Invalid end time format");
+            return;
         }
         // For date-only format, set to end of day
         if (strlen(end_time_str) == 10) {  // YYYY-MM-DD format
@@ -777,9 +869,14 @@ void handle_timeline_manifest(const http_request_t *req, http_response_t *res) {
         return;
     }
 
-    int count = get_timeline_segments(stream_name, start_time, end_time, segments, MAX_TIMELINE_SEGMENTS);
+    int count = get_timeline_segments_by_camera_uuid(camera.camera_uuid, start_time, end_time, segments, MAX_TIMELINE_SEGMENTS);
 
-    if (count <= 0) {
+    if (count < 0) {
+        free(segments);
+        http_response_set_json_error(res, 500, "Failed to get timeline segments");
+        return;
+    }
+    if (count == 0) {
         log_error("No timeline segments found for stream %s", stream_name);
         free(segments);
         http_response_set_json_error(res, 404, "No recordings found for the specified time range");
@@ -821,8 +918,11 @@ void handle_timeline_playback(const http_request_t *req, http_response_t *res) {
         http_response_set_json_error(res, 400, "Missing required parameter: stream");
         return;
     }
-    if (!httpd_authorize_stream_action(req, res, AUTHZ_RECORDINGS_REPLAY,
-                                       stream_name)) return;
+    user_t user;
+    fleet_camera_t camera;
+    authorization_evaluation_t evaluation;
+    if (!httpd_authorize_camera_identity_action_with_context(req, res,
+            AUTHZ_RECORDINGS_REPLAY, NULL, stream_name, &user, &camera, &evaluation)) return;
 
     // Extract start parameter
     http_request_get_query_param(req, "start", start_time_str, sizeof(start_time_str));
@@ -862,39 +962,23 @@ void handle_timeline_playback(const http_request_t *req, http_response_t *res) {
     time_t search_start = start_time - 3600;
     time_t search_end = start_time + 3600;
 
-    int count = get_timeline_segments(stream_name, search_start, search_end, segments, MAX_TIMELINE_SEGMENTS);
+    int count = get_timeline_segments_by_camera_uuid(camera.camera_uuid, search_start, search_end, segments, MAX_TIMELINE_SEGMENTS);
 
-    if (count <= 0) {
+    if (count < 0) {
+        free(segments);
+        http_response_set_json_error(res, 500, "Failed to get timeline segments");
+        return;
+    }
+    if (count == 0) {
         log_error("No recordings found for stream %s near time %ld", stream_name, (long)start_time);
         free(segments);
         http_response_set_json_error(res, 404, "No recordings found for the specified time");
         return;
     }
 
-    // Find the segment that contains the start time, or the closest one
-    int64_t recording_id = 0;
-    int64_t min_distance = INT64_MAX;
-
-    for (int i = 0; i < count; i++) {
-        if (start_time >= segments[i].start_time && start_time <= segments[i].end_time) {
-            // Found exact match
-            recording_id = (int64_t)segments[i].id;
-            break;
-        }
-
-        // Calculate distance to this segment
-        int64_t distance;
-        if (start_time < segments[i].start_time) {
-            distance = segments[i].start_time - start_time;
-        } else {
-            distance = start_time - segments[i].end_time;
-        }
-
-        if (distance < min_distance) {
-            min_distance = distance;
-            recording_id = (int64_t)segments[i].id;
-        }
-    }
+    // Find the segment that contains the start time, or the closest one.
+    int selected = closest_timeline_segment(segments, count, start_time);
+    uint64_t recording_id = segments[selected].id;
 
     free(segments);
 
@@ -913,7 +997,8 @@ void handle_timeline_playback(const http_request_t *req, http_response_t *res) {
     // Set redirect response
     res->status_code = 302;
     http_response_add_header(res, "Location", redirect_url);
-    http_response_add_header(res, "Content-Length", "0");
+    // The backend emits Content-Length from the empty response body. Adding it
+    // here as well produces an invalid redirect with duplicate length headers.
 
     log_info("Successfully handled GET /api/timeline/play request");
 }
@@ -933,6 +1018,7 @@ int create_timeline_manifest(const timeline_segment_t *segments, int segment_cou
         log_warn("Limiting manifest to %d segments (requested %d)", MAX_MANIFEST_SEGMENTS, segment_count);
         segment_count = MAX_MANIFEST_SEGMENTS;
     }
+    int selected = closest_timeline_segment(segments, segment_count, start_time);
     
     // Create a temporary directory for the manifest
     char temp_dir[MAX_PATH_LENGTH];
@@ -946,8 +1032,8 @@ int create_timeline_manifest(const timeline_segment_t *segments, int segment_cou
     
     // Generate a unique manifest filename
     char manifest_filename[MAX_PATH_LENGTH];
-    snprintf(manifest_filename, sizeof(manifest_filename), "%s/manifest_%ld_%s_%ld.m3u8",
-            temp_dir, (long)time(NULL), segments[0].stream_name, (long)start_time);
+    snprintf(manifest_filename, sizeof(manifest_filename), "%s/manifest_%ld_%llu_%ld.m3u8",
+            temp_dir, (long)time(NULL), (unsigned long long)segments[selected].id, (long)start_time);
     
     // Lock mutex for manifest creation
     pthread_mutex_lock(&manifest_mutex);
@@ -973,27 +1059,18 @@ int create_timeline_manifest(const timeline_segment_t *segments, int segment_cou
     fprintf(manifest, "#EXT-X-MEDIA-SEQUENCE:0\n");
     fprintf(manifest, "#EXT-X-ALLOW-CACHE:YES\n");
     
-    // Find the maximum segment duration for EXT-X-TARGETDURATION
-    double max_duration = 0;
-    for (int i = 0; i < segment_count; i++) {
-        double duration = difftime(segments[i].end_time, segments[i].start_time);
-        if (duration > max_duration) {
-            max_duration = duration;
-        }
-    }
+    double duration = difftime(segments[selected].end_time, segments[selected].start_time);
     // Round up to the nearest integer and add a small buffer
-    int target_duration = (int)max_duration + 1;
+    int target_duration = (int)duration + 1;
     fprintf(manifest, "#EXT-X-TARGETDURATION:%d\n", target_duration);
 
-    // Sanitize the stream name so that names with spaces work correctly.
-    char encoded_name[MAX_STREAM_NAME * 3];
-    simple_url_escape(segments[0].stream_name, encoded_name, MAX_STREAM_NAME * 3);
-    
     // Create a single segment for the entire timeline
-    // This simplifies playback and avoids issues with segment transitions
-    fprintf(manifest, "#EXTINF:%.6f,\n", max_duration);
-    fprintf(manifest, "/api/timeline/play?stream=%s&start=%ld\n", 
-            encoded_name, (long)start_time);
+    // Bind playback to the captured recording, never its historical camera
+    // name: that name may now belong to a different camera. The recording
+    // endpoint rechecks current permission when the media is requested.
+    fprintf(manifest, "#EXTINF:%.6f,\n", duration);
+    fprintf(manifest, "/api/recordings/play/%llu\n",
+            (unsigned long long)segments[selected].id);
     
     // Write manifest end
     fprintf(manifest, "#EXT-X-ENDLIST\n");
@@ -1015,8 +1092,9 @@ int create_timeline_manifest(const timeline_segment_t *segments, int segment_cou
  * @brief Handle GET /api/timeline/segments-by-ids?ids=1,2,3,...
  *
  * Fetches recording metadata for the given IDs and returns them as timeline
- * segments sorted by start_time.  The response format matches that of
- * handle_get_timeline_segments so the TimelinePage can consume it directly.
+ * segments in the same order as the requested IDs (duplicates are preserved).
+ * The response format matches that of handle_get_timeline_segments so the
+ * TimelinePage can consume it directly.
  */
 void handle_get_timeline_segments_by_ids(const http_request_t *req, http_response_t *res) {
     log_info("Handling GET /api/timeline/segments-by-ids request");
@@ -1035,15 +1113,40 @@ void handle_get_timeline_segments_by_ids(const http_request_t *req, http_respons
         return;
     }
 
-    /* Parse comma-separated IDs */
+    /* Parse every ID before fetching metadata; never return a partial list.
+     * The HTTP query-size limit is currently tighter than this array bound. */
     uint64_t ids[MAX_TIMELINE_SEGMENTS];
     int id_count = 0;
     char *saveptr = NULL;
     char *token = strtok_r(ids_param, ",", &saveptr);
-    while (token && id_count < MAX_TIMELINE_SEGMENTS) {
-        while (*token == ' ') token++;
-        uint64_t id = strtoull(token, NULL, 10);
-        if (id > 0) ids[id_count++] = id;
+    while (token) {
+        while (isspace((unsigned char)*token)) token++;
+        if (*token == '\0' || *token == '+' || *token == '-') {
+            http_response_set_json_error(res, 400, "Invalid recording ID in ids parameter");
+            return;
+        }
+
+        errno = 0;
+        char *endptr = NULL;
+        uint64_t id = strtoull(token, &endptr, 10);
+
+        if (errno == ERANGE || endptr == token) {
+            http_response_set_json_error(res, 400, "Invalid recording ID in ids parameter");
+            return;
+        }
+
+        while (*endptr != '\0' && isspace((unsigned char)*endptr)) endptr++;
+        if (*endptr != '\0' || id == 0) {
+            http_response_set_json_error(res, 400, "Invalid recording ID in ids parameter");
+            return;
+        }
+
+        if (id_count == MAX_TIMELINE_SEGMENTS) {
+            http_response_set_json_error(res, 400, "Too many recording IDs provided");
+            return;
+        }
+        ids[id_count++] = id;
+
         token = strtok_r(NULL, ",", &saveptr);
     }
     if (id_count == 0) {
@@ -1067,48 +1170,66 @@ void handle_get_timeline_segments_by_ids(const http_request_t *req, http_respons
     time_t overall_start = 0, overall_end = 0;
     int seg_count = 0;
 
+    recording_metadata_t *records = calloc((size_t)id_count, sizeof(*records));
+    recording_detection_summary_t *summaries = calloc((size_t)id_count, sizeof(*summaries));
+    if (!records || !summaries) {
+        free(records);
+        free(summaries);
+        cJSON_Delete(response);
+        http_response_set_json_error(res, 500, "Failed to allocate recording metadata");
+        return;
+    }
+
+    // Keep the existing metadata lookup and authorization semantics, then
+    // enrich only authorized recordings in one bounded detection batch.
+    int record_count = 0;
+    const time_t now = time(NULL);
     for (int i = 0; i < id_count; i++) {
-        recording_metadata_t rec;
-        memset(&rec, 0, sizeof(rec));
+        recording_metadata_t rec = {0};
         if (get_recording_metadata_by_id(ids[i], &rec) != 0) {
             log_warn("Recording ID %llu not found, skipping", (unsigned long long)ids[i]);
             continue;
         }
-        // Authorize against capture identity, not a historical name that may
-        // have been renamed or reassigned to a different camera.
-        const char *authorization_name = rec.stream_name;
-        stream_config_t recorded_camera;
-        if (rec.camera_uuid[0] != '\0') {
-            if (get_stream_config_by_uuid(rec.camera_uuid, &recorded_camera) != 0)
-                continue;
-            authorization_name = recorded_camera.name;
-        }
         authorization_evaluation_t replay_evaluation;
-        if (httpd_evaluate_stream_action(&user, AUTHZ_RECORDINGS_REPLAY,
-                                         authorization_name,
-                                         &replay_evaluation) != 0) {
+        int evaluation_result = httpd_evaluate_camera_identity_action(&user,
+            AUTHZ_RECORDINGS_REPLAY, rec.camera_uuid, rec.stream_name, &replay_evaluation);
+        if (evaluation_result > 0) continue;
+        if (evaluation_result < 0) {
+            free(summaries);
+            free(records);
             cJSON_Delete(response);
-            http_response_set_json_error(
-                res, 500, "Authorization policy evaluation failed");
+            http_response_set_json_error(res, 500, "Authorization policy evaluation failed");
             return;
         }
         if (replay_evaluation.decision != AUTHZ_DECISION_ALLOW) continue;
 
-        /* A segment that is still recording has no committed end_time; use
-         * "now" as its effective end for display and detection checks (#482). */
-        const bool in_progress = !rec.is_complete;
-        const time_t effective_end =
-            (in_progress && rec.end_time <= 0) ? time(NULL) : rec.end_time;
+        // Use the same effective end for detection queries and display (#482).
+        if (!rec.is_complete && rec.end_time <= 0) rec.end_time = now;
+        records[record_count++] = rec;
+    }
 
-        /* Check for detections */
-        bool has_det = false;
-        if (rec.trigger_type[0] != '\0' && strcmp(rec.trigger_type, "detection") == 0) {
-            has_det = true;
-        } else if (has_detections_in_time_range(rec.stream_name,
-                                               rec.start_time,
-                                               effective_end) > 0) {
-            has_det = true;
+    if (record_count > 0 &&
+        get_recording_detection_summaries_for_cameras(records, record_count, summaries) != 0) {
+        free(summaries);
+        free(records);
+        cJSON_Delete(response);
+        http_response_set_json_error(res, 500, "Failed to get recording detections");
+        return;
+    }
+
+    for (int i = 0; i < record_count; i++) {
+        const recording_metadata_t rec = records[i];
+        const bool in_progress = !rec.is_complete;
+        const time_t effective_end = rec.end_time;
+
+        // The batch API returns a summary for the first occurrence of an ID.
+        // Preserve repeated-ID response entries and their detection flags.
+        int summary_index = i;
+        for (int j = 0; j < i; j++) {
+            if (records[j].id == rec.id) { summary_index = j; break; }
         }
+        const recording_detection_summary_t summary = summaries[summary_index];
+        bool has_det = strcmp(rec.trigger_type, "detection") == 0 || summary.has_detection;
 
         /* Track overall time range */
         if (overall_start == 0 || rec.start_time < overall_start) overall_start = rec.start_time;
@@ -1138,7 +1259,7 @@ void handle_get_timeline_segments_by_ids(const http_request_t *req, http_respons
         else
             snprintf(size_str, sizeof(size_str), "%.1f GB", (double)rec.size_bytes / (1024.0 * 1024.0 * 1024.0));
 
-        cJSON_AddNumberToObject(segment, "id", (double)rec.id);
+        add_timeline_recording_id(segment, rec.id);
         cJSON_AddStringToObject(segment, "stream", rec.stream_name);
         if (rec.camera_uuid[0] != '\0') {
             cJSON_AddStringToObject(segment, "camera_uuid", rec.camera_uuid);
@@ -1167,6 +1288,9 @@ void handle_get_timeline_segments_by_ids(const http_request_t *req, http_respons
         cJSON_AddItemToArray(segments_array, segment);
         seg_count++;
     }
+
+    free(summaries);
+    free(records);
 
     /* Add metadata */
     cJSON_AddStringToObject(response, "stream", "(selected)");

@@ -49,6 +49,21 @@ export function timelineSegmentIdentity(segment: Partial<TimelineSegment> | null
   return `range:${streamName}:${segment?.start_timestamp ?? ''}:${segment?.end_timestamp ?? ''}`;
 }
 
+/** Keep playback attached to the same recording when polling reorders the list. */
+export function reconcileTimelineSelection(
+  previous: { timelineSegments: TimelineSegment[]; currentSegmentIndex: number },
+  next: TimelineSegment[],
+): { timelineSegments: TimelineSegment[]; currentSegmentIndex: number } {
+  const active = Number.isInteger(previous.currentSegmentIndex)
+    ? previous.timelineSegments[previous.currentSegmentIndex] : undefined;
+  const identity = active ? timelineSegmentIdentity(active) : null;
+  return {
+    timelineSegments: next,
+    currentSegmentIndex: identity === null ? -1
+      : next.findIndex(segment => timelineSegmentIdentity(segment) === identity),
+  };
+}
+
 export function reconcileTimelineSegments(existing: TimelineSegment[] = [], incoming: TimelineSegment[] = []) {
   const existingByKey = new Map<string, TimelineSegment>(existing.map((segment) =>
     [timelineSegmentIdentity(segment), segment]));
@@ -585,6 +600,18 @@ export function findNearestSegmentIndex(segments: MaybeRanges, timestamp: number
   }
 
   return bestIndex;
+}
+
+/** Resolve a scrub to actual footage so the media clock and playhead cannot disagree in a gap. */
+export function resolveTimelineSeek(segments: MaybeRanges, timestamp: number) {
+  const containingIndex = findContainingSegmentIndex(segments, timestamp);
+  const index = containingIndex >= 0 ? containingIndex : findNearestSegmentIndex(segments, timestamp);
+  const segment = segments?.[index];
+  return {
+    index,
+    timestamp: segment ? Math.min(segment.end_timestamp, Math.max(segment.start_timestamp, timestamp)) : timestamp,
+    inGap: index >= 0 && containingIndex < 0,
+  };
 }
 
 export function resolveActiveSegmentIndex(segments: MaybeRanges, currentSegmentIndex: number, timestamp: number | null | undefined = null): number {

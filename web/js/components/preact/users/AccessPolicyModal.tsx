@@ -1,5 +1,6 @@
+import { administrationJSON } from '../../../api/administration.ts';
+import { listCameraCollections, listFleetLocations, listFleetTags } from '../../../api/fleet.ts';
 import { useCallback, useEffect, useMemo, useState } from 'preact/hooks';
-import { fetchJSON } from '../../../query-client.ts';
 import { useI18n } from '../../../i18n.ts';
 import { CameraValuePicker, CollectionSelectorBuilder } from '../fleet/CollectionSelectorBuilder.tsx';
 import { showStatusMessage } from '../ToastContainer.tsx';
@@ -133,7 +134,7 @@ function GrantEditor({ grant, roles, collections, locations, tags, onChange, onS
 }
 
 function SimulationPanel({ user, actions, dirty, getAuthHeaders, t }: SimulationPanelProps) {
-  const [actionKey, setActionKey] = useState(actions[0]?.key || 'live.view');
+  const [actionKey, setActionKey] = useState<string>(actions[0]?.key || 'live.view');
   const [cameraUuids, setCameraUuids] = useState<string[]>([]);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<AuthorizationSimulationResult | null>(null);
@@ -155,7 +156,7 @@ function SimulationPanel({ user, actions, dirty, getAuthHeaders, t }: Simulation
     try {
       const body: { user_id: number; action: string; camera_uuid?: string | undefined } = { user_id: user.id, action: actionKey };
       if (cameraScoped) body.camera_uuid = cameraUuids[0];
-      setResult(await fetchJSON<AuthorizationSimulationResult>('/api/authorization/simulate', {
+      setResult(await administrationJSON<AuthorizationSimulationResult>('/api/authorization/simulate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify(body),
@@ -227,12 +228,12 @@ export function AccessPolicyModal({ user, onClose, getAuthHeaders }: AccessPolic
     setError('');
     try {
       const [actionResponse, roleResponse, policyResponse, collectionResponse, locationResponse, tagResponse] = await Promise.all([
-        fetchJSON<AuthorizationActionsResponse>('/api/authorization/actions', { headers: getAuthHeaders(), cache: 'no-store' }),
-        fetchJSON<AuthorizationRolesResponse>('/api/authorization/roles', { headers: getAuthHeaders(), cache: 'no-store' }),
-        fetchJSON<UserPolicyResponse>(`/api/authorization/users/${encodeURIComponent(user.id)}`, { headers: getAuthHeaders(), cache: 'no-store' }),
-        fetchJSON<AccessCollectionsResponse>('/api/camera-collections', { headers: getAuthHeaders(), cache: 'no-store' }),
-        fetchJSON<AccessLocationsResponse>('/api/locations', { headers: getAuthHeaders(), cache: 'no-store' }),
-        fetchJSON<AccessTagsResponse>('/api/camera-tags', { headers: getAuthHeaders(), cache: 'no-store' }),
+        administrationJSON<AuthorizationActionsResponse>('/api/authorization/actions', { headers: getAuthHeaders(), cache: 'no-store' }),
+        administrationJSON<AuthorizationRolesResponse>('/api/authorization/roles', { headers: getAuthHeaders(), cache: 'no-store' }),
+        administrationJSON<UserPolicyResponse>(`/api/authorization/users/${encodeURIComponent(user.id)}`, { headers: getAuthHeaders(), cache: 'no-store' }),
+        listCameraCollections({headers: getAuthHeaders(), cache: 'no-store'}),
+        listFleetLocations({headers: getAuthHeaders(), cache: 'no-store'}),
+        listFleetTags({headers: getAuthHeaders(), cache: 'no-store'}),
       ]);
       setActions(actionResponse.actions || []);
       setRoles(roleResponse.roles || []);
@@ -291,7 +292,7 @@ export function AccessPolicyModal({ user, onClose, getAuthHeaders }: AccessPolic
     }
     setSaving(true);
     try {
-      const response = await fetchJSON<UserPolicyResponse>(`/api/authorization/users/${encodeURIComponent(user.id)}`, {
+      const response = await administrationJSON<UserPolicyResponse>(`/api/authorization/users/${encodeURIComponent(user.id)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify(buildPolicyPayload(mode, grants, policyVersion)),
@@ -309,7 +310,7 @@ export function AccessPolicyModal({ user, onClose, getAuthHeaders }: AccessPolic
   };
 
   return (
-    <div role="presentation" className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-3" onClick={() => !saving && onClose()}>
+    <div role="presentation" className="app-modal-overlay fixed inset-0 flex items-center justify-center bg-black/50 p-3" onClick={() => !saving && onClose()}>
       <section /* eslint-disable-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions -- only keeps clicks inside the dialog from reaching the backdrop */ role="dialog" aria-modal="true" aria-labelledby="access-policy-title" className="flex max-h-[95vh] w-full max-w-6xl flex-col overflow-hidden rounded-lg bg-card text-card-foreground shadow-xl" onClick={(event) => event.stopPropagation()}>
         <header className="flex items-start justify-between gap-4 border-b border-border p-5">
           <div><h2 id="access-policy-title" className="text-xl font-bold">{t('access.policy.title', { username: user.username })}</h2><p className="mt-1 text-sm text-muted-foreground">{t('access.policy.description')}</p></div>

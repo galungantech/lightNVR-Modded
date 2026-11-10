@@ -55,6 +55,11 @@ static int store_detections_with_source(const char *camera_uuid,
                  stream_name, result);
         return -1;
     }
+
+    if (result->count < 0 || result->count > MAX_DETECTIONS) {
+        log_error("Invalid detection count: %d (expected 0..%d)", result->count, MAX_DETECTIONS);
+        return -1;
+    }
     
     // Use current time if timestamp is 0
     if (timestamp == 0) {
@@ -79,8 +84,6 @@ static int store_detections_with_source(const char *camera_uuid,
     // Note: detections table is created by SQL migrations (see db/migrations/)
     // No need for runtime table existence checks or fallback creation.
     char *err_msg = NULL;
-    char **query_result;
-    int rows, cols;
 
     // Begin transaction for better performance when inserting multiple detections
     rc = sqlite3_exec(db, "BEGIN TRANSACTION;", NULL, NULL, &err_msg);
@@ -163,22 +166,6 @@ static int store_detections_with_source(const char *camera_uuid,
         pthread_mutex_unlock(db_mutex);
         return -1;
     }
-    
-    // Verify the detections were stored
-    char verify_sql[256];
-    snprintf(verify_sql, sizeof(verify_sql), 
-            "SELECT COUNT(*) FROM detections WHERE stream_name = '%s' AND timestamp = %lld;",
-            stream_name, (long long)timestamp);
-    
-    rc = sqlite3_get_table(db, verify_sql, &query_result, &rows, &cols, &err_msg);
-    if (rc != SQLITE_OK) {
-        log_error("Failed to verify detections were stored: %s", err_msg);
-        sqlite3_free(err_msg);
-    } else if (rows > 0 && cols > 0) {
-        int count = (int)strtol(query_result[1], NULL, 10); // First row, first column
-        log_debug("Verified %d detections were stored in database for stream %s", count, stream_name);
-        sqlite3_free_table(query_result);
-    }
 
     pthread_mutex_unlock(db_mutex);
 
@@ -210,7 +197,9 @@ int store_external_motion_detections(const char *stream_name,
                                         recording_id, "external_motion", true);
 }
 
-int close_external_motion_detections(const char *stream_name, time_t end_time) {
+int close_external_motion_detections(const char *camera_uuid,
+                                     const char *stream_name, time_t end_time) {
+    if (!camera_uuid || camera_uuid[0] == '\0') return -1;
     if (!stream_name || stream_name[0] == '\0') return -1;
     if (end_time == 0) end_time = time(NULL);
 
@@ -222,14 +211,17 @@ int close_external_motion_detections(const char *stream_name, time_t end_time) {
     const char *sql =
         "UPDATE detections SET event_end_time = "
         "CASE WHEN ? < timestamp THEN timestamp ELSE ? END "
-        "WHERE stream_name = ? AND source = 'external_motion' "
-        "AND event_end_time IS NULL;";
+        "WHERE source = 'external_motion' "
+        "AND event_end_time IS NULL "
+        "AND (camera_uuid = ? "
+        "OR ((camera_uuid IS NULL OR camera_uuid = '') AND stream_name = ?));";
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     if (rc == SQLITE_OK) {
         sqlite3_bind_int64(stmt, 1, (sqlite3_int64)end_time);
         sqlite3_bind_int64(stmt, 2, (sqlite3_int64)end_time);
-        sqlite3_bind_text(stmt, 3, stream_name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 3, camera_uuid, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 4, stream_name, -1, SQLITE_STATIC);
         rc = sqlite3_step(stmt);
     }
     int changed = rc == SQLITE_DONE ? sqlite3_changes(db) : -1;
@@ -242,23 +234,21 @@ static int get_external_motion_intervals_for_identity(
     const char *identity, bool by_camera_uuid, time_t start_time,
     time_t end_time, detection_interval_t *intervals, int max_intervals) {
     if (!identity || !intervals || max_intervals <= 0) return -1;
-    sqlite3 *db = get_db_handle();
-    pthread_mutex_t *db_mutex = get_db_mutex();
-    if (!db) return -1;
+    sqlite3 *db = NULL;
+    if (db_open_readonly_connection(&db) != 0) return -1;
 
-    pthread_mutex_lock(db_mutex);
-    char sql[512];
+    char sql[1024];
     snprintf(sql, sizeof(sql),
         "SELECT timestamp, COALESCE(event_end_time, CAST(strftime('%%s','now') AS INTEGER)) "
-        "FROM detections WHERE %s = ? "
+        "FROM detections d WHERE %s "
         "AND source = 'external_motion' AND timestamp <= ? "
         "AND COALESCE(event_end_time, CAST(strftime('%%s','now') AS INTEGER)) >= ? "
         "GROUP BY timestamp, event_end_time ORDER BY timestamp ASC LIMIT ?;",
-        by_camera_uuid ? "camera_uuid" : "stream_name");
+        by_camera_uuid ? DB_CAPTURE_CAMERA_FILTER_SQL("d", "?1") : "stream_name = ?1");
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        pthread_mutex_unlock(db_mutex);
+        db_close_readonly_connection(db);
         return -1;
     }
     sqlite3_bind_text(stmt, 1, identity, -1, SQLITE_STATIC);
@@ -267,14 +257,15 @@ static int get_external_motion_intervals_for_identity(
     sqlite3_bind_int(stmt, 4, max_intervals);
 
     int count = 0;
-    while (sqlite3_step(stmt) == SQLITE_ROW && count < max_intervals) {
+    int step_result;
+    while ((step_result = sqlite3_step(stmt)) == SQLITE_ROW && count < max_intervals) {
         intervals[count].start_time = (time_t)sqlite3_column_int64(stmt, 0);
         intervals[count].end_time = (time_t)sqlite3_column_int64(stmt, 1);
         count++;
     }
     sqlite3_finalize(stmt);
-    pthread_mutex_unlock(db_mutex);
-    return count;
+    db_close_readonly_connection(db);
+    return step_result == SQLITE_DONE || step_result == SQLITE_ROW ? count : -1;
 }
 
 int get_external_motion_detection_intervals(const char *stream_name,
@@ -699,6 +690,64 @@ int get_detection_time_ranges(const char *stream_name,
     return count < 0 ? -1 : 0;
 }
 
+int get_detection_results_for_camera_readonly(const char *camera_uuid,
+    const char *legacy_stream_name, detection_result_t *result,
+    time_t *timestamps, time_t *end_timestamps, uint64_t max_age,
+    time_t start_time, time_t end_time) {
+    if (!camera_uuid || !*camera_uuid || !legacy_stream_name || !result || !timestamps)
+        return -1;
+    memset(result, 0, sizeof(*result));
+    sqlite3 *connection = NULL;
+    if (db_open_readonly_connection(&connection) != 0) return -1;
+    sqlite3_busy_timeout(connection, 1000);
+    time_t now = time(NULL);
+    time_t lower = start_time;
+    if (start_time <= 0 && end_time <= 0 && max_age > 0)
+        lower = now - (time_t)max_age;
+    /* Bind the already-authorized capture identity in the same SELECT as rows
+     * and timestamps. Reusing a display name cannot attach another camera's
+     * captured detections; legacy NULL/empty identities retain name fallback. */
+    const char *sql =
+        "SELECT timestamp, COALESCE(event_end_time, CASE WHEN source='external_motion' "
+        "THEN ?5 ELSE timestamp END), label,confidence,x,y,width,height "
+        "FROM detections WHERE (camera_uuid=?1 OR "
+        "((camera_uuid IS NULL OR camera_uuid='') AND stream_name=?2)) "
+        "AND (?3<=0 OR (source='external_motion' AND COALESCE(event_end_time,?5)>=?3) "
+        "OR (source!='external_motion' AND timestamp>=?3)) "
+        "AND (?4<=0 OR timestamp<=?4) ORDER BY timestamp DESC LIMIT ?6";
+    sqlite3_stmt *statement = NULL;
+    int rc = sqlite3_prepare_v2(connection, sql, -1, &statement, NULL);
+    if (rc == SQLITE_OK) {
+        sqlite3_bind_text(statement, 1, camera_uuid, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 2, legacy_stream_name, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(statement, 3, (sqlite3_int64)lower);
+        sqlite3_bind_int64(statement, 4, (sqlite3_int64)end_time);
+        sqlite3_bind_int64(statement, 5, (sqlite3_int64)now);
+        sqlite3_bind_int(statement, 6, MAX_DETECTIONS);
+        while ((rc = sqlite3_step(statement)) == SQLITE_ROW) {
+            int index = result->count;
+            detection_t *detection = &result->detections[index];
+            timestamps[index] = (time_t)sqlite3_column_int64(statement, 0);
+            if (end_timestamps) end_timestamps[index] = (time_t)sqlite3_column_int64(statement, 1);
+            const char *label = (const char *)sqlite3_column_text(statement, 2);
+            safe_strcpy(detection->label, label ? label : "unknown", MAX_LABEL_LENGTH, 0);
+            detection->confidence = (float)sqlite3_column_double(statement, 3);
+            detection->x = (float)sqlite3_column_double(statement, 4);
+            detection->y = (float)sqlite3_column_double(statement, 5);
+            detection->width = (float)sqlite3_column_double(statement, 6);
+            detection->height = (float)sqlite3_column_double(statement, 7);
+            result->count++;
+        }
+    }
+    sqlite3_finalize(statement);
+    db_close_readonly_connection(connection);
+    if (rc != SQLITE_DONE) {
+        memset(result, 0, sizeof(*result));
+        return -1;
+    }
+    return result->count;
+}
+
 int get_detection_results_readonly(const char *stream_name,
                                    detection_result_t *result,
                                    time_t *timestamps, time_t *end_timestamps,
@@ -1032,52 +1081,84 @@ int get_detection_labels_summary(const char *stream_name, time_t start_time, tim
 
 #define RECORDING_DETECTION_QUERY_BATCH_SIZE 100
 
+static int detection_summaries_for_scope(
+    sqlite3 *db, const recording_metadata_t *recordings, int count,
+    recording_detection_summary_t *summaries, bool camera_scope) ;
 int get_recording_detection_summaries_on_connection(
     sqlite3 *db, const recording_metadata_t *recordings, int count,
-    recording_detection_summary_t *summaries) {
+    recording_detection_summary_t *summaries) { return detection_summaries_for_scope(db, recordings, count, summaries, false); }
+int get_recording_detection_summaries_for_cameras_on_connection(
+    sqlite3 *db, const recording_metadata_t *recordings, int count,
+    recording_detection_summary_t *summaries) { return detection_summaries_for_scope(db, recordings, count, summaries, true); }
+static int detection_summaries_for_scope(
+    sqlite3 *db, const recording_metadata_t *recordings, int count,
+    recording_detection_summary_t *summaries, bool camera_scope) {
     if (!db || !recordings || count <= 0 || !summaries) {
         return -1;
     }
 
     memset(summaries, 0, (size_t)count * sizeof(*summaries));
 
+    int batch_limit = sqlite3_limit(db, SQLITE_LIMIT_VARIABLE_NUMBER, -1) / 5;
+    if (batch_limit < 1) return -1;
+    if (batch_limit > RECORDING_DETECTION_QUERY_BATCH_SIZE) batch_limit = RECORDING_DETECTION_QUERY_BATCH_SIZE;
     for (int batch_start = 0; batch_start < count;
-         batch_start += RECORDING_DETECTION_QUERY_BATCH_SIZE) {
+         batch_start += batch_limit) {
         int batch_count = count - batch_start;
-        if (batch_count > RECORDING_DETECTION_QUERY_BATCH_SIZE) {
-            batch_count = RECORDING_DETECTION_QUERY_BATCH_SIZE;
+        if (batch_count > batch_limit) {
+            batch_count = batch_limit;
         }
 
         char sql[8192];
         safe_strcpy(sql,
-            "WITH requested(recording_id, stream_name, start_time, end_time) AS (VALUES ",
+            "WITH requested(recording_id, stream_name, start_time, end_time, camera_uuid) AS (VALUES ",
             sizeof(sql), 0);
         for (int i = 0; i < batch_count; i++) {
             if (i > 0) safe_strcat(sql, ",", sizeof(sql));
-            safe_strcat(sql, "(?,?,?,?)", sizeof(sql));
+            safe_strcat(sql, "(?,?,?,?,?)", sizeof(sql));
         }
         safe_strcat(sql,
             "), label_counts AS ("
             "SELECT q.recording_id, d.label, COUNT(*) AS cnt "
-            "FROM requested q JOIN detections d ON d.recording_id = q.recording_id "
+            "FROM requested q CROSS JOIN detections d ON d.recording_id = q.recording_id ", sizeof(sql));
+        if (camera_scope) safe_strcat(sql, "AND " DB_CAPTURE_CAMERA_MATCH_SQL("d", "q") " ", sizeof(sql));
+        safe_strcat(sql,
             "WHERE d.source != 'external_motion' "
             "GROUP BY q.recording_id, d.label "
             "UNION ALL "
             "SELECT q.recording_id, d.label, COUNT(*) AS cnt "
-            "FROM requested q JOIN detections d "
-            "ON d.stream_name = q.stream_name "
+            "FROM requested q CROSS JOIN detections d "
+            "ON ", sizeof(sql));
+        safe_strcat(sql, camera_scope ? DB_CAPTURE_CAMERA_MATCH_SQL("d", "q") : "d.stream_name = q.stream_name", sizeof(sql));
+        safe_strcat(sql, " "
             "AND d.timestamp >= q.start_time AND d.timestamp <= q.end_time "
             "WHERE (d.recording_id IS NULL OR d.recording_id != q.recording_id) "
             "AND d.source != 'external_motion' "
-            "GROUP BY q.recording_id, d.label "
-            "UNION ALL "
-            "SELECT q.recording_id, d.label, COUNT(*) AS cnt "
-            "FROM requested q JOIN detections d "
-            "ON d.stream_name = q.stream_name AND d.timestamp <= q.end_time "
-            "WHERE d.source = 'external_motion' "
-            "AND COALESCE(d.event_end_time, CAST(strftime('%s','now') AS INTEGER)) >= q.start_time "
-            "GROUP BY q.recording_id, d.label"
-            ") "
+            "GROUP BY q.recording_id, d.label ", sizeof(sql));
+        /* Keep the two disjoint identity branches separate for intervals.
+         * An OR join here lets SQLite build a source-only automatic index by
+         * scanning the entire detections archive for every page request. */
+        for (int legacy = 0; legacy < (camera_scope ? 2 : 1); legacy++) {
+            safe_strcat(sql,
+                "UNION ALL SELECT q.recording_id, d.label, COUNT(*) AS cnt "
+                "FROM requested q ", sizeof(sql));
+            if (camera_scope && legacy) {
+                safe_strcat(sql,
+                    "CROSS JOIN streams legacy ON legacy.camera_uuid = " DB_CAPTURE_CAMERA_IDENTITY_SQL("q") " "
+                    "CROSS JOIN detections d ON d.stream_name = legacy.name "
+                    "AND (d.camera_uuid IS NULL OR d.camera_uuid = '') ", sizeof(sql));
+            } else {
+                safe_strcat(sql, "CROSS JOIN detections d ON ", sizeof(sql));
+                safe_strcat(sql, camera_scope
+                    ? "d.camera_uuid = " DB_CAPTURE_CAMERA_IDENTITY_SQL("q") " "
+                    : "d.stream_name = q.stream_name ", sizeof(sql));
+            }
+            safe_strcat(sql,
+                "AND d.timestamp <= q.end_time WHERE d.source = 'external_motion' "
+                "AND COALESCE(d.event_end_time, CAST(strftime('%s','now') AS INTEGER)) >= q.start_time "
+                "GROUP BY q.recording_id, d.label ", sizeof(sql));
+        }
+        safe_strcat(sql, ") "
             "SELECT recording_id, label, SUM(cnt) AS label_count "
             "FROM label_counts GROUP BY recording_id, label "
             "ORDER BY recording_id, label_count DESC, label;",
@@ -1102,6 +1183,7 @@ int get_recording_detection_summaries_on_connection(
                                (sqlite3_int64)recording->start_time);
             sqlite3_bind_int64(stmt, param_index++,
                                (sqlite3_int64)recording->end_time);
+            sqlite3_bind_text(stmt, param_index++, recording->camera_uuid, -1, SQLITE_STATIC);
         }
 
         while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
@@ -1153,6 +1235,25 @@ int get_recording_detection_summaries(
         return -1;
     }
     int result = get_recording_detection_summaries_on_connection(
+        db, recordings, count, summaries);
+    db_close_readonly_connection(db);
+    return result;
+}
+int get_recording_detection_summaries_for_cameras(
+    const recording_metadata_t *recordings, int count,
+    recording_detection_summary_t *summaries) {
+    if (!recordings || count <= 0 || !summaries) {
+        return -1;
+    }
+
+    /* Page enrichment reads a private read-only WAL snapshot so the list
+     * endpoint never queues behind the shared writer mutex. */
+    sqlite3 *db = NULL;
+    if (db_open_readonly_connection(&db) != 0) {
+        log_error("Database not initialized");
+        return -1;
+    }
+    int result = get_recording_detection_summaries_for_cameras_on_connection(
         db, recordings, count, summaries);
     db_close_readonly_connection(db);
     return result;
@@ -1336,6 +1437,64 @@ int get_unique_detection_labels_for_streams(
     if (db_open_readonly_connection(&db) != 0) return -1;
     int count = get_unique_detection_labels_for_streams_on_connection(
         db, stream_names, stream_count, labels, max_labels);
+    db_close_readonly_connection(db);
+    return count;
+}
+
+/* UUID and legacy branches are separate so the captured rows use the
+ * existing (camera_uuid,label,...) index. Only NULL/empty captures use the
+ * current stream-name lookup; supplied UUIDs are never re-resolved by name. */
+int get_unique_detection_labels_for_cameras_on_connection(
+    sqlite3 *db, const char *const *camera_uuids, int camera_count,
+    char labels[][MAX_LABEL_LENGTH], int max_labels) {
+    if (!camera_uuids || camera_count <= 0 || !labels || max_labels <= 0) return 0;
+    if (!db) return -1;
+    memset(labels, 0, (size_t)max_labels * MAX_LABEL_LENGTH);
+    const char *queries[] = {
+        "SELECT MIN(label) FROM detections WHERE camera_uuid=? AND label>? "
+        "AND label IS NOT NULL AND TRIM(label)<>'';",
+        "SELECT MIN(label) FROM detections WHERE stream_name=(SELECT name FROM streams WHERE camera_uuid=?) "
+        "AND label>? AND label IS NOT NULL AND TRIM(label)<>'' "
+        "AND (camera_uuid IS NULL OR camera_uuid='');"
+    };
+    int count = 0;
+    for (size_t branch = 0; branch < sizeof(queries)/sizeof(queries[0]); branch++) {
+        sqlite3_stmt *stmt = NULL;
+        if (sqlite3_prepare_v2(db, queries[branch], -1, &stmt, NULL) != SQLITE_OK) return -1;
+        for (int camera = 0; camera < camera_count; camera++) {
+            if (!camera_uuids[camera] || !camera_uuids[camera][0]) continue;
+            char *cursor = NULL;
+            for (int step = 0; step < max_labels; step++) {
+                sqlite3_reset(stmt);
+                sqlite3_clear_bindings(stmt);
+                sqlite3_bind_text(stmt, 1, camera_uuids[camera], -1, SQLITE_STATIC);
+                sqlite3_bind_text(stmt, 2, cursor ? cursor : "", -1, SQLITE_TRANSIENT);
+                if (sqlite3_step(stmt) != SQLITE_ROW) {
+                    free(cursor); sqlite3_finalize(stmt); return -1;
+                }
+                if (sqlite3_column_type(stmt, 0) == SQLITE_NULL) break;
+                const char *label = (const char *)sqlite3_column_text(stmt, 0);
+                char *next = label ? strdup(label) : NULL;
+                if (!next) { free(cursor); sqlite3_finalize(stmt); return -1; }
+                free(cursor);
+                cursor = next;
+                count = merge_unique_label(labels, count, max_labels, label);
+            }
+            free(cursor);
+        }
+        sqlite3_finalize(stmt);
+    }
+    return count;
+}
+
+int get_unique_detection_labels_for_cameras(
+    const char *const *camera_uuids, int camera_count,
+    char labels[][MAX_LABEL_LENGTH], int max_labels) {
+    if (!camera_uuids || camera_count <= 0 || !labels || max_labels <= 0) return 0;
+    sqlite3 *db = NULL;
+    if (db_open_readonly_connection(&db) != 0) return -1;
+    int count = get_unique_detection_labels_for_cameras_on_connection(
+        db, camera_uuids, camera_count, labels, max_labels);
     db_close_readonly_connection(db);
     return count;
 }

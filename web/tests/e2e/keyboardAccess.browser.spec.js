@@ -4,6 +4,7 @@
  * Run with: npm --prefix web run test:e2e -- --testPathPatterns='keyboardAccess\.browser\.spec\.js$'
  */
 const path = require('node:path');
+const { fleetLocations } = require('./fleetFixtures');
 
 const FIXTURE = `
   import { h, render, Fragment } from 'preact';
@@ -18,7 +19,7 @@ const FIXTURE = `
   import { RecordingsGrid } from './js/components/preact/recordings/RecordingsGrid.tsx';
 
   const root = document.getElementById('root');
-  window.calls = { closed: [], played: [] };
+  window.calls = { closed: [], played: [], applied: [] };
 
   function Layer({ name, onEscape, active }) {
     useEscapeKey(onEscape, active);
@@ -42,10 +43,10 @@ const FIXTURE = `
   const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
   window.fetch = async (url) => {
     if (String(url) === '/api/locations') {
-      return json({ locations: [
-        { uuid: 'loc-1', name: 'Orchard', parent_uuid: null, type: 'site' },
-        { uuid: 'loc-2', name: 'Packing', parent_uuid: 'loc-1', type: 'building' },
-      ] });
+      return json(${JSON.stringify(fleetLocations([
+        { uuid: '00000000-0000-4000-8000-000000000001', name: 'Orchard', child_count: 1 },
+        { uuid: '00000000-0000-4000-8000-000000000002', name: 'Packing', parent_uuid: '00000000-0000-4000-8000-000000000001', type: 'building' },
+      ]))});
     }
     return json({});
   };
@@ -60,7 +61,7 @@ const FIXTURE = `
     grid: () => h(Grid),
     navigator: () => h(QueryClientProvider, { client }, h(LiveOperatorNavigator, {
       streams: [], orderedStreams: [], columns: 2, rows: 1, operatorSurface: 'grid', selectedPlanUuid: '',
-      onFilterChange: noop, onSurfaceChange: noop, onSelectPlan: noop, onApplyLayout: noop,
+      onFilterChange: noop, onSurfaceChange: noop, onSelectPlan: noop, onApplyLayout: layout => window.calls.applied.push(layout),
     })),
     recordings: (hiddenColumns) => h(RecordingsGrid, {
       collapsed: false, toggleCollapsed: noop, recordings: [recording], selectedRecordings: {}, toggleRecordingSelection: noop,
@@ -113,7 +114,7 @@ afterAll(async () => { if (browser) await browser.close(); });
 const settle = () => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve))));
 const mount = async (name, arg) => {
   await page.evaluate(() => {
-    window.calls = { closed: [], played: [] };
+    window.calls = { closed: [], played: [], applied: [] };
     document.documentElement.dir = 'ltr';
     window.unmount();
   });
@@ -203,6 +204,37 @@ describe('recording schedule grid', () => {
 });
 
 describe('Live navigator location tree', () => {
+  it('uses the same row button for Enter, Space, label and disclosure activation', async () => {
+    await mount('navigator');
+    const row = page.getByRole('button', { name: /Orchard/ });
+    const child = page.getByRole('button', { name: /Packing/ });
+    await child.waitFor();
+    await row.focus();
+    await page.keyboard.press('Enter');
+    await child.waitFor({ state: 'detached' });
+    expect(await row.getAttribute('aria-expanded')).toBe('false');
+    expect(await row.evaluate(el => el.classList.contains('is-selected'))).toBe(true);
+    await page.keyboard.press('Space');
+    await child.waitFor();
+    expect(await row.getAttribute('aria-expanded')).toBe('true');
+
+    // Clicking the decorative caret bubbles once to the row button.
+    await row.locator('.live-location-name > span').first().click();
+    await child.waitFor({ state: 'detached' });
+    expect(await row.getAttribute('aria-expanded')).toBe('false');
+    await row.getByText('Orchard', { exact: true }).click();
+    await child.waitFor();
+    expect(await row.getAttribute('aria-expanded')).toBe('true');
+
+    await child.click();
+    expect(await child.getAttribute('aria-expanded')).toBeNull();
+    expect(await child.evaluate(el => el.classList.contains('is-selected'))).toBe(true);
+    expect(await row.getAttribute('aria-expanded')).toBe('true');
+    await row.dblclick();
+    expect(await page.evaluate(() => window.calls.applied)).toEqual([{ cameraUuids: [], columns: 2, rows: 1 }]);
+    expect(await row.getAttribute('aria-expanded')).toBe('true');
+  });
+
   it('expands and collapses from the keyboard, mirrored in RTL', async () => {
     await mount('navigator');
     const row = page.locator('.live-location-row', { hasText: 'Orchard' });

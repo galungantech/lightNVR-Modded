@@ -4,11 +4,23 @@ This folder collects Product Requirement Documents that scope larger pieces of w
 
 Each PRD is self-contained: problem, goals, requirements, phasing, acceptance, related issues.
 
-**Status review**: Reconciled against `main` on 2026-08-25. “Implemented” below
+**Status review**: Engineering and the mobile viewing follow-up reconciled against
+`main` at `aa120dde` on 2026-11-07; other entries retain their separately dated
+reviews (including the 2026-08-25 UXD baseline). “Implemented” below
 means the planned implementation slices are present; manual, beta, performance,
 or hardware acceptance may still remain where the individual PRD says so.
 
 ## Active PRDs
+
+### Engineering
+
+| PRD | Topic | Current state |
+| --- | --- | --- |
+| [Engineering 01 — Hardening & Permission-Aware API Contracts](ENG_01_Safety_Contracts_TypeScript.md) | Canonical OpenAPI JSON, discovery scoped to the current user/token, API validation, and operational regressions | #835–#838 merged: 232 OpenAPI operations and nine explicit protocol/internal dispositions cover the 241-route inventory. Local recovery qualification merged in #858. Remaining F13/F14 deferred; F15 documentation reconciled, production acceptance open. C-authoritative curated Rust conversion is under discussion, not committed; encryption remains deferred |
+
+Engineering 01 was restored from the superseded #693 PRD and rewritten against
+current `main`. Its earlier engineering-foundation task tracker is retired.
+The other roadmap entries below retain their separately dated status reviews.
 
 ### UX / Design
 
@@ -16,7 +28,8 @@ or hardware acceptance may still remain where the individual PRD says so.
 | --- | --- | --- |
 | [UXD 01 — Mobile-First UX Foundation](UXD_01_MobileFirstFoundation.md) | T1–T6 implemented; beta, Lighthouse, and final cross-device/manual outcome validation remains | [#399](https://github.com/opensensor/lightNVR/issues/399) |
 | [UXD 02 — Live View Ergonomics](UXD_02_LiveViewErgonomics.md) | P0–P3 implementation present; manual coarse-pointer, iOS/Android fullscreen, and cross-device acceptance remains | [#326](https://github.com/opensensor/lightNVR/issues/326), [#397](https://github.com/opensensor/lightNVR/issues/397), [#399](https://github.com/opensensor/lightNVR/issues/399) |
-| [UXD 03 — Recordings & Timeline UX](UXD_03_RecordingsAndTimeline.md) | P0–P3 implementation complete; large/busy-day, manual, and beta acceptance remains | [#331](https://github.com/opensensor/lightNVR/issues/331), [#399](https://github.com/opensensor/lightNVR/issues/399) |
+| [UXD 03 — Recordings & Timeline UX](UXD_03_RecordingsAndTimeline.md) | P0–P3 implementation complete; populated/busy-day automated audit merged in #859. Manual/device and beta acceptance remains | [#331](https://github.com/opensensor/lightNVR/issues/331), [#399](https://github.com/opensensor/lightNVR/issues/399) |
+| [Mobile viewing follow-up](UXD_Mobile_Viewing.md) | #840 layout, #855 thumbnail-free Grid/navigation, #859 Timeline/Investigation workflows and follow-up fixes merged. Complete real-camera handoff and physical-device qualification deferred; not gates for Rust exploration | Phone live-view review, 2026-11-07 |
 
 ### Features
 
@@ -24,6 +37,7 @@ or hardware acceptance may still remain where the individual PRD says so.
 | --- | --- |
 | [Recording Retention Policies](PRD_Recording_Retention_Policies.md) | Per-stream retention and deletion policies (implemented — see [the summary](../internal/SUMMARY_Recording_Retention.md) and [the API quick reference](../QUICKREF_Retention_API.md)) |
 | [Storage 02 — Hot Storage & External Recording Archive](STORAGE_02_Hot_Cold_Archive.md) | Draft (2026-09-13): bounded hot PVC storage, dedicated bucket or mounted archive, protected indefinite retention, and unified playback and cleanup; extends Storage 01 |
+| [Integration 01 — Event Evidence & YA-WAMF](INT_01_Event_Enrichment_YAWAMF.md) | In progress (2026-11-08): P1 snapshot integration and P2 classification feedback implemented on unreleased branches in both repos, unit and contract tested; [deployment recipe](../integrations/YA_WAMF.md) published. Cross-repo E2E (X1, X3), saturation gate (X2) and real-camera pilot (A14) remain |
 
 ### Fleet control plane
 
@@ -34,7 +48,7 @@ and policy primitives established earlier.
 | Order | PRD | Outcome | Implementation state |
 | --- | --- | --- | --- |
 | 1 | [Fleet 01 — Camera Identity & Organization](FLEET_01_Camera_Identity_Organization.md) | Stable camera identity, location hierarchy, tags, and smart collections | P0–P3 implemented; acceptance reconciliation remains |
-| 2 | [Fleet 02 — Scoped Authorization & Audit](FLEET_02_Scoped_Authorization_Audit.md) | Action-level permissions over reusable fleet scopes | P0–P2 substantially implemented; groups, schedules, and direct-go2rtc audio boundary remain; SSO deferred |
+| 2 | [Fleet 02 — Scoped Authorization & Audit](FLEET_02_Scoped_Authorization_Audit.md) | Action-level permissions over reusable fleet scopes | P0–P2 substantially implemented; groups and schedules remain; audio authority landed in #835 with compatible-fork/deployment limits; SSO deferred |
 | 3 | [Fleet 03 — Event Bus & MQTT Routes](FLEET_03_Event_Bus_MQTT_Routes.md) | Durable provider-neutral events for cloud and automation consumers | P0–P2 complete; P3 in progress with health, recording-gap, storage-pressure, and storage-target transition producers wired |
 | 4 | [Fleet 04 — Fleet Explorer & Bulk Operations](FLEET_04_Fleet_Explorer_Bulk_Operations.md) | Operate hundreds of cameras through search, queues, templates, and jobs | In progress — much of P0 plus personal/shared saved views and offline/degraded queues are present; scalability acceptance, remaining P1 queues, and P2–P4 remain |
 | 5 | [Storage 01 — Multi-Target Storage Lifecycle](STORAGE_01_Multi_Target_Lifecycle.md) | Policy-driven placement, migration, retention, and capacity management | P0–P3 implementation complete; external adapters await a concrete integration, while field/scale and event-upgrade acceptance remain |

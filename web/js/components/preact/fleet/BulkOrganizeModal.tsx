@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'preact/hooks';
-import { fetchJSON } from '../../../query-client.ts';
+import { fleetWriteJSON } from '../../../api/fleetWrites.ts';
 import { showStatusMessage } from '../ToastContainer.tsx';
 import { applyBulkOrganization, buildLocationRows } from './fleetOrganization.ts';
 import type {
@@ -52,7 +52,7 @@ export function BulkOrganizeModal({ cameras, locations, tags, onComplete, onClos
       const result = await applyBulkOrganization(
         cameras,
         { locationUuid, tagOperation, tagUuids },
-        fetchJSON,
+        fleetWriteJSON,
         (completed, total) => setProgress({ completed, total })
       );
       await onComplete(result);
@@ -71,7 +71,7 @@ export function BulkOrganizeModal({ cameras, locations, tags, onComplete, onClos
   };
 
   return (
-    <div role="presentation" className="fixed inset-0 z-40 flex items-center justify-center bg-black/55 p-3" onMouseDown={(event) => { if (!working && event.target === event.currentTarget) onClose(); }}>
+    <div role="presentation" className="app-modal-overlay fixed inset-0 flex items-center justify-center bg-black/55 p-3" onMouseDown={(event) => { if (!working && event.target === event.currentTarget) onClose(); }}>
       <div role="dialog" aria-modal="true" aria-labelledby="bulk-organize-title" className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-border bg-card text-card-foreground shadow-2xl">
         <header className="flex items-start justify-between border-b border-border p-4">
           <div>

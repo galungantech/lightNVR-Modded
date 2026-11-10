@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'preact/hooks';
-import { fetchJSON, useMutation, useQuery, useQueryClient } from '../../../query-client.ts';
+import {getWorkspaces,updateWorkspaces} from '../../../api/system.ts';
+import { useEffect, useState, useRef } from 'preact/hooks';
+import { useMutation, useQuery, useQueryClient } from '../../../query-client.ts';
 import { showStatusMessage } from '../ToastContainer.tsx';
 import {
   WORKSPACE_KEYS,
@@ -26,12 +27,9 @@ interface WorkspacesTabProps {
 
 export function WorkspacesTab({ t }: WorkspacesTabProps) {
   const queryClient = useQueryClient();
-  const { data, isLoading, error } = useQuery<WorkspacesResponse>(
-    ['ui-workspaces'],
-    '/api/ui/workspaces',
-    { timeout: 10000, retries: 1 }
-  );
+  const { data, isLoading, error } = useQuery<WorkspacesResponse>({queryKey:['ui-workspaces'],queryFn:({signal}) => getWorkspaces({signal})});
   const [visibility, setVisibility] = useState(() => workspaceVisibilityFromResponse());
+  const saveInFlight = useRef(false);
 
   useEffect(() => {
     if (data) setVisibility(workspaceVisibilityFromResponse(data));
@@ -39,12 +37,7 @@ export function WorkspacesTab({ t }: WorkspacesTabProps) {
 
   const mutation = useMutation<WorkspacesResponse, Error, Partial<Record<string, boolean>>>({
     mutationKey: ['save-ui-workspaces'],
-    mutationFn: (workspaces) => fetchJSON<WorkspacesResponse>('/api/ui/workspaces', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workspaces }),
-      timeout: 10000,
-    }),
+    mutationFn: (workspaces) => updateWorkspaces({workspaces}),
     onSuccess: (response) => {
       setVisibility(workspaceVisibilityFromResponse(response));
       queryClient.setQueryData(['ui-workspaces'], response);
@@ -58,9 +51,13 @@ export function WorkspacesTab({ t }: WorkspacesTabProps) {
     onError: (saveError) => {
       showStatusMessage(t('workspaces.saveError', { message: saveError.message }), 'error', 6000);
     },
+    onSettled: () => { saveInFlight.current = false; },
   });
 
   const toggle = (key: string, visible: boolean) => {
+    // Checkbox events can repeat before the pending render disables the control.
+    if (saveInFlight.current) return;
+    saveInFlight.current = true;
     const next = { ...visibility, [key]: visible };
     setVisibility(next);
     mutation.mutate({ [key]: visible });
@@ -97,7 +94,7 @@ export function WorkspacesTab({ t }: WorkspacesTabProps) {
                   type="checkbox"
                   className="h-5 w-5 shrink-0 rounded border-input"
                   checked={visibility[workspace.key as WorkspaceKey] !== false}
-                  disabled={!workspace.configurable || mutation.isPending}
+                  disabled={!workspace.configurable || mutation.isLoading}
                   onChange={(event) => toggle(workspace.key as string, event.currentTarget.checked)}
                   aria-label={t('workspaces.showWorkspace', { name: label })}
                 />

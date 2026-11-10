@@ -1,8 +1,9 @@
+import {getHostHealthIncidents} from '../../../api/system.ts';
 import { useState } from 'preact/hooks';
 import { useQuery } from '../../../query-client.ts';
 import { useI18n } from '../../../i18n.ts';
 import { formatBytes } from './SystemUtils.ts';
-import type { HealthIncidentsResponse, HealthObservation } from '../../../types/system.ts';
+import type { HealthIncidentsResponse, HealthStoredObservation } from '../../../types/system.ts';
 
 const HISTORY_PAGE_SIZE = 20;
 
@@ -11,7 +12,7 @@ export function buildIncidentHistoryUrl(cursor = '') {
   return `/api/system/health/incidents?limit=${HISTORY_PAGE_SIZE}&include_closed=true${suffix}`;
 }
 
-function formatHistoryValue(observation: HealthObservation | null | undefined, unknown: string) {
+function formatHistoryValue(observation: HealthStoredObservation | null | undefined, unknown: string) {
   if (!observation || observation.capability !== 'available' || !Number.isFinite(observation.value)) return unknown;
   if (observation.unit === 'ratio') return `${((observation.value as number) * 100).toFixed(1)}%`;
   if (observation.unit === 'bytes') return formatBytes(observation.value as number);
@@ -44,12 +45,7 @@ export function HealthIncidentHistory() {
   const { t } = useI18n();
   const [cursor, setCursor] = useState('');
   const [previous, setPrevious] = useState<string[]>([]);
-  const query = useQuery<HealthIncidentsResponse>(
-    ['systemHealthIncidents', cursor],
-    buildIncidentHistoryUrl(cursor),
-    { timeout: 15000, retries: 1 },
-    { staleTime: 30000, refetchOnWindowFocus: false }
-  );
+  const query = useQuery<HealthIncidentsResponse>({queryKey:['systemHealthIncidents',cursor],queryFn:({signal}) => getHostHealthIncidents({limit:HISTORY_PAGE_SIZE,include_closed:true,cursor:cursor || undefined},{signal}),staleTime:30000,refetchOnWindowFocus:false});
   const incidents = query.data?.incidents || [];
   const nextCursor = query.data?.next_cursor || '';
   const goNext = () => {

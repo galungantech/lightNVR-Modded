@@ -1,3 +1,4 @@
+import { RecordingsNavigation } from '../recordings/RecordingsNavigation.tsx';
 /**
  * LightNVR Timeline Page Component
  * Main component for the timeline view
@@ -14,6 +15,7 @@ import { BatchDownloadModal } from '../BatchDownloadModal.tsx';
 import { showStatusMessage } from '../ToastContainer.tsx';
 import { LoadingIndicator } from '../LoadingIndicator.tsx';
 import { useQuery } from '../../../query-client.ts';
+import { fetchJSON } from '../../../fetch-utils.ts';
 import { useI18n } from '../../../i18n.ts';
 import { isReduceMotionActive } from '../../../utils/reduceMotion.ts';
 import { fetchAllStreamSummaries } from '../../../utils/stream-summaries.ts';
@@ -38,8 +40,10 @@ import {
   getLocalDayBounds,
   getTimelineDayLengthHours,
   localClockTimeToTimestamp,
+  normalizeTimelineRange,
   panTimelineRange,
   reconcileTimelineSegments,
+  reconcileTimelineSelection,
   resolveActiveSegmentIndex,
   timelineOffsetToTimestamp,
   timestampToTimelineOffset,
@@ -152,6 +156,23 @@ const timelineState: TimelineState = {
     if (this.isNotifying) {
       this.pendingUpdates = { ...this.pendingUpdates, ...newState };
       return;
+    }
+
+    // Follow recording changes across gaps without undoing deliberate pan/zoom.
+    // Ordinary media-clock updates do not recenter a view the operator has moved.
+    if (newState.currentSegmentIndex !== undefined && newState.currentSegmentIndex >= 0 &&
+        newState.currentSegmentIndex !== this.currentSegmentIndex &&
+        newState.currentTime != null && newState.timelineStartHour === undefined &&
+        newState.timelineEndHour === undefined && !this.userControllingCursor) {
+      const day = newState.selectedDate ?? this.selectedDate;
+      const hour = timestampToTimelineOffset(newState.currentTime, day);
+      const start = this.timelineStartHour ?? 0;
+      const end = this.timelineEndHour ?? getTimelineDayLengthHours(day);
+      if (hour !== null && (hour < start || hour > end)) {
+        const range = end - start;
+        const next = normalizeTimelineRange(hour - range / 2, hour + range / 2, getTimelineDayLengthHours(day));
+        newState = {...newState, timelineStartHour: next.startHour, timelineEndHour: next.endHour};
+      }
     }
 
     Object.assign(this, newState);
@@ -272,6 +293,8 @@ export function TimelinePage() {
   const recordingIds = idsMode ? urlParams.ids : '';
 
   // State
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const [contextOpen, setContextOpen] = useState(false);
   const [streamsList, setStreamsList] = useState<StreamSummary[]>([]);
   const [selectedStream, setSelectedStream] = useState(urlParams.stream);
   const [selectedCameraUuid, setSelectedCameraUuid] = useState(urlParams.cameraUuid);
@@ -286,6 +309,23 @@ export function TimelinePage() {
     urlParams.nav === 'fine' ? 'fine' : 'broad'
   );
   const [timelineContainer, setTimelineContainer] = useState<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const closeDisclosure = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (event.key !== 'Escape' || event.defaultPrevented || !(target instanceof Element) ||
+          !target.closest('.timeline-page') || target.closest('[role="dialog"]')) return;
+      if (optionsOpen) {
+        setOptionsOpen(false);
+        document.getElementById('timeline-options-toggle')?.focus();
+      } else if (contextOpen) {
+        setContextOpen(false);
+        document.getElementById('timeline-context-toggle')?.focus();
+      }
+    };
+    window.addEventListener('keydown', closeDisclosure);
+    return () => window.removeEventListener('keydown', closeDisclosure);
+  }, [optionsOpen, contextOpen]);
 
   // Refs
   const timelineContainerRef = useCallback((node: HTMLDivElement | null) => {
@@ -881,8 +921,7 @@ export function TimelinePage() {
     });
   }, [idsMode, idsTimelineSegments, selectedRecordingMap]);
 
-  const loadSegmentsIntoTimeline = useCallback((rawSegments: TimelineSegment[] | null | undefined, effectiveDate: string, options: { successMessage?: string | null } = {}) => {
-    const { successMessage = null } = options;
+  const loadSegmentsIntoTimeline = useCallback((rawSegments: TimelineSegment[] | null | undefined, effectiveDate: string) => {
     const segmentsCopy: TimelineSegment[] = JSON.parse(JSON.stringify(rawSegments || []));
 
     if (segmentsCopy.length === 0) {
@@ -1044,9 +1083,6 @@ export function TimelinePage() {
 
     }
 
-    if (successMessage) {
-      showStatusMessage(successMessage, 'success');
-    }
     return true;
   }, []);
 
@@ -1143,8 +1179,6 @@ export function TimelinePage() {
           // Build a pseudo-stream name from unique streams
           const uniqueStreams = [...new Set(segs.map(s => s.stream))];
           setSelectedStream(uniqueStreams.join(', '));
-
-          showStatusMessage(t(availableDates.length === 1 ? 'timeline.loadedSelectedSegmentsOneDay' : 'timeline.loadedSelectedSegmentsManyDays', { count: segs.length, days: availableDates.length }), 'success');
         } else {
           setIdsTimelineSegments([]);
           loadSegmentsIntoTimeline([], selectedDate);
@@ -1219,18 +1253,16 @@ export function TimelinePage() {
     data: timelineData,
     isLoading: isLoadingTimeline,
     error: timelineError,
-  } = useQuery<TimelineSegmentsResponse>(
-    ['timeline-segments', selectedStream, selectedCameraUuid, selectedDate],
-    timelineUrl as string,
-    {
-      timeout: 30000, // 30 second timeout
-      retries: 2,     // Retry twice
-      retryDelay: 1000 // 1 second between retries
-    },
-    {
-      enabled: !!timelineUrl && !idsMode
-    }
-  );
+    refetch: refetchTimeline,
+  } = useQuery<TimelineSegmentsResponse>({
+    queryKey: ['timeline-segments', selectedStream, selectedCameraUuid, selectedDate],
+    queryFn: ({ signal }) => fetchJSON<TimelineSegmentsResponse>(timelineUrl!, {
+      signal, timeout: 30000, retries: 0,
+    }),
+    // Retrying timed-out work can queue more expensive queries on the server.
+    retry: false,
+    enabled: !!timelineUrl && !idsMode,
+  });
 
   // Process timeline data when it arrives
   useEffect(() => {
@@ -1254,24 +1286,26 @@ export function TimelinePage() {
       return;
     }
 
-    loadSegmentsIntoTimeline(timelineSegments, selectedDate, {
-      successMessage: `Loaded ${timelineSegments.length} recording segments`
-    });
+    loadSegmentsIntoTimeline(timelineSegments, selectedDate);
   }, [timelineData, timelineError, selectedDate, loadSegmentsIntoTimeline]);
 
-  // Transparent polling: silently fetch for new recordings every 30 s (normal mode only)
+  // Wait for the initial load, then leave 10 seconds between completed polls.
+  // A fixed interval can pile up queries when a busy server responds slowly.
   useEffect(() => {
-    if (idsMode || !timelineUrl) return;
+    if (idsMode || !timelineUrl || isLoadingTimeline || timelineError || !timelineData) return;
 
     const POLL_INTERVAL_MS = 10000;
     let fadeTimeoutId: TimeoutId | null = null;
     let cancelled = false;
+    let pollTimeoutId: TimeoutId;
+    const controller = new AbortController();
 
     const pollForNewRecordings = async () => {
       try {
-        const response = await fetch(timelineUrl);
-        if (!response.ok) return;
-        const data: TimelineSegmentsResponse = await response.json();
+        const data = await fetchJSON<TimelineSegmentsResponse>(timelineUrl, {
+          signal: controller.signal, timeout: 30000, retries: 0,
+        });
+        if (cancelled) return;
         const polledSegments = data.segments || [];
         setDetectionIntervals(data.detection_intervals || []);
 
@@ -1288,22 +1322,26 @@ export function TimelinePage() {
 
         // Use polled segments as the authoritative list
         const updated = authoritative.sort((a, b) => a.start_timestamp - b.start_timestamp);
+        const applySegments = (next: TimelineSegment[]) => {
+          // Read the current selection for each phase, including any seek made
+          // while removed rows were fading. The index belongs to this exact list.
+          const selection = reconcileTimelineSelection(timelineState, next);
+          setSegments(next);
+          timelineState.setState(selection);
+        };
         if (removedSegs.length > 0) {
           const fading = [
             ...updated,
             ...removedSegs.map((segment) => ({ ...segment, _removing: true })),
           ].sort((a, b) => a.start_timestamp - b.start_timestamp);
-          setSegments(fading);
-          timelineState.setState({ timelineSegments: fading });
+          applySegments(fading);
           clearTimeout(fadeTimeoutId as TimeoutId);
           fadeTimeoutId = setTimeout(() => {
             if (cancelled) return;
-            setSegments(updated);
-            timelineState.setState({ timelineSegments: updated });
+            applySegments(updated);
           }, 100);
         } else {
-          setSegments(updated);
-          timelineState.setState({ timelineSegments: updated });
+          applySegments(updated);
         }
 
         if (addedSegs.length > 0) {
@@ -1322,16 +1360,19 @@ export function TimelinePage() {
         }
       } catch (err) {
         console.debug('Timeline poll error (suppressed):', err);
+      } finally {
+        if (!cancelled) pollTimeoutId = setTimeout(pollForNewRecordings, POLL_INTERVAL_MS);
       }
     };
 
-    const intervalId = setInterval(pollForNewRecordings, POLL_INTERVAL_MS);
+    pollTimeoutId = setTimeout(pollForNewRecordings, POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
-      clearInterval(intervalId);
+      controller.abort();
+      clearTimeout(pollTimeoutId);
       clearTimeout(fadeTimeoutId as TimeoutId);
     };
-  }, [idsMode, selectedStream, timelineUrl]);
+  }, [idsMode, timelineUrl, isLoadingTimeline, timelineError, timelineData]);
 
   useEffect(() => {
     if (!idsMode || idsAvailableDates.length === 0) return undefined;
@@ -1350,7 +1391,7 @@ export function TimelinePage() {
   // local segments list (creates the visual gap) and advance to the next segment.
   useEffect(() => {
     const handleTimelineDeleted = (e: Event) => {
-      const deletedId = (e as CustomEvent<{ id: number }>).detail.id;
+      const deletedId = (e as CustomEvent<{ id: TimelineSegment['id'] }>).detail.id;
 
       setSegments(prev => {
         const idx = prev.findIndex(s => s.id === deletedId);
@@ -1423,6 +1464,15 @@ export function TimelinePage() {
       return <LoadingIndicator message={idsMode ? "Loading selected recordings..." : "Loading timeline data..."} />;
     }
 
+    if (!idsMode && timelineError) {
+      return <div role="alert" className="py-12 text-center">
+        <p>{t('timeline.errorLoadingData', { message: timelineError.message })}</p>
+        <button type="button" className="btn-secondary mt-3" onClick={() => void refetchTimeline()}>
+          {t('common.retry')}
+        </button>
+      </div>;
+    }
+
     if (segments.length === 0) {
       return (
         <div className="flex flex-col items-center justify-center py-12 text-center">
@@ -1437,7 +1487,7 @@ export function TimelinePage() {
     }
 
     return (
-      <>
+      <div className="timeline-workspace" data-options-open={optionsOpen}>
         {/* Video player */}
         <TimelinePlayer
           videoElementRef={videoElementRef}
@@ -1447,9 +1497,9 @@ export function TimelinePage() {
         />
 
         {/* Playback controls (includes time display) */}
-        <TimelineControls />
+        <TimelineControls optionsOpen={optionsOpen} onToggleOptions={() => setOptionsOpen(open => !open)} />
 
-        <div className="mb-2 flex justify-end">
+        <div className="timeline-keyboard-hint mb-2 flex justify-end">
           <span
             data-testid="timeline-keyboard-nav-mode"
             className="rounded border border-border bg-secondary px-2 py-1 text-[11px] text-muted-foreground"
@@ -1475,14 +1525,14 @@ export function TimelinePage() {
           {/* Inline hint — hidden on small screens where it would overlap and
               obscure the (already compressed) timeline segments (#453). The same
               guidance is available in the collapsible "How to use" help panel. */}
-          <div className="hidden sm:block absolute bottom-1 right-2 text-[10px] text-muted-foreground bg-card/75 px-1.5 py-0.5 rounded">
+          <div className="timeline-inline-hint hidden sm:block absolute bottom-1 right-2 text-[10px] text-muted-foreground bg-card/75 px-1.5 py-0.5 rounded">
             {t('timeline.inlineHint')}
           </div>
         </div>
 
         {/* Legend — explains the segment colours so users know what the green
             (detection) bars mean without hunting through the help panel (#454). */}
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mb-2 text-[11px] text-muted-foreground">
+        <div className="timeline-legend flex flex-wrap items-center gap-x-4 gap-y-1 mb-2 text-[11px] text-muted-foreground">
           <span className="inline-flex items-center gap-1.5">
             <span
               className="inline-block w-3 h-3 rounded-sm"
@@ -1504,106 +1554,36 @@ export function TimelinePage() {
             {t('timeline.legend.detection')}
           </span>
         </div>
-      </>
+      </div>
     );
   };
 
   // Get return URL for "Refine Selections" link
   const returnUrl = idsMode ? (sessionStorage.getItem(RECORDINGS_RETURN_URL_KEY) || 'recordings.html') : null;
-  const investigationParams = new URLSearchParams();
-  if (selectedStream) investigationParams.set('stream', selectedStream);
-  const investigationBounds = getLocalDayBounds(selectedDate);
-  if (investigationBounds) {
-    investigationParams.set('start', String(investigationBounds.startTimestamp));
-    investigationParams.set('end', String(investigationBounds.endTimestamp));
-  }
-  if (Number.isFinite(timelineState.currentTime)) {
-    investigationParams.set('cursor', String(Math.floor(timelineState.currentTime as number)));
-  }
-  const investigationHref = `investigation.html?${investigationParams.toString()}`;
+  const navigationBounds = getLocalDayBounds(selectedDate);
 
   return (
     <div className="timeline-page">
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mb-4">
+      <div className="timeline-heading flex flex-wrap items-center gap-x-4 gap-y-2 mb-4">
         <h1 className="text-2xl font-bold">
           {idsMode ? t('timeline.selectedRecordingsTimeline') : t('timeline.timelinePlayback')}
         </h1>
-        <div className="flex max-w-full overflow-x-auto whitespace-nowrap">
-          <a
-            href={returnUrl || 'recordings.html'}
-            className="px-3 py-1 rounded-s-md text-sm"
-            style={{
-              backgroundColor: 'hsl(var(--secondary))',
-              color: 'hsl(var(--secondary-foreground))'
-            }}
-            onMouseOver={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--secondary) / 0.8)'}
-            onFocus={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--secondary) / 0.8)'}
-            onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--secondary))'}
-            onBlur={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--secondary))'}
-            onClick={() => { try { localStorage.setItem('recordings_view_mode', 'table'); } catch(e) {} }}
-          >
-            {t('recordings.table')}
-          </a>
-          <a
-            href="recordings.html"
-            className="px-3 py-1 text-sm"
-            style={{
-              backgroundColor: 'hsl(var(--secondary))',
-              color: 'hsl(var(--secondary-foreground))'
-            }}
-            onMouseOver={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--secondary) / 0.8)'}
-            onFocus={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--secondary) / 0.8)'}
-            onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--secondary))'}
-            onBlur={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--secondary))'}
-            onClick={() => { try { localStorage.setItem('recordings_view_mode', 'grid'); } catch(e) {} }}
-          >
-            {t('recordings.grid')}
-          </a>
-          <a
-            href="timeline.html"
-            className="px-3 py-1 text-sm"
-            style={{
-              backgroundColor: idsMode ? 'hsl(var(--secondary))' : 'hsl(var(--primary))',
-              color: idsMode ? 'hsl(var(--secondary-foreground))' : 'hsl(var(--primary-foreground))'
-            }}
-            onMouseOver={(e) => { if (idsMode) e.currentTarget.style.backgroundColor = 'hsl(var(--secondary) / 0.8)'; }}
-            onFocus={(e) => { if (idsMode) e.currentTarget.style.backgroundColor = 'hsl(var(--secondary) / 0.8)'; }}
-            onMouseOut={(e) => { if (idsMode) e.currentTarget.style.backgroundColor = 'hsl(var(--secondary))'; }}
-            onBlur={(e) => { if (idsMode) e.currentTarget.style.backgroundColor = 'hsl(var(--secondary))'; }}
-          >
-            {t('nav.timeline')}
-          </a>
-          <a
-            href={investigationHref}
-            className="px-3 py-1 text-sm"
-            style={{
-              backgroundColor: 'hsl(var(--secondary))',
-              color: 'hsl(var(--secondary-foreground))'
-            }}
-            onMouseOver={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--secondary) / 0.8)'}
-            onFocus={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--secondary) / 0.8)'}
-            onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--secondary))'}
-            onBlur={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--secondary))'}
-          >
-            {t('nav.investigation')}
-          </a>
-          <a
-            href="plates.html"
-            className="px-3 py-1 rounded-e-md text-sm"
-            style={{
-              backgroundColor: 'hsl(var(--secondary))',
-              color: 'hsl(var(--secondary-foreground))'
-            }}
-            onMouseOver={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--secondary) / 0.8)'}
-            onFocus={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--secondary) / 0.8)'}
-            onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--secondary))'}
-            onBlur={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--secondary))'}
-          >
-            {t('nav.plates')}
-          </a>
-        </div>
-      </div>
 
+      </div>
+      <RecordingsNavigation active="timeline" recordingsUrl={returnUrl || new URLSearchParams(window.location.search).get('return_to')}
+        streams={selectedStream ? [selectedStream] : []} cameras={selectedCameraUuid ? [selectedCameraUuid] : []}
+        start={navigationBounds?.startTimestamp} end={navigationBounds?.endTimestamp} cursor={timelineState.currentTime} />
+
+
+      <div className="timeline-context" data-context-open={contextOpen}>
+        <button type="button" id="timeline-context-toggle" className="timeline-mobile-toggle timeline-context-toggle"
+          aria-expanded={contextOpen} aria-controls="timeline-context-fields"
+          aria-label={t('timeline.cameraAndDate')}
+          onClick={() => setContextOpen(open => !open)}>
+          <span>{idsMode ? t('timeline.recordingsCount', {count: segments.length}) : selectedStream || t('nav.streams')} · {formatDisplayDate(selectedDate)}</span>
+          <span aria-hidden="true">{contextOpen ? '−' : '+'}</span>
+        </button>
+      <div id="timeline-context-fields">
       {idsMode ? (
         /* IDs mode: compact info bar */
         <div className="flex flex-wrap items-center gap-3 mb-3 px-3 py-2 bg-secondary rounded-lg text-sm">
@@ -1698,6 +1678,9 @@ export function TimelinePage() {
           )}
         </div>
       )}
+
+      </div>
+      </div>
 
       {/* Content */}
       {renderContent()}

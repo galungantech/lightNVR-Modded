@@ -1,5 +1,9 @@
+import {getWorkspaces} from '../../../api/system.ts';
+import { fleetWriteJSON } from '../../../api/fleetWrites.ts';
+import { evidenceJSON } from '../../../api/evidence.ts';
+import { listFleetLocations } from '../../../api/fleet.ts';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { fetchJSON, useQuery, useQueryClient } from '../../../query-client.ts';
+import { useQuery, useQueryClient } from '../../../query-client.ts';
 import { showStatusMessage } from '../ToastContainer.tsx';
 import { ConfirmDialog, TextInputDialog } from '../common/ModalDialog.tsx';
 import { useI18n } from '../../../i18n.ts';
@@ -81,7 +85,7 @@ function LiveEventThumbnail({ event }: LiveEventThumbnailProps) {
 }
 
 function formatEventTime(timestamp?: number) {
-  if (!timestamp) return '';
+  if (timestamp == null) return '';
   return new Intl.DateTimeFormat(undefined, {
     hour: 'numeric', minute: '2-digit', second: '2-digit',
   }).format(new Date(timestamp * 1000));
@@ -112,8 +116,12 @@ export function LiveOperatorNavigator({
 }: LiveOperatorNavigatorProps) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
-  const [collapsed, setCollapsed] = useState(() =>
-    localStorage.getItem('lightnvr-live-navigator-collapsed') === 'true');
+  const [navigatorPreference] = useState(() => window.matchMedia('(max-width: 768px)').matches
+    ? 'lightnvr-live-navigator-mobile-collapsed' : 'lightnvr-live-navigator-collapsed');
+  const [collapsed, setCollapsed] = useState(() => {
+    const stored = localStorage.getItem(navigatorPreference);
+    return stored === null ? navigatorPreference.includes('-mobile-') : stored === 'true';
+  });
   const [tab, setTab] = useState('cameras');
   const [selectedLocation, setSelectedLocation] = useState(() =>
     new URLSearchParams(window.location.search).get('location') || '');
@@ -134,22 +142,22 @@ export function LiveOperatorNavigator({
 
   const workspaceQuery = useQuery<WorkspacesResponse>({
     queryKey: ['ui-workspaces'],
-    queryFn: ({ signal }) => fetchJSON('/api/ui/workspaces', { signal }),
+    queryFn: ({ signal }) => getWorkspaces({signal}),
     staleTime: 60000,
   });
   const locationsQuery = useQuery<LiveLocationsResponse>({
     queryKey: ['fleet-locations'],
-    queryFn: ({ signal }) => fetchJSON('/api/locations', { signal }),
+    queryFn: ({ signal }) => listFleetLocations({signal}),
     staleTime: 60000,
   });
   const layoutsQuery = useQuery<LiveLayoutsResponse>({
     queryKey: ['live-layouts'],
-    queryFn: ({ signal }) => fetchJSON('/api/live/layouts', { signal }),
+    queryFn: ({ signal }) => fleetWriteJSON('/api/live/layouts', { signal }),
     staleTime: 15000,
   });
   const plansQuery = useQuery<FloorPlansResponse>({
     queryKey: ['operator-floor-plans'],
-    queryFn: ({ signal }) => fetchJSON('/api/live/plans', { signal }),
+    queryFn: ({ signal }) => fleetWriteJSON('/api/live/plans', { signal }),
     staleTime: 15000,
   });
 
@@ -224,7 +232,7 @@ export function LiveOperatorNavigator({
     queryFn: async ({ signal }) => {
       const responses = await Promise.all(buildRecentEventsRequests(
         [...effectiveCameraUuids],
-      ).map((request) => fetchJSON<LiveEventsResponse>('/api/investigations/search', {
+      ).map((request) => evidenceJSON<LiveEventsResponse>('/api/investigations/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(request),
@@ -274,7 +282,7 @@ export function LiveOperatorNavigator({
   const toggleCollapsed = () => {
     const next = !collapsed;
     setCollapsed(next);
-    localStorage.setItem('lightnvr-live-navigator-collapsed', String(next));
+    localStorage.setItem(navigatorPreference, String(next));
   };
   const toggleExpanded = (uuid: string) => {
     setExpanded((current) => {
@@ -328,7 +336,7 @@ export function LiveOperatorNavigator({
     const isShared = layoutsQuery.data?.can_share ? shareRequested : false;
     setBusy(true);
     try {
-      const layout = await fetchJSON<LiveLayout>('/api/live/layouts', {
+      const layout = await fleetWriteJSON<LiveLayout>('/api/live/layouts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(buildLiveLayoutPayload({
@@ -380,7 +388,7 @@ export function LiveOperatorNavigator({
           }),
           camera_slots: layout.camera_slots || [],
         };
-      const updated = await fetchJSON<LiveLayout>(`/api/live/layouts/${layout.uuid}`, {
+      const updated = await fleetWriteJSON<LiveLayout>(`/api/live/layouts/${layout.uuid}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...payload, revision: layout.revision }),
@@ -407,7 +415,7 @@ export function LiveOperatorNavigator({
   const deleteLayout = async (layout: LiveLayout) => {
     setBusy(true);
     try {
-      await fetchJSON(`/api/live/layouts/${layout.uuid}`, {
+      await fleetWriteJSON(`/api/live/layouts/${layout.uuid}`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ revision: layout.revision }),
@@ -430,7 +438,11 @@ export function LiveOperatorNavigator({
     return (
       <aside className="live-operator-navigator is-collapsed">
         <button type="button" className="live-navigator-expand" onClick={toggleCollapsed}
-          title={t('live.navigator.expand')} aria-label={t('live.navigator.expand')}>☰</button>
+          title={t('live.navigator.expand')} aria-label={t('live.navigator.expand')} aria-expanded={false}>
+          <span aria-hidden="true">☰</span>
+          <span className="live-mobile-label">{t('live.browseCameras')}</span>
+          <span className="live-mobile-label live-camera-count">{orderedStreams.length}</span>
+        </button>
       </aside>
     );
   }
@@ -440,12 +452,41 @@ export function LiveOperatorNavigator({
     <aside className="live-operator-navigator" aria-label={t('live.navigator.title')}>
       <div className="live-navigator-heading">
         <div><strong>{t('live.navigator.title')}</strong><small>{t('live.navigator.subtitle')}</small></div>
-        <button type="button" onClick={toggleCollapsed} title={t('live.navigator.collapse')} aria-label={t('live.navigator.collapse')}><span dir="ltr" className="rtl-flip inline-block" aria-hidden="true">‹</span></button>
+        <button type="button" onClick={toggleCollapsed} title={t('live.navigator.collapse')} aria-label={t('live.navigator.collapse')} aria-expanded={true}><span dir="ltr" className="rtl-flip inline-block" aria-hidden="true">‹</span></button>
       </div>
-      <div className="live-navigator-tabs" role="tablist">
+      <div
+        className="live-navigator-tabs"
+        role="tablist"
+        aria-label={t('live.navigator.title')}>
         {['cameras', 'plans', 'views', ...(investigationVisible ? ['events'] : [])].map((value) => (
-          <button key={value} type="button" role="tab" aria-selected={tab === value}
-            className={tab === value ? 'is-active' : ''} onClick={() => {
+          <button
+            key={value}
+            type="button"
+            id={`live-navigator-tab-${value}`}
+            role="tab"
+            aria-selected={tab === value}
+            aria-controls={`live-navigator-panel-${value}`}
+            tabIndex={tab === value ? 0 : -1}
+            className={tab === value ? 'is-active' : ''}
+            onKeyDown={(event) => {
+              const tabValues = ['cameras', 'plans', 'views', ...(investigationVisible ? ['events'] : [])];
+              const currentIndex = tabValues.indexOf(tab);
+              if (currentIndex < 0) return;
+              let nextIndex: number;
+              const side = inlineSideOfArrow(event.key);
+              if (side === 'end') nextIndex = (currentIndex + 1) % tabValues.length;
+              else if (side === 'start') nextIndex = (currentIndex - 1 + tabValues.length) % tabValues.length;
+              else if (event.key === 'Home') nextIndex = 0;
+              else if (event.key === 'End') nextIndex = tabValues.length - 1;
+              else return;
+              event.preventDefault();
+              const nextTab = tabValues[nextIndex];
+              if (!nextTab) return;
+              setTab(nextTab);
+              onSurfaceChange(nextTab === 'plans' ? 'plan' : 'grid');
+              event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[nextIndex]?.focus();
+            }}
+            onClick={() => {
               setTab(value);
               onSurfaceChange(value === 'plans' ? 'plan' : 'grid');
             }}>
@@ -454,8 +495,10 @@ export function LiveOperatorNavigator({
         ))}
       </div>
 
-      {tab === 'cameras' && (
-        <div className="live-navigator-panel">
+      <div className="live-navigator-panel" role="tabpanel" id="live-navigator-panel-cameras"
+        aria-labelledby="live-navigator-tab-cameras" hidden={tab !== 'cameras'} tabIndex={0}>
+        {tab === 'cameras' && <>
+
           <label className="live-navigator-search">
             <span className="sr-only">{t('live.navigator.search')}</span>
             <input type="search" value={search} placeholder={t('live.navigator.search')}
@@ -486,13 +529,16 @@ export function LiveOperatorNavigator({
                     toggleExpanded(node.uuid);
                   }
                 }}
-                onClick={() => selectLocation(node.uuid)}
+                onClick={() => {
+                  selectLocation(node.uuid);
+                  if (node.children.length > 0) toggleExpanded(node.uuid);
+                }}
                 onDblClick={() => loadLocation(node.uuid)}>
                 <span className="live-location-name">
                   {node.children.length > 0 && (
-                    <span aria-hidden="true" onClick={(event) => {
-                      event.stopPropagation(); toggleExpanded(node.uuid);
-                    }}>{expanded.has(node.uuid) ? '▾' : <span dir="ltr" className="rtl-flip inline-block" aria-hidden="true">▸</span>}</span>
+                    <span aria-hidden="true">
+                      {expanded.has(node.uuid) ? '▾' : <span dir="ltr" className="rtl-flip inline-block" aria-hidden="true">▸</span>}
+                    </span>
                   )}
                   <span dir="ltr" className="rtl-flip inline-block">{locationIcon(node.type)}</span><span>{node.name}</span>
                 </span>
@@ -547,11 +593,13 @@ export function LiveOperatorNavigator({
             ))}
             {visibleCameras.length === 0 && <p className="live-navigator-empty">{t('live.navigator.noCameras')}</p>}
           </div>
-        </div>
-      )}
+        </>}
+      </div>
 
-      {tab === 'views' && (
-        <div className="live-navigator-panel">
+      <div className="live-navigator-panel" role="tabpanel" id="live-navigator-panel-views"
+        aria-labelledby="live-navigator-tab-views" hidden={tab !== 'views'} tabIndex={0}>
+        {tab === 'views' && <>
+
           <p className="live-plan-navigator-help">{t('live.navigator.viewsHelp')}</p>
           <button type="button" className="btn-primary live-layout-save" disabled={busy || !layoutsQuery.data?.can_modify}
             onClick={() => setSaveLayoutOpen(true)}>{t('live.navigator.saveCurrent')}</button>
@@ -596,15 +644,17 @@ export function LiveOperatorNavigator({
           })}
           {!layoutsQuery.isLoading && !layoutsQuery.error && (layoutsQuery.data?.layouts || []).length === 0 &&
             <p className="live-navigator-empty">{t('live.navigator.noLayouts')}</p>}
-        </div>
-      )}
+        </>}
+      </div>
 
-      {tab === 'plans' && (
-        <div className="live-navigator-panel">
+      <div className="live-navigator-panel" role="tabpanel" id="live-navigator-panel-plans"
+        aria-labelledby="live-navigator-tab-plans" hidden={tab !== 'plans'} tabIndex={0}>
+        {tab === 'plans' && <>
+
           <p className="live-plan-navigator-help">{t('live.plan.navigatorHelp')}</p>
           {(plansQuery.data?.plans || []).map((plan) => {
             const liveCount = (plan.cameras || []).filter((camera) =>
-              streams.find((stream) => stream.camera_uuid === camera.camera_uuid)?.availability === 'live').length;
+              streamsByUuid.get(camera.camera_uuid)?.availability === 'live').length;
             return (
               <div key={plan.uuid}
                 className={`live-layout-row ${selectedPlanUuid === plan.uuid ? 'is-selected' : ''}`}>
@@ -624,11 +674,14 @@ export function LiveOperatorNavigator({
           })}
           {!plansQuery.isLoading && (plansQuery.data?.plans || []).length === 0 &&
             <p className="live-navigator-empty">{t('live.plan.noPlans')}</p>}
-        </div>
-      )}
+        </>}
+      </div>
 
-      {tab === 'events' && (
-        <div className="live-navigator-panel live-event-list">
+      {investigationVisible && (
+      <div className="live-navigator-panel live-event-list" role="tabpanel" id="live-navigator-panel-events"
+        aria-labelledby="live-navigator-tab-events" hidden={tab !== 'events'} tabIndex={0}>
+        {tab === 'events' && <>
+
           <div className="live-camera-list-heading">
             <span>{t('live.navigator.eventsScope', { count: effectiveCameraUuids.size })}</span>
             <button type="button" className="live-navigator-refresh"
@@ -658,8 +711,10 @@ export function LiveOperatorNavigator({
               </a>
             ))
           )}
-        </div>
+        </>}
+      </div>
       )}
+
     </aside>
     <TextInputDialog
       isOpen={saveLayoutOpen}

@@ -7,10 +7,20 @@ on:
       - '*.*.*'
 
 permissions:
+  actions: read
   contents: write
 
+# Superseded commits do not need to finish the same workflow.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  release-preflight:
+    uses: ./.github/workflows/release-preflight.yml
+
   changelog:
+    needs: release-preflight
     runs-on: ubuntu-latest
     outputs:
       changelog: ${{ steps.generate.outputs.result }}

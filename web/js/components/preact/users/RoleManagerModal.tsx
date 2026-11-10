@@ -1,5 +1,5 @@
+import { administrationJSON } from '../../../api/administration.ts';
 import { useCallback, useEffect, useMemo, useState } from 'preact/hooks';
-import { fetchJSON } from '../../../query-client.ts';
 import { useI18n } from '../../../i18n.ts';
 import { showStatusMessage } from '../ToastContainer.tsx';
 import { ConfirmDialog } from '../common/ModalDialog.tsx';
@@ -53,8 +53,8 @@ export function RoleManagerModal({ onClose, getAuthHeaders }: RoleManagerModalPr
     setError('');
     try {
       const [actionResponse, roleResponse] = await Promise.all([
-        fetchJSON<AuthorizationActionsResponse>('/api/authorization/actions', { headers: getAuthHeaders(), cache: 'no-store' }),
-        fetchJSON<AuthorizationRolesResponse>('/api/authorization/roles', { headers: getAuthHeaders(), cache: 'no-store' }),
+        administrationJSON<AuthorizationActionsResponse>('/api/authorization/actions', { headers: getAuthHeaders(), cache: 'no-store' }),
+        administrationJSON<AuthorizationRolesResponse>('/api/authorization/roles', { headers: getAuthHeaders(), cache: 'no-store' }),
       ]);
       const loadedRoles = roleResponse.roles || [];
       const nextUuid = preferredUuid && loadedRoles.some((role) => role.uuid === preferredUuid)
@@ -112,7 +112,7 @@ export function RoleManagerModal({ onClose, getAuthHeaders }: RoleManagerModalPr
     if (draft.builtin || !draft.name.trim() || draft.actions.length === 0) return;
     setSaving(true);
     try {
-      const response = await fetchJSON<AuthorizationRoleMutationResponse>(
+      const response = await administrationJSON<AuthorizationRoleMutationResponse>(
         draft.uuid ? `/api/authorization/roles/${encodeURIComponent(draft.uuid)}` : '/api/authorization/roles',
         {
           method: draft.uuid ? 'PUT' : 'POST',
@@ -141,7 +141,7 @@ export function RoleManagerModal({ onClose, getAuthHeaders }: RoleManagerModalPr
     if (!draft.uuid || draft.builtin) return;
     setSaving(true);
     try {
-      await fetchJSON(`/api/authorization/roles/${encodeURIComponent(draft.uuid)}`, {
+      await administrationJSON(`/api/authorization/roles/${encodeURIComponent(draft.uuid)}`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ expected_policy_version: policyVersion }),
@@ -159,7 +159,7 @@ export function RoleManagerModal({ onClose, getAuthHeaders }: RoleManagerModalPr
   };
 
   return (
-    <div role="presentation" className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-3" onClick={() => !saving && onClose()}>
+    <div role="presentation" className="app-modal-overlay fixed inset-0 flex items-center justify-center bg-black/50 p-3" onClick={() => !saving && onClose()}>
       <section /* eslint-disable-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions -- only keeps clicks inside the dialog from reaching the backdrop */ role="dialog" aria-modal="true" aria-labelledby="role-manager-title" className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-lg bg-card text-card-foreground shadow-xl" onClick={(event) => event.stopPropagation()}>
         <header className="flex items-start justify-between gap-4 border-b border-border p-5">
           <div><h2 id="role-manager-title" className="text-xl font-bold">{t('access.roles.title')}</h2><p className="mt-1 text-sm text-muted-foreground">{t('access.roles.description')}</p></div>

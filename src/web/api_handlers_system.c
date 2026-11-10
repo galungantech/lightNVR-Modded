@@ -50,6 +50,7 @@
 #include "web/audit_log.h"
 #define LOG_COMPONENT "SystemAPI"
 #include "core/logger.h"
+#include "core/observation_diagnostics.h"
 #include "core/config.h"
 #include "core/path_utils.h"
 #include "core/version.h"
@@ -191,18 +192,24 @@ static void trim_copy_value(char *dest, size_t dest_size, const char *src) {
     }
 
     const char *start = ltrim_pos(src);
-    // rtrim_pos returns a pointer into src one *after* the last printing
-    // character, so we need to subtract 1 to check the last characters
-    // in the string.
-    const char *end = rtrim_pos(src, 0) - 1;
+    if (*start == '\0') {
+        return;
+    }
+    // rtrim_pos returns an exclusive end pointer (one past last non-whitespace).
+    const char *end = rtrim_pos(src, 0);
 
-    if ((end - start) >= 2 && ((*start == '"' && *end == '"') ||
-                     (*start == '\'' && *end == '\''))) {
+    if (end <= start) {
+        return;
+    }
+
+    if ((end - start) >= 2 &&
+        ((*start == '"' && *(end - 1) == '"') ||
+         (*start == '\'' && *(end - 1) == '\''))) {
         start++;
         end--;
     }
 
-    size_t len = end - start;
+    size_t len = (size_t)(end - start);
     if (len >= dest_size) {
         len = dest_size - 1;
     }
@@ -469,6 +476,9 @@ static void add_versions_to_json(cJSON *info) {
              LLHTTP_VERSION_MAJOR, LLHTTP_VERSION_MINOR, LLHTTP_VERSION_PATCH);
     add_version_entry(items, "llhttp", "Library", llhttp_version, NULL);
 
+    add_version_entry(items, "FFmpeg", "Library", av_version_info(),
+                      "Linked FFmpeg runtime");
+
     char version_buf[32] = {0};
     format_triplet_version(avformat_version(), version_buf, sizeof(version_buf));
     add_version_entry(items, "libavformat", "Library", version_buf, NULL);
@@ -487,6 +497,16 @@ static void add_versions_to_json(cJSON *info) {
 
     cJSON_AddItemToObject(versions, "items", items);
     cJSON_AddItemToObject(info, "versions", versions);
+}
+
+// Match argv[0], not arbitrary arguments containing the detector name.
+// /proc/PID/comm truncates names to 15 bytes, so it cannot identify this name.
+static bool is_detector_command(const char *cmdline, size_t bytes) {
+    if (!cmdline || !memchr(cmdline, '\0', bytes)) {
+        return false; // Empty reads or a truncated executable path.
+    }
+    const char *name = strrchr(cmdline, '/');
+    return strcmp(name ? name + 1 : cmdline, "light-object-detect") == 0;
 }
 
 /**
@@ -526,16 +546,11 @@ static bool get_detector_memory_usage(unsigned long long *memory_usage) {
         FILE *cf = fopen(cmdline_path, "r");
         if (!cf) continue;
 
-        char cmdline[512] = {0};
-        size_t bytes = fread(cmdline, 1, sizeof(cmdline) - 1, cf);
+        char cmdline[PATH_MAX];
+        size_t bytes = fread(cmdline, 1, sizeof(cmdline), cf);
         fclose(cf);
 
-        // cmdline fields are NUL-separated — replace with spaces for strstr
-        for (size_t i = 0; i < bytes; i++) {
-            if (cmdline[i] == '\0') cmdline[i] = ' ';
-        }
-
-        if (strstr(cmdline, "light-object-detect")) {
+        if (is_detector_command(cmdline, bytes)) {
             pid = candidate;
             break;
         }
@@ -1068,6 +1083,15 @@ void handle_get_system_info(const http_request_t *req, http_response_t *res) {
 
     // Add stream storage usage information with caching
     add_cached_stream_storage_usage_to_json(info, 0);
+
+    // INT_01 L10: observation pipeline diagnostics (contract section 15).
+    // Read-only; never starts the evidence worker.
+    observation_diagnostics_t observation_diagnostics;
+    if (observation_diagnostics_collect(&observation_diagnostics, 0) == 0) {
+        cJSON *pipeline = observation_diagnostics_to_json(&observation_diagnostics);
+        if (pipeline) cJSON_AddItemToObject(info, "observation_pipeline", pipeline);
+        observation_diagnostics_free(&observation_diagnostics);
+    }
 
     // Convert to string
     char *json_str = cJSON_PrintUnformatted(info);

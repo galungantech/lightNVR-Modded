@@ -40,8 +40,11 @@ int store_external_motion_detections(const char *stream_name,
                                      time_t timestamp,
                                      uint64_t recording_id);
 
-/** Close every currently-open external-motion interval for a stream. */
-int close_external_motion_detections(const char *stream_name, time_t end_time);
+/** Close open external-motion intervals for the captured camera identity.
+ * Only legacy rows without a UUID fall back to stream_name. Returns the number
+ * closed, or -1 on error. Both identity arguments must be nonempty. */
+int close_external_motion_detections(const char *camera_uuid,
+                                     const char *stream_name, time_t end_time);
 
 typedef struct {
     time_t start_time;
@@ -72,6 +75,13 @@ int get_external_motion_detection_intervals_by_camera_uuid(
  */
 int get_detections_from_db_time_range(const char *stream_name, detection_result_t *result, 
                                      uint64_t max_age, time_t start_time, time_t end_time);
+
+/** Captured UUID takes precedence; only legacy rows without UUID use the name.
+ * Caller must authorize the resolved camera before using this read-only query. */
+int get_detection_results_for_camera_readonly(const char *camera_uuid,
+    const char *legacy_stream_name, detection_result_t *result,
+    time_t *timestamps, time_t *end_timestamps, uint64_t max_age,
+    time_t start_time, time_t end_time);
 
 /* Read result data and event ranges from one private, committed snapshot.
  * Returns the number of detections, or -1 on error. */
@@ -199,6 +209,10 @@ int get_detection_labels_summary(const char *stream_name, time_t start_time, tim
 int get_recording_detection_summaries(
     const recording_metadata_t *recordings, int count,
     recording_detection_summary_t *summaries);
+/* Capture-aware variant for authorized recording read boundaries. */
+int get_recording_detection_summaries_for_cameras(
+    const recording_metadata_t *recordings, int count,
+    recording_detection_summary_t *summaries);
 
 /**
  * Same as get_recording_detection_summaries() but on a caller-supplied
@@ -208,6 +222,9 @@ int get_recording_detection_summaries(
  * sqlite3_progress_handler()).
  */
 int get_recording_detection_summaries_on_connection(
+    sqlite3 *db, const recording_metadata_t *recordings, int count,
+    recording_detection_summary_t *summaries);
+int get_recording_detection_summaries_for_cameras_on_connection(
     sqlite3 *db, const recording_metadata_t *recordings, int count,
     recording_detection_summary_t *summaries);
 
@@ -248,6 +265,15 @@ int get_unique_detection_labels_for_streams(
  */
 int get_unique_detection_labels_for_streams_on_connection(
     sqlite3 *db, const char *const *stream_names, int stream_count,
+    char labels[][MAX_LABEL_LENGTH], int max_labels);
+
+/* Authorized capture-UUID facets; NULL/empty captures use current-name
+ * fallback. Both walks use two bound variables regardless of fleet size. */
+int get_unique_detection_labels_for_cameras(
+    const char *const *camera_uuids, int camera_count,
+    char labels[][MAX_LABEL_LENGTH], int max_labels);
+int get_unique_detection_labels_for_cameras_on_connection(
+    sqlite3 *db, const char *const *camera_uuids, int camera_count,
     char labels[][MAX_LABEL_LENGTH], int max_labels);
 
 /**

@@ -1,0 +1,405 @@
+{
+  "version": 1,
+  "cameras": [
+    "A",
+    "B"
+  ],
+  "cases": [
+    {
+      "id": "anonymous",
+      "discovery_status": 401,
+      "expected_operations": [],
+      "assertions": "No credential, auth enabled, demo disabled",
+      "expected_operations_are_exhaustive": true
+    },
+    {
+      "id": "admin",
+      "discovery_status": 200,
+      "expected_operations": [
+        "listStreams",
+        "getStreamFull",
+        "updateStream",
+        "getOpenApi"
+      ],
+      "assertions": "All pilot operations; still authorize each call",
+      "expected_operations_are_exhaustive": true
+    },
+    {
+      "id": "viewer_a",
+      "discovery_status": 200,
+      "expected_operations": [
+        "listStreams",
+        "getStreamFull",
+        "getOpenApi"
+      ],
+      "assertions": "live.view on A; direct B forbidden; redacted full",
+      "expected_operations_are_exhaustive": true
+    },
+    {
+      "id": "configure_a_only",
+      "discovery_status": 200,
+      "expected_operations": [
+        "listStreams",
+        "updateStream",
+        "getOpenApi"
+      ],
+      "assertions": "Configure A does not imply live.view; list is empty",
+      "expected_operations_are_exhaustive": true
+    },
+    {
+      "id": "mixed_scope",
+      "discovery_status": 200,
+      "expected_operations": [
+        "listStreams",
+        "getStreamFull",
+        "updateStream",
+        "getOpenApi"
+      ],
+      "assertions": "Read A/B, configure A; full and redacted per resource",
+      "expected_operations_are_exhaustive": true
+    },
+    {
+      "id": "split_actions",
+      "discovery_status": 200,
+      "expected_operations": [
+        "listStreams",
+        "getStreamFull",
+        "updateStream",
+        "getOpenApi"
+      ],
+      "assertions": "Read A, configure B; no same-resource configured full variant",
+      "expected_operations_are_exhaustive": true
+    },
+    {
+      "id": "empty_scope",
+      "discovery_status": 200,
+      "expected_operations": [
+        "listStreams",
+        "getOpenApi"
+      ],
+      "assertions": "Valid selector matches zero cameras",
+      "expected_operations_are_exhaustive": true
+    },
+    {
+      "id": "admin_read_token_a",
+      "discovery_status": 200,
+      "expected_operations": [
+        "listStreams",
+        "getStreamFull",
+        "getOpenApi"
+      ],
+      "assertions": "Broad owner narrowed by token action and A scope",
+      "expected_operations_are_exhaustive": true
+    },
+    {
+      "id": "owner_two_tokens",
+      "discovery_status": 200,
+      "expected_operations": [],
+      "assertions": "Two same-owner tokens with disjoint A/B scopes; compare direct calls and no cross-token caching",
+      "expected_operations_are_exhaustive": false
+    },
+    {
+      "id": "expired_token",
+      "discovery_status": 401,
+      "expected_operations": [],
+      "assertions": "Expiry independently checked; no cookie fallback in test context",
+      "expected_operations_are_exhaustive": true
+    },
+    {
+      "id": "revoked_token",
+      "discovery_status": 401,
+      "expected_operations": [],
+      "assertions": "Next request rejected after revocation",
+      "expected_operations_are_exhaustive": true
+    },
+    {
+      "id": "inactive_owner",
+      "discovery_status": 401,
+      "expected_operations": [],
+      "assertions": "Next request rejected after deactivation",
+      "expected_operations_are_exhaustive": true
+    },
+    {
+      "id": "demo_anonymous",
+      "discovery_status": 403,
+      "expected_operations": [],
+      "assertions": "Synthetic demo principal is not personalized discovery",
+      "expected_operations_are_exhaustive": true
+    },
+    {
+      "id": "auth_disabled",
+      "discovery_status": 403,
+      "expected_operations": [],
+      "assertions": "Synthetic admin must not expose administrative projection",
+      "expected_operations_are_exhaustive": true
+    },
+    {
+      "id": "health_selector",
+      "discovery_status": 200,
+      "expected_operations": [],
+      "assertions": "Raw/runtime/live observations reproduce operation-specific selector differences",
+      "expected_operations_are_exhaustive": false
+    },
+    {
+      "id": "cookie_with_token",
+      "discovery_status": 200,
+      "expected_operations": [],
+      "assertions": "Existing session precedence preserved, separate from cookie-free token tests",
+      "expected_operations_are_exhaustive": false
+    },
+    {
+      "id": "password_change_required",
+      "discovery_status": 401,
+      "expected_operations": [],
+      "assertions": "Session/Basic gate preserved; separately test scoped token exemption",
+      "expected_operations_are_exhaustive": true
+    },
+    {
+      "id": "cidr_rejected",
+      "discovery_status": 401,
+      "expected_operations": [],
+      "assertions": "Effective peer restrictions preserved",
+      "expected_operations_are_exhaustive": true
+    },
+    {
+      "id": "snapshot_failure",
+      "discovery_status": 500,
+      "expected_operations": [],
+      "assertions": "No canonical fallback; generic JSON error",
+      "expected_operations_are_exhaustive": true
+    },
+    {
+      "id": "concurrent_policy_change",
+      "discovery_status": 200,
+      "expected_operations": [],
+      "assertions": "One coherent DB observation; next request sees change",
+      "expected_operations_are_exhaustive": false
+    },
+    {
+      "id": "membership_change",
+      "discovery_status": 200,
+      "expected_operations": [],
+      "assertions": "Collection and tag membership are from same DB observation",
+      "expected_operations_are_exhaustive": false
+    },
+    {
+      "id": "authenticated_demo",
+      "discovery_status": 200,
+      "expected_operations": [],
+      "assertions": "Real identity retains camera.configure decisions: demo mode has no blanket Streams mutation restriction. Confirm direct update and discovery agree over HTTP.",
+      "expected_operations_are_exhaustive": false
+    }
+  ],
+  "common_assertions": [
+    "Cache-Control private,no-store on responses",
+    "No camera/user/token/grant identifiers or credentials in projected examples/metadata",
+    "Valid local refs and no hidden unreachable components",
+    "Denied/invalid writes preserve configuration",
+    "Mixed-permission rows do not imply all-resource privilege",
+    "No whole-API coverage claim from partial spec"
+  ],
+  "credential_lifecycle": {
+    "operations": [
+      "listAuthSessions",
+      "listTrustedDevices",
+      "revokeAuthSession",
+      "revokeTrustedDevice"
+    ],
+    "cases": [
+      {
+        "principal": "cookie / Basic / legacy header / legacy bearer",
+        "discovery": "present",
+        "list": "own records only, max 32",
+        "revoke_own": 200,
+        "revoke_other_owner": 404
+      },
+      {
+        "principal": "scoped token with live.view or users.manage",
+        "discovery": "absent",
+        "list": 401,
+        "revoke": 401
+      },
+      {
+        "principal": "administrator",
+        "discovery": "present",
+        "list": "own records only",
+        "revoke_other_owner": 404
+      },
+      {
+        "principal": "anonymous / pending MFA / inactive / CIDR denied",
+        "list": 401,
+        "revoke": 401
+      },
+      {
+        "principal": "password-change-required session or Basic",
+        "list": 401,
+        "revoke": 401
+      },
+      {
+        "principal": "synthetic auth-disabled",
+        "discovery_status": 403,
+        "list": 403,
+        "revoke": 403
+      }
+    ],
+    "acceptance": [
+      "Denied/invalid requests do not remove credentials or clear cookies.",
+      "Strict safe-integer IDs; malformed segment 400, extra path segments 404.",
+      "Older current credential clears its cookie even outside the first 32 records.",
+      "Two concurrent revokes yield one 200 and one 404.",
+      "Pending MFA rows are hidden and cannot be revoked as authenticated sessions.",
+      "Database failure is 500, preserves credentials and does not clear cookies.",
+      "Settings validates list and revoke responses; malformed replies cannot show successful revocation."
+    ]
+  },
+  "mfa_password_lifecycle": {
+    "operations": [
+      "completeTotpLogin",
+      "setupTotp",
+      "verifyTotp",
+      "disableTotp",
+      "getTotpStatus",
+      "changePassword",
+      "legacyLogout"
+    ],
+    "cases": [
+      {
+        "principal": "session / Basic / legacy header / bearer key",
+        "discovery": "personal management present; password reset alternative requires effective users.manage",
+        "own": "allowed (current password for non-manager password change)",
+        "other": "403 without effective users.manage"
+      },
+      {
+        "principal": "scoped users.manage token",
+        "discovery": "management present, no personal session/device lifecycle",
+        "target": "owner permission intersected with token action and scope"
+      },
+      {
+        "principal": "other scoped token",
+        "discovery": "management absent",
+        "own_or_other": 403
+      },
+      {
+        "principal": "anonymous / pending MFA",
+        "discovery_status": 401,
+        "management": 401,
+        "completion": "pending challenge plus fresh code only; does not confer general API access"
+      },
+      {
+        "principal": "password-change-required session / Basic",
+        "discovery_status": 401,
+        "password": "own password change requires old password even for bootstrap admin"
+      }
+    ],
+    "acceptance": [
+      "Exact generated and projected success schemas; enrollment secret only in setup response.",
+      "Password reset alternative removed from non-manager projections.",
+      "Expired/replayed/throttled codes and ambiguous mutations cannot show browser success.",
+      "Legacy logout: negotiated JSON or empty 302 with Location; expired cookies and actual session revocation.",
+      "No automatic mutation retries; stale enrollment responses discarded and secret state cleared on close/context change."
+    ]
+  },
+  "fleet_reads": {
+    "operations": [
+      "queryFleetCameras",
+      "previewFleetSelector",
+      "listFleetViews",
+      "getFleetView",
+      "listCameraCollections",
+      "getCameraCollection",
+      "getCameraCollectionMembers",
+      "previewCameraCollection",
+      "listFleetLocations",
+      "getFleetLocation",
+      "listFleetTags",
+      "getFleetTag",
+      "getCameraTagAssignments"
+    ],
+    "cases": [
+      {
+        "principal": "administrator",
+        "inventory": "A and B; full counts and configuration flags"
+      },
+      {
+        "principal": "viewer A / token A",
+        "inventory": "A only; filtered rows, facets, organization and tag-assignment counts",
+        "camera_B": 403
+      },
+      {
+        "principal": "read A + configure B",
+        "inventory": "A only; A cannot be configured; no cross-camera conjunction"
+      },
+      {
+        "principal": "authenticated empty scope",
+        "inventory": "empty rows/facets; discovery still offers inventory queries",
+        "camera_tag_discovery": "absent"
+      },
+      {
+        "principal": "anonymous",
+        "discovery": 401,
+        "query": 401
+      }
+    ],
+    "acceptance": [
+      "Shared collections expose only visible members/counts; smart selectors redacted from non-owners; private and empty foreign collections return 404.",
+      "Owned/shared saved views list every matching row; private foreign views return 404. Stored selectors never grant camera authority.",
+      "Tag assignment GET and PUT responses use the same visible counts as the tag catalog.",
+      "Malformed query/catalog responses never render payloads; explicit Retry recovers.",
+      "Basic and legacy keys preserve existing access; scoped tokens intersect owner authority."
+    ]
+  },
+  "identity_administration": {
+    "operations": [
+      "listAdminUsers",
+      "createAdminUser",
+      "getAdminUser",
+      "updateAdminUser",
+      "deleteAdminUser",
+      "createLegacyApiKey",
+      "setUserPasswordLock",
+      "clearUserLoginLockout",
+      "listAuthorizationActions",
+      "simulateAuthorization",
+      "listAuthorizationRoles",
+      "createAuthorizationRole",
+      "updateAuthorizationRole",
+      "deleteAuthorizationRole",
+      "getUserAuthorizationPolicy",
+      "setUserAuthorizationPolicy",
+      "listAuditEvents",
+      "exportAuditEvents",
+      "getAuditSettings",
+      "updateAuditSettings"
+    ],
+    "cases": [
+      {
+        "principal": "session / Basic / legacy key owner",
+        "access": "self username/email and legacy-key rotation; other targets require users.manage"
+      },
+      {
+        "principal": "non-scoped users.manage",
+        "access": "user CRUD, locks, roles/policy and simulation; delegation limited by caller actions/scope; stale revision and self-lockout rejected"
+      },
+      {
+        "principal": "scoped users.manage",
+        "access": "user read/update/delete/locks, catalog and simulation intersect owner authority; no create-user, role/policy or legacy-key operation"
+      },
+      {
+        "principal": "effective system.admin, including scoped token intersection",
+        "access": "audit list/export/settings; users.manage alone does not grant audit"
+      },
+      {
+        "principal": "anonymous / invalid / revoked token",
+        "access": "401; no operation projection or mutation"
+      }
+    ],
+    "acceptance": [
+      "Every one of the twenty operation IDs has independently authored projection and real response checks.",
+      "Lists omit credentials; unrestricted legacy-key issuance cannot escape scoped-token bounds.",
+      "Denied policy/user writes preserve durable state except expected authentication activity/audit.",
+      "CSV exports return real quoted paginated bytes and neutralize spreadsheet formulas.",
+      "UsersView and policy/roles/audit consumers reject malformed payloads and never automatically retry writes.",
+      "User CRUD and password lock are separate writes; partial lock failure refreshes users and never claims complete success."
+    ]
+  }
+}

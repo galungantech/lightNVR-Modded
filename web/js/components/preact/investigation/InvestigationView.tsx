@@ -1,6 +1,9 @@
+import { usePlaybackScrub } from './usePlaybackScrub.ts';
+import { RecordingsNavigation } from '../recordings/RecordingsNavigation.tsx';
+import { evidenceJSON } from '../../../api/evidence.ts';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 
-import { fetchJSON, useQuery } from '../../../query-client.ts';
+import { useQuery } from '../../../query-client.ts';
 import { useI18n } from '../../../i18n.ts';
 import { Priority, queueThumbnailLoad } from '../../../request-queue.ts';
 import {
@@ -182,6 +185,7 @@ function InvestigationPlayer({
   const mediaLoadingRef = useRef(true);
   const regionAnchorRef = useRef<RegionPoint | null>(null);
   const coverageSegment = findSegmentAt(track.segments, cursor);
+  const scrub = usePlaybackScrub(playing, onPlayingChange);
   const [resolvedSegment, setResolvedSegment] = useState<InvestigationSegment | null>(null);
   const [resolvedGap, setResolvedGap] = useState<{ start: number; end: number } | null>(null);
   const segment = track.aggregated ? resolvedSegment : coverageSegment;
@@ -243,7 +247,7 @@ function InvestigationPlayer({
 
     const controller = new AbortController();
     setStatus('loading');
-    fetchJSON<InvestigationSegmentAtResponse>('/api/investigations/segment-at', {
+    evidenceJSON<InvestigationSegmentAtResponse>('/api/investigations/segment-at', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -542,6 +546,7 @@ function InvestigationPlayer({
             </button>
             <input
               type="range"
+              {...scrub}
               min={segment.start_time}
               max={segment.end_time}
               step="0.1"
@@ -855,6 +860,7 @@ export function InvestigationView() {
   const [activeCameraUuids, setActiveCameraUuids] = useState<string[]>([]);
   const [primaryCameraUuid, setPrimaryCameraUuid] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
+  const scrub = usePlaybackScrub(playing, setPlaying);
   const [speed, setSpeed] = useState(1);
   const [playbackMode, setPlaybackMode] = useState('wall-clock');
   const [loading, setLoading] = useState(false);
@@ -971,7 +977,7 @@ export function InvestigationView() {
         limit: 24,
         include_summary: false,
       };
-      const data = await fetchJSON<InvestigationSearchResponse>('/api/investigations/search', {
+      const data = await evidenceJSON<InvestigationSearchResponse>('/api/investigations/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(searchRequest),
@@ -990,7 +996,7 @@ export function InvestigationView() {
       searchSummaryController.current?.abort();
       const summaryController = new AbortController();
       searchSummaryController.current = summaryController;
-      void fetchJSON<InvestigationSearchResponse>('/api/investigations/search', {
+      void evidenceJSON<InvestigationSearchResponse>('/api/investigations/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1080,7 +1086,7 @@ export function InvestigationView() {
     setError('');
     setPlaying(false);
     try {
-      const data = await fetchJSON<InvestigationTimeline>('/api/investigations/timeline', {
+      const data = await evidenceJSON<InvestigationTimeline>('/api/investigations/timeline', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1360,7 +1366,7 @@ export function InvestigationView() {
     setThumbnailLoading(true);
     setThumbnailError('');
     try {
-      const data = await fetchJSON<InvestigationThumbnailData>('/api/investigations/thumbnail-samples', {
+      const data = await evidenceJSON<InvestigationThumbnailData>('/api/investigations/thumbnail-samples', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1500,16 +1506,13 @@ export function InvestigationView() {
             selectedResult={selectedResult}
             t={t}
           />
-          <nav className="investigation-subnav" aria-label={t('recordings.views')}>
-            <a href="recordings.html">{t('nav.recordings')}</a>
-            <a href="timeline.html">{t('nav.timeline')}</a>
-            <a className="is-active" href="investigation.html" aria-current="page">
-              {t('nav.investigation')}
-            </a>
-            <a href="plates.html">{t('nav.plates')}</a>
-          </nav>
+
         </div>
       </div>
+
+      <RecordingsNavigation active="investigation" recordingsUrl={new URLSearchParams(window.location.search).get('return_to')}
+        cameras={selectedCameraUuids} streams={streams.filter(stream => selectedCameraUuids.includes(stream.camera_uuid)).map(stream => stream.name)}
+        start={startTime} end={endTime} cursor={cursor} />
 
       <section className="investigation-query-card" aria-labelledby="investigation-query-heading">
         <div className="investigation-query-header">
@@ -1948,13 +1951,13 @@ export function InvestigationView() {
           <input
             className="investigation-scrubber"
             type="range"
+            {...scrub}
             min={timeline.start_time}
             max={timeline.end_time}
             step="1"
             value={cursor}
             aria-label={t('investigation.sharedCursor')}
             onInput={(event) => {
-              setPlaying(false);
               setCursor(Number((event.target as HTMLInputElement).value));
             }}
           />
@@ -2004,7 +2007,6 @@ export function InvestigationView() {
                   }}
                   onPlayingChange={setPlaying}
                   onSeek={(value) => {
-                    setPlaying(false);
                     setCursor(value);
                   }}
                   t={t}

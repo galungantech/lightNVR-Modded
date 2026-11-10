@@ -1,3 +1,4 @@
+import { evidenceJSON } from '../../api/evidence.ts';
 /**
  * UI utility components for LightNVR
  * JSX version of UI components
@@ -16,6 +17,8 @@ import utc from 'dayjs/plugin/utc';
 import customParseFormat from 'dayjs/plugin/customParseFormat';
 import { ConfirmDialog } from './common/ModalDialog.tsx';
 import { loadRecordingPlayback } from '../../utils/recording-playback.ts';
+import { DetectionClassifications, detectionOverlayLabel } from './DetectionClassifications.tsx';
+import type { DetectionObservation } from '../../types/core.ts';
 
 export { ConfirmDialog } from './common/ModalDialog.tsx';
 
@@ -43,6 +46,8 @@ interface DetectionResult {
   width: number;
   height: number;
   timestamp?: number;
+  /** INT_01 L15: server-linked observation summary, when one matches. */
+  observation?: DetectionObservation;
 }
 
 type WebkitFullscreenDocument = Document & {
@@ -145,7 +150,7 @@ export function DeleteConfirmationModal(props: DeleteConfirmationModalProps) {
 
   return (
     <div role="presentation"
-      class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+      class="app-modal-overlay fixed inset-0 bg-black/50 flex items-center justify-center "
       onClick={handleBackgroundClick}
       onKeyDown={handleKeyDown}
     >
@@ -235,7 +240,7 @@ export function SnapshotPreviewModal({ isOpen, onClose, imageData, streamName, o
     <div role="presentation"
       ref={modalRef}
       id="snapshot-preview-modal"
-      className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50"
+      className="app-modal-overlay fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center "
       onClick={handleBackgroundClick}
     >
       <div className="modal-content bg-card text-card-foreground rounded-lg shadow-xl max-w-4xl max-h-[90vh] flex flex-col transform transition-all duration-300 ease-out scale-95 opacity-0" style={{ width: '90%' }}>
@@ -323,47 +328,67 @@ export function VideoModal({ isOpen, onClose, videoUrl, title, downloadUrl }: Vi
     setCurrentPlaybackSeconds(prev => prev === nextSeconds ? prev : nextSeconds);
   }, []);
 
-  // Handle escape key and cleanup
+  // Keep keyboard focus and page scrolling inside an open playback dialog.
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen) {
+    if (!isOpen) return;
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const focusTimer = window.setTimeout(() => modalRef.current?.querySelector<HTMLButtonElement>('.close')?.focus(), 0);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
         onClose();
+      } else if (event.key === 'Tab') {
+        const controls = [...(modalRef.current?.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), video[controls], [tabindex="0"]',
+        ) || [])].filter(element => element.getClientRects().length > 0);
+        const first = controls[0], last = controls[controls.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
       }
     };
-
-    if (isOpen) {
-      console.log('VideoModal opened, setting up event listeners');
-      document.addEventListener('keydown', handleKeyDown);
-
-      if (videoRef.current) {
-        videoRef.current.ondblclick = () => handleToggleFullscreen();
-      }
-    }
-
+    document.addEventListener('keydown', handleKeyDown);
+    if (videoRef.current) videoRef.current.ondblclick = () => handleToggleFullscreen();
     return () => {
-      console.log('VideoModal cleanup');
+      window.clearTimeout(focusTimer);
       document.removeEventListener('keydown', handleKeyDown);
-
+      document.body.style.overflow = previousOverflow;
+      if (previousFocus?.isConnected) previousFocus.focus();
     };
   }, [isOpen, onClose]);
 
   // Fetch recording data and detections
   useEffect(() => {
+    // Clear all data owned by the previous recording before loading another.
+    setRecordingData(null);
+    setIsProtected(false);
+    setDetections([]);
+    setDetectionStatus('');
     if (!isOpen || !videoUrl) return;
+
+    const abortController = new AbortController();
+    let isStale = false;
 
     // Extract recording ID from URL
     const recordingIdMatch = videoUrl.match(/\/play\/(\d+)/);
-    if (!recordingIdMatch || !recordingIdMatch[1]) return;
+    if (!recordingIdMatch || !recordingIdMatch[1]) {
+      return () => {
+        isStale = true;
+        abortController.abort();
+      };
+    }
 
     const recordingId = parseInt(recordingIdMatch[1], 10);
 
     // Fetch recording data
     const fetchRecordingData = async () => {
       try {
-        const response = await fetch(`/api/recordings/${recordingId}`);
+        const response = await fetch(`/api/recordings/${recordingId}`, { signal: abortController.signal });
         if (!response.ok) throw new Error('Failed to fetch recording data');
 
         const data = await response.json() as RecordingDetails;
+        if (isStale) return;
         setRecordingData(data);
         setIsProtected(!!data.protected);
 
@@ -391,11 +416,8 @@ export function VideoModal({ isOpen, onClose, videoUrl, title, downloadUrl }: Vi
           const detectionsUrl = `/api/detection/results/${data.stream}?start=${startTime}&end=${endTime}`;
           console.log('[VideoModal] Fetching detections from:', detectionsUrl);
 
-          const detectionsResponse = await fetch(detectionsUrl);
-
-          if (!detectionsResponse.ok) throw new Error('Failed to fetch detections');
-
-          const detectionsData = await detectionsResponse.json() as { detections?: DetectionResult[] };
+          const detectionsData = await evidenceJSON<{detections:DetectionResult[]}>(detectionsUrl, { signal: abortController.signal });
+          if (isStale) return;
           console.log('[VideoModal] Detections response:', detectionsData);
           const fetchedDetections = detectionsData.detections || [];
           setDetections(fetchedDetections);
@@ -407,12 +429,18 @@ export function VideoModal({ isOpen, onClose, videoUrl, title, downloadUrl }: Vi
           }
         }
       } catch (error) {
+        if (isStale || (error instanceof DOMException && error.name === 'AbortError')) return;
         console.error('Error fetching data:', error);
         setDetectionStatus(t('recordings.errorLoadingDetections'));
       }
     };
 
     fetchRecordingData();
+
+    return () => {
+      isStale = true;
+      abortController.abort();
+    };
   }, [isOpen, videoUrl]);
 
   useEffect(() => {
@@ -604,7 +632,7 @@ export function VideoModal({ isOpen, onClose, videoUrl, title, downloadUrl }: Vi
       // Draw label background
       const fontSize = Math.round(Math.max(12, 14 * scale));
       ctx.font = `${fontSize}px Arial`;
-      const labelText = `${detection.label} (${Math.round(detection.confidence * 100)}%)`;
+      const labelText = detectionOverlayLabel(detection);
       const labelWidth = ctx.measureText(labelText).width + 10;
       const labelHeight = fontSize + 8;
       ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
@@ -842,10 +870,10 @@ export function VideoModal({ isOpen, onClose, videoUrl, title, downloadUrl }: Vi
     <div role="presentation"
       ref={modalRef}
       id="video-preview-modal"
-      className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50"
+      className="app-modal-overlay fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center "
       onClick={handleBackgroundClick}
     >
-      <div className="modal-content bg-card text-card-foreground rounded-lg shadow-xl max-w-4xl max-h-[95vh] h-[95vh] flex flex-col overflow-hidden transform transition-all duration-300 ease-out scale-95 opacity-0 w-full md:w-[90%]">
+      <div role="dialog" aria-modal="true" aria-labelledby="video-preview-title" className="modal-content bg-card text-card-foreground rounded-lg shadow-xl max-w-4xl max-h-[95vh] h-[95vh] flex flex-col overflow-hidden transform transition-all duration-300 ease-out scale-95 opacity-0 w-full md:w-[90%]">
         <div className="flex justify-between items-center p-2 sm:p-3 border-b border-border flex-shrink-0">
           <h3 id="video-preview-title" className="text-base sm:text-lg font-semibold text-gray-900 dark:text-white truncate me-2">
             {title || t('recordings.video')}
@@ -859,8 +887,8 @@ export function VideoModal({ isOpen, onClose, videoUrl, title, downloadUrl }: Vi
           </button>
         </div>
 
-        <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-          <div className="flex-none p-2 sm:p-3 md:flex-1 md:min-h-0 flex justify-center items-center">
+        <div className="recording-preview-body flex-1 min-h-0 flex flex-col overflow-hidden">
+          <div className="recording-preview-media flex-none p-2 sm:p-3 md:flex-1 md:min-h-0 flex justify-center items-center">
             <div
               ref={videoContainerRef}
               data-testid="recording-video-container"
@@ -872,6 +900,7 @@ export function VideoModal({ isOpen, onClose, videoUrl, title, downloadUrl }: Vi
                 ref={videoRef}
                 className="w-full h-full object-contain"
                 controls
+                playsInline
                 controlsList="nofullscreen"
                 key={videoUrl} /* Add key to force re-render when URL changes */
                 onLoadStart={() => console.log('Video load started')}
@@ -932,6 +961,7 @@ export function VideoModal({ isOpen, onClose, videoUrl, title, downloadUrl }: Vi
                           ? 'badge-success'
                           : 'bg-secondary text-secondary-foreground hover:bg-secondary/80'
                       } text-xs font-medium transition-all focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-opacity-50`}
+                      aria-pressed={speed === currentSpeed}
                       data-speed={speed}
                       onClick={() => handleSpeedChange(speed)}
                     >
@@ -1000,6 +1030,9 @@ export function VideoModal({ isOpen, onClose, videoUrl, title, downloadUrl }: Vi
                   }`}>
                     {detectionStatus}
                   </div>
+
+                  {/* INT_01 L15: classifications linked to these detections */}
+                  <DetectionClassifications detections={detections} />
                 </div>
               </div>
             </div>
@@ -1063,6 +1096,7 @@ export function VideoModal({ isOpen, onClose, videoUrl, title, downloadUrl }: Vi
                       : 'bg-secondary text-secondary-foreground hover:bg-secondary/80'
                   }`}
                   onClick={handleToggleProtection}
+                  disabled={!recordingData}
                   title={t(isProtected ? 'recordings.unprotect' : 'recordings.protect')}
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 me-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">

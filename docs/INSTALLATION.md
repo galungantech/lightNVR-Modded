@@ -1,7 +1,5 @@
 # LightNVR Installation Guide
 
-*Verified against LightNVR 0.37.x.*
-
 This document provides detailed instructions for installing LightNVR on various platforms.
 
 ## Table of Contents
@@ -57,9 +55,12 @@ helps small devices survive spikes, but do not plan to run detection out of swap
 
 ## Installation Methods
 
-### Building from Source
+Most installations should use the [container image](#docker-installation), a
+[pre-built `.deb` package](#pre-built-packages), or the [Home Assistant add-on](#home-assistant).
+Build from source for development, for embedded targets, or for an OS release without a
+package.
 
-Building from source is the recommended method for most installations, as it ensures compatibility with your specific system.
+### Building from Source
 
 #### 1. Clone the Repository
 
@@ -106,6 +107,30 @@ sudo ./scripts/install.sh --prefix=/opt --config-dir=/etc/custom/lightnvr
 
 See `./scripts/install.sh --help` for all available options.
 
+Direct CMake installs also default to `/etc/lightnvr`, matching the runtime
+config search path and service configuration. This default is independent of
+`CMAKE_INSTALL_PREFIX` and `cmake --install --prefix`. Packagers can stage the
+layout without writing to the host's `/etc`:
+
+```bash
+DESTDIR="$PWD/package-root" cmake --install build
+```
+
+To opt into a relocatable layout, set `CMAKE_INSTALL_SYSCONFDIR` to a relative
+directory. For example:
+
+```bash
+cmake -S . -B build -DCMAKE_INSTALL_PREFIX=/opt/lightnvr -DCMAKE_INSTALL_SYSCONFDIR=etc
+cmake --build build
+sudo cmake --install build
+```
+
+This installs configuration to `/opt/lightnvr/etc/lightnvr`; start LightNVR with
+`-c /opt/lightnvr/etc/lightnvr/lightnvr.ini`. Relative sysconf directories follow
+`cmake --install --prefix`; absolute overrides such as `/etc/custom` do not.
+CMake installs binaries, configuration files and migrations; it does not perform
+the service/data-directory setup provided by `scripts/install.sh`.
+
 ### Docker Installation
 
 Docker provides an easy way to run LightNVR without installing dependencies directly on your system.
@@ -119,22 +144,32 @@ Docker Compose simplifies the deployment and ensures proper volume configuration
 git clone https://github.com/opensensor/lightNVR.git
 cd lightNVR
 
-# Initialize submodules (required for go2rtc build)
-git submodule update --init --recursive
+# Prepare the recordings bind mount for the image's non-root UID:GID
+sudo install -d -o 10001 -g 10001 -m 0750 ./data/recordings
 
-# Start the container (first run will build the image)
+# Start the container from the published image
 docker compose up -d
 ```
 
-The default `docker-compose.yml` creates two volumes:
-- `./config` - Configuration files (mounted to `/etc/lightnvr`)
-- `./data` - Persistent data including database, recordings, and models (mounted to `/var/lib/lightnvr/data`)
+The default `docker-compose.yml` persists storage in three named volumes and one host directory:
+
+- `lightnvr-config` — configuration at `/etc/lightnvr`
+- `lightnvr-database` — database at `/var/lib/lightnvr/data/database`
+- `lightnvr-models` — models at `/var/lib/lightnvr/data/models`
+- `./data/recordings` — recordings at `/var/lib/lightnvr/data/recordings`
+
+Compose prefixes named volumes with its project name. If reusing a recordings directory, ensure UID:GID `10001:10001` can write it.
 
 To customize the configuration:
 
 ```bash
-# Edit the configuration file
-nano config/lightnvr.ini
+# Copy the initialized configuration to a private local file
+umask 077
+docker compose cp lightnvr:/etc/lightnvr/lightnvr.ini ./lightnvr.ini
+nano ./lightnvr.ini
+
+# Write it back as the container user to preserve volume ownership
+docker compose exec -T lightnvr sh -c 'cat > /etc/lightnvr/lightnvr.ini' < ./lightnvr.ini
 
 # Restart the container to apply changes
 docker compose restart
@@ -148,14 +183,16 @@ docker compose restart
 docker pull ghcr.io/opensensor/lightnvr:latest
 ```
 
-##### 2. Create Directories for Persistent Storage
+##### 2. Create Named Volumes for Persistent Storage
 
 ```bash
-mkdir -p /path/to/config
-mkdir -p /path/to/data
+docker volume create lightnvr-config
+docker volume create lightnvr-database
+docker volume create lightnvr-recordings
+docker volume create lightnvr-models
 ```
 
-**Important:** The data directory must be persisted to avoid losing the database and recordings on container restart.
+These volumes preserve configuration, database, recordings, and models when the container is replaced. New empty volumes inherit the image's directory ownership for its non-root user.
 
 ##### 3. Run the Container
 
@@ -172,14 +209,16 @@ docker run -d \
   ghcr.io/opensensor/lightnvr:latest
 ```
 
-##### 4. Create a Configuration File
+##### 4. Customize the Initialized Configuration
 
 ```bash
-# Copy the default configuration
-docker cp lightnvr:/etc/lightnvr/lightnvr.ini /path/to/config/lightnvr.ini
+# Copy to a private local file and edit it
+umask 077
+docker cp lightnvr:/etc/lightnvr/lightnvr.ini ./lightnvr.ini
+nano ./lightnvr.ini
 
-# Edit the configuration
-nano /path/to/config/lightnvr.ini
+# Write it back as the container user to preserve volume ownership
+docker exec -i lightnvr sh -c 'cat > /etc/lightnvr/lightnvr.ini' < ./lightnvr.ini
 ```
 
 **Note:** Ensure the paths in `lightnvr.ini` point to `/var/lib/lightnvr/data` subdirectories:
@@ -205,22 +244,26 @@ download the package matching **both** your architecture and your Debian suite. 
 named `lightnvr_<version>_<suite>_<arch>.deb`, for example:
 
 ```
-lightnvr_0.37.2_trixie_arm64.deb    # Debian 13 / Raspberry Pi OS (trixie), 64-bit
-lightnvr_0.37.2_sid_amd64.deb       # Debian unstable, x86-64
-lightnvr_0.37.2_trixie_armhf.deb    # 32-bit ARM
+lightnvr_0.47.2_trixie_arm64.deb    # Debian 13 / Raspberry Pi OS (trixie), 64-bit
+lightnvr_0.47.2_sid_amd64.deb       # Debian unstable, x86-64
+lightnvr_0.47.2_trixie_armhf.deb    # 32-bit ARM
 ```
 
 The suite matters: the packages link against that release's system libraries, so a `sid`
 package on a `trixie` system will fail to satisfy its dependencies.
 
+From 0.47.3, each release also carries `lightnvr-rs_<version>_sid_amd64.deb`, the build
+generated from the same C sources as Rust (see [rust/README.md](../rust/README.md)). Install
+one package or the other, not both.
+
 #### Debian/Ubuntu
 
 ```bash
 # Substitute the version, suite and architecture you need
-wget https://github.com/opensensor/lightNVR/releases/download/0.37.2/lightnvr_0.37.2_trixie_arm64.deb
+wget https://github.com/opensensor/lightNVR/releases/download/0.47.2/lightnvr_0.47.2_trixie_arm64.deb
 
 # Install the package
-sudo dpkg -i lightnvr_0.37.2_trixie_arm64.deb
+sudo dpkg -i lightnvr_0.47.2_trixie_arm64.deb
 
 # Install any missing dependencies
 sudo apt-get install -f
@@ -561,6 +604,9 @@ cd lightnvr
 # Pull the latest changes
 git pull
 
+# Update submodules to the revisions required by the new commit
+git submodule update --init --recursive
+
 # Rebuild
 ./scripts/build.sh --release
 
@@ -578,6 +624,8 @@ sudo systemctl start lightnvr
 
 #### Using Docker Compose
 
+The default Compose file uses the published image:
+
 ```bash
 # Navigate to the repository
 cd lightNVR
@@ -585,9 +633,18 @@ cd lightNVR
 # Pull the latest changes
 git pull
 
-# Rebuild and restart
-docker compose down
-docker compose build
+# Pull latest image and restart
+docker compose pull
+docker compose up -d
+```
+
+If you enabled the commented `build:` configuration instead of `image:`, update
+the source and submodules, then rebuild before recreating the service:
+
+```bash
+git pull
+git submodule update --init --recursive
+docker compose build --pull
 docker compose up -d
 ```
 
@@ -629,14 +686,22 @@ sudo systemctl disable lightnvr
 sudo rm /etc/systemd/system/lightnvr.service
 sudo systemctl daemon-reload
 
-# Remove the binary
-sudo rm /usr/local/bin/lightnvr
+# Remove the binaries and migrations (default install paths)
+sudo rm -f /usr/local/bin/lightnvr /usr/local/bin/lightnvr-ffmpeg-guard
+sudo rm -rf /usr/local/share/lightnvr/migrations
 
-# Remove configuration and data (optional)
+# Remove configuration and data (optional, default paths)
 sudo rm -rf /etc/lightnvr
 sudo rm -rf /var/lib/lightnvr
 sudo rm -rf /var/log/lightnvr
 ```
+
+**Note:** If you installed with a custom `--prefix` or custom config/data/log
+directories, replace the paths above with the exact paths you chose during
+installation. The optional data removal also removes the installed web assets
+under the data directory. Separately installed go2rtc binaries and shared SOD
+libraries may have other consumers; remove them only if no other installation
+uses them.
 
 ### Uninstalling Docker Installation
 
@@ -650,11 +715,13 @@ cd lightNVR
 docker compose down
 
 # Remove the image
-docker rmi lightnvr
+docker rmi ghcr.io/opensensor/lightnvr:latest
 
-# Remove volumes (optional - this will delete all data)
-rm -rf ./config
-rm -rf ./data
+# Delete configuration, database, and models (optional; irreversible)
+docker compose down --volumes
+
+# Delete recordings in the bind mount separately (optional; irreversible)
+sudo rm -rf ./data/recordings
 ```
 
 #### Using Docker Run
@@ -667,7 +734,9 @@ docker rm lightnvr
 # Remove the image
 docker rmi ghcr.io/opensensor/lightnvr:latest
 
-# Remove volumes (optional - this will delete all data)
-rm -rf /path/to/config
-rm -rf /path/to/data
+# Remove named volumes (optional - this will delete all data)
+docker volume rm lightnvr-config
+docker volume rm lightnvr-database
+docker volume rm lightnvr-recordings
+docker volume rm lightnvr-models
 ```

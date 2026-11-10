@@ -1,3 +1,5 @@
+import { administrationJSON } from '../../../api/administration.ts';
+import { listCameraCollections, listFleetLocations, listFleetTags } from '../../../api/fleet.ts';
 import { useCallback, useEffect, useMemo, useState } from 'preact/hooks';
 import { fetchJSON } from '../../../query-client.ts';
 import { formatLocalDateTime } from '../../../utils/date-utils.ts';
@@ -197,11 +199,11 @@ export function ApiKeyModal({ currentUser, getAuthHeaders, onClose }: ApiKeyModa
     setLoadError('');
     try {
       const [actionResponse, tokenResponse, collectionResponse, locationResponse, tagResponse] = await Promise.all([
-        fetchJSON<AuthorizationActionsResponse>('/api/authorization/actions', { headers: getAuthHeaders(), cache: 'no-store' }),
+        administrationJSON<AuthorizationActionsResponse>('/api/authorization/actions', { headers: getAuthHeaders(), cache: 'no-store' }),
         fetchJSON<ApiTokensResponse>(`/api/authorization/users/${encodeURIComponent(currentUser.id)}/tokens`, { headers: getAuthHeaders(), cache: 'no-store' }),
-        fetchJSON<AccessCollectionsResponse>('/api/camera-collections', { headers: getAuthHeaders(), cache: 'no-store' }),
-        fetchJSON<AccessLocationsResponse>('/api/locations', { headers: getAuthHeaders(), cache: 'no-store' }),
-        fetchJSON<AccessTagsResponse>('/api/camera-tags', { headers: getAuthHeaders(), cache: 'no-store' }),
+        listCameraCollections({headers: getAuthHeaders(), cache: 'no-store'}),
+        listFleetLocations({headers: getAuthHeaders(), cache: 'no-store'}),
+        listFleetTags({headers: getAuthHeaders(), cache: 'no-store'}),
       ]);
       setActions(selectableTokenActions(actionResponse.actions || []));
       setTokens(tokenResponse.tokens || []);
@@ -293,7 +295,7 @@ export function ApiKeyModal({ currentUser, getAuthHeaders, onClose }: ApiKeyModa
   const generateLegacyKey = async () => {
     setLegacyGenerating(true);
     try {
-      const response = await fetchJSON<LegacyApiKeyResponse>(`/api/auth/users/${encodeURIComponent(currentUser.id)}/api-key`, {
+      const response = await administrationJSON<LegacyApiKeyResponse>(`/api/auth/users/${encodeURIComponent(currentUser.id)}/api-key`, {
         method: 'POST',
         headers: getAuthHeaders(),
         timeout: 20000,
@@ -325,7 +327,7 @@ export function ApiKeyModal({ currentUser, getAuthHeaders, onClose }: ApiKeyModa
 
   const closeAllowed = !revealed && !creating && !legacyGenerating;
   return (
-    <div role="presentation" className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-3" onClick={() => closeAllowed && onClose()}>
+    <div role="presentation" className="app-modal-overlay fixed inset-0 flex items-center justify-center bg-black/50 p-3" onClick={() => closeAllowed && onClose()}>
       <section /* eslint-disable-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions -- only keeps clicks inside the dialog from reaching the backdrop */ role="dialog" aria-modal="true" aria-labelledby="api-access-title" className="flex max-h-[95vh] w-full max-w-6xl flex-col overflow-hidden rounded-lg bg-card text-card-foreground shadow-xl" onClick={(event) => event.stopPropagation()}>
         <header className="flex items-start justify-between gap-4 border-b border-border p-5">
           <div><h2 id="api-access-title" className="text-xl font-bold">{t('tokens.title', { username: currentUser.username })}</h2><p className="mt-1 text-sm text-muted-foreground">{t('tokens.description')}</p></div>

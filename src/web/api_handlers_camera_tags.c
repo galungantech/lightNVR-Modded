@@ -17,13 +17,10 @@
 #include "database/db_camera_tags.h"
 #include "database/db_fleet_query.h"
 #include "utils/strings.h"
+#include "utils/uuid.h"
 #include "web/api_handlers_camera_tags.h"
 #include "web/httpd_utils.h"
 #include "web/request_response.h"
-
-static bool valid_uuid_string(const char *uuid) {
-    return uuid && strlen(uuid) == CAMERA_UUID_STRING_SIZE - 1;
-}
 
 static bool valid_color(const char *color) {
     if (!color || color[0] == '\0') return true;
@@ -140,7 +137,7 @@ static bool extract_tag_uuid(const http_request_t *req, char *uuid,
     }
     char *slash = strchr(path_value, '/');
     if (slash) *slash = '\0';
-    if (!valid_uuid_string(path_value) || strlen(path_value) >= uuid_size) {
+    if (!lightnvr_uuid_is_valid(path_value) || strlen(path_value) >= uuid_size) {
         http_response_set_json_error(res, 400, "Invalid camera tag UUID");
         return false;
     }
@@ -158,7 +155,7 @@ static bool extract_camera_uuid(const http_request_t *req, char *uuid,
     }
     char *slash = strchr(path_value, '/');
     if (slash) *slash = '\0';
-    if (!valid_uuid_string(path_value) || strlen(path_value) >= uuid_size) {
+    if (!lightnvr_uuid_is_valid(path_value) || strlen(path_value) >= uuid_size) {
         http_response_set_json_error(res, 400, "Invalid camera UUID");
         return false;
     }
@@ -182,9 +179,6 @@ static bool load_visible_cameras(const http_request_t *req,
     authorization_evaluation_t evaluation;
     *all_fleet =
         (authorization_evaluate(&user, AUTHZ_LIVE_VIEW, NULL, &evaluation) == 0 &&
-         evaluation.decision == AUTHZ_DECISION_ALLOW) ||
-        (authorization_evaluate(&user, AUTHZ_CAMERA_CONFIGURE, NULL,
-                                &evaluation) == 0 &&
          evaluation.decision == AUTHZ_DECISION_ALLOW);
     if (db_fleet_camera_load(cameras, count) != 0 ||
         authorization_filter_cameras(&user, AUTHZ_LIVE_VIEW, *cameras,
@@ -375,7 +369,7 @@ void handle_post_camera_tag_merge(const http_request_t *req,
     cJSON *target = body ?
         cJSON_GetObjectItemCaseSensitive(body, "target_uuid") : NULL;
     if (!body || !cJSON_IsObject(body) || !cJSON_IsString(target) ||
-        !valid_uuid_string(target->valuestring)) {
+        !lightnvr_uuid_is_valid(target->valuestring)) {
         cJSON_Delete(body);
         http_response_set_json_error(res, 400, "A valid target_uuid is required");
         return;
@@ -407,7 +401,7 @@ void handle_post_camera_tag_merge(const http_request_t *req,
     free(json);
 }
 
-static void set_camera_assignments_json(http_response_t *res,
+static void set_camera_assignments_json(const http_request_t *req, http_response_t *res,
                                         const char *camera_uuid) {
     camera_tag_t tags[CAMERA_TAG_MAX_ASSIGNMENTS];
     int count = db_camera_tag_list_for_camera(
@@ -420,6 +414,17 @@ static void set_camera_assignments_json(http_response_t *res,
         http_response_set_json_error(res, 500, "Failed to list camera tags");
         return;
     }
+    /* Use the same visible inventory as the tag catalog. A tag assigned to
+     * this camera must not disclose how many hidden cameras also use it. */
+    fleet_camera_t *cameras = NULL;
+    int camera_count = 0;
+    bool all_fleet = false;
+    if (!load_visible_cameras(req, res, &cameras, &camera_count, &all_fleet)) return;
+    if (!all_fleet) {
+        for (int i = 0; i < count; i++)
+            tags[i].camera_count = visible_tag_camera_count(cameras, camera_count, tags[i].uuid);
+    }
+    free(cameras);
     cJSON *root = cJSON_CreateObject();
     cJSON *items = cJSON_CreateArray();
     if (!root || !items) {
@@ -457,7 +462,7 @@ void handle_get_camera_tag_assignments(const http_request_t *req,
     if (!httpd_authorize_camera_identity_action_with_context(
             req, res, AUTHZ_LIVE_VIEW, camera_uuid, NULL, &(user_t){0},
             &(fleet_camera_t){0}, &(authorization_evaluation_t){0})) return;
-    set_camera_assignments_json(res, camera_uuid);
+    set_camera_assignments_json(req, res, camera_uuid);
 }
 
 void handle_put_camera_tag_assignments(const http_request_t *req,
@@ -466,6 +471,11 @@ void handle_put_camera_tag_assignments(const http_request_t *req,
     if (!extract_camera_uuid(req, camera_uuid, sizeof(camera_uuid), res)) return;
     if (!httpd_authorize_camera_identity_action_with_context(
             req, res, AUTHZ_CAMERA_CONFIGURE, camera_uuid, NULL, &(user_t){0},
+            &(fleet_camera_t){0}, &(authorization_evaluation_t){0})) return;
+    /* The success response reads assignments. Check read authority before any
+     * mutation so a hidden camera cannot be changed and then reported denied. */
+    if (!httpd_authorize_camera_identity_action_with_context(
+            req, res, AUTHZ_LIVE_VIEW, camera_uuid, NULL, &(user_t){0},
             &(fleet_camera_t){0}, &(authorization_evaluation_t){0})) return;
     cJSON *body = httpd_parse_json_body(req);
     cJSON *items = body ?
@@ -485,7 +495,7 @@ void handle_put_camera_tag_assignments(const http_request_t *req,
     const char *tag_uuids[CAMERA_TAG_MAX_ASSIGNMENTS];
     for (int i = 0; i < count; i++) {
         cJSON *item = cJSON_GetArrayItem(items, i);
-        if (!cJSON_IsString(item) || !valid_uuid_string(item->valuestring)) {
+        if (!cJSON_IsString(item) || !lightnvr_uuid_is_valid(item->valuestring)) {
             cJSON_Delete(body);
             http_response_set_json_error(res, 400,
                                          "tag_uuids contains an invalid UUID");
@@ -502,5 +512,5 @@ void handle_put_camera_tag_assignments(const http_request_t *req,
         set_db_error(res, result);
         return;
     }
-    set_camera_assignments_json(res, camera_uuid);
+    set_camera_assignments_json(req, res, camera_uuid);
 }

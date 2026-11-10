@@ -6,6 +6,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <dirent.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,7 +24,48 @@
 #include "video/go2rtc/go2rtc_api.h"
 #include "utils/yaml_validate.h"
 
-void setUp(void) {}
+static bool fail_private_chmod;
+enum override_fault { NO_FAULT, PARTIAL_WRITE_FAILURE, SYNC_FAILURE, CLOSE_FAILURE,
+                      RENAME_FAILURE, SHORT_INTERRUPTED_WRITE };
+static enum override_fault override_fault;
+static int write_calls;
+ssize_t __real_write(int fd, const void *data, size_t count);
+ssize_t __wrap_write(int fd, const void *data, size_t count) {
+    if (override_fault == PARTIAL_WRITE_FAILURE) {
+        if (write_calls++ == 0) return __real_write(fd, data, count > 1 ? count / 2 : count);
+        errno = EIO; return -1;
+    }
+    if (override_fault == SHORT_INTERRUPTED_WRITE) {
+        if (write_calls++ == 0) { errno = EINTR; return -1; }
+        if (count > 3) count = 3;
+    }
+    return __real_write(fd, data, count);
+}
+int __real_fsync(int fd);
+int __wrap_fsync(int fd) {
+    if (override_fault == SYNC_FAILURE) { errno = EIO; return -1; }
+    return __real_fsync(fd);
+}
+int __real_close(int fd);
+int __wrap_close(int fd) {
+    int result = __real_close(fd);
+    if (override_fault == CLOSE_FAILURE) {
+        override_fault = NO_FAULT;
+        errno = EIO; return -1;
+    }
+    return result;
+}
+int __real_rename(const char *old_path, const char *new_path);
+int __wrap_rename(const char *old_path, const char *new_path) {
+    if (override_fault == RENAME_FAILURE) { errno = EACCES; return -1; }
+    return __real_rename(old_path, new_path);
+}
+int __real_fchmod(int fd, mode_t mode);
+int __wrap_fchmod(int fd, mode_t mode) {
+    if (fail_private_chmod) { errno = EPERM; return -1; }
+    return __real_fchmod(fd, mode);
+}
+void setUp(void) { fail_private_chmod = false; override_fault = NO_FAULT; write_calls = 0; }
 void tearDown(void) {}
 
 static char *read_text_file(const char *path) {
@@ -111,7 +153,7 @@ void test_generate_startup_config_uses_saved_webrtc_settings(void) {
     char *contents = read_text_file(config_path);
     TEST_ASSERT_NOT_NULL(contents);
     TEST_ASSERT_NOT_NULL(strstr(contents, "  listen: 127.0.0.1:31984"));
-    TEST_ASSERT_NOT_NULL(strstr(contents, "  listen: \":31554\""));
+    TEST_ASSERT_NOT_NULL(strstr(contents, "  listen: \"127.0.0.1:31554\""));
     TEST_ASSERT_NOT_NULL(strstr(contents, "  listen: \":31555\""));
     TEST_ASSERT_NOT_NULL(strstr(contents, "    - \"192.168.50.10:31555\""));
     TEST_ASSERT_NULL(strstr(contents, "stun.l.google.com"));
@@ -119,6 +161,115 @@ void test_generate_startup_config_uses_saved_webrtc_settings(void) {
     free(contents);
     unlink(config_path);
     rmdir(config_dir);
+}
+
+/* External IP accepts a list: one WebRTC candidate per entry, so clients on
+ * different paths (LAN, Tailscale, public) can each reach go2rtc. */
+void test_generate_startup_config_writes_one_candidate_per_external_ip(void) {
+    load_default_config(&g_config);
+    g_config.go2rtc_api_port = 31984;
+    g_config.go2rtc_rtsp_port = 31554;
+    g_config.go2rtc_webrtc_listen_port = 31555;
+    g_config.go2rtc_stun_enabled = true;
+    snprintf(g_config.go2rtc_stun_server, sizeof(g_config.go2rtc_stun_server),
+             "stun.example.org:3478");
+    snprintf(g_config.go2rtc_external_ip, sizeof(g_config.go2rtc_external_ip),
+             "100.101.102.103, 192.168.101.112 *");
+    g_config.go2rtc_ice_servers[0] = '\0';
+
+    char dir_template[] = "/tmp/lightnvr-go2rtc-config-XXXXXX";
+    char *config_dir = mkdtemp(dir_template);
+    TEST_ASSERT_NOT_NULL(config_dir);
+    char config_path[PATH_MAX];
+    snprintf(config_path, sizeof(config_path), "%s/go2rtc.yaml", config_dir);
+
+    TEST_ASSERT_TRUE(go2rtc_process_generate_startup_config("/bin/true", config_dir,
+                                                            g_config.go2rtc_api_port));
+    char *contents = read_text_file(config_path);
+    TEST_ASSERT_NOT_NULL(contents);
+    TEST_ASSERT_NOT_NULL(strstr(contents, "    - \"100.101.102.103:31555\"\n"
+                                          "    - \"192.168.101.112:31555\"\n"
+                                          "    - \"*:31555\"\n"));
+    TEST_ASSERT_NULL(strstr(contents, "103, 192"));
+    TEST_ASSERT_NOT_NULL(strstr(contents, "      - \"stun:stun.example.org:3478\"\n"));
+    TEST_ASSERT_NOT_NULL(strstr(contents, "    - \"stun:31555\"\n"));
+    TEST_ASSERT_NULL(strstr(strstr(contents, "  candidates:"), "stun:stun.example.org"));
+
+    free(contents);
+    unlink(config_path);
+    rmdir(config_dir);
+}
+
+void test_external_candidates_parse_valid_and_reject_invalid(void) {
+    char out[GO2RTC_MAX_EXTERNAL_CANDIDATES][GO2RTC_CANDIDATE_SIZE];
+
+    TEST_ASSERT_EQUAL_INT(0, go2rtc_parse_external_candidates("", 8555, out, GO2RTC_MAX_EXTERNAL_CANDIDATES));
+    TEST_ASSERT_EQUAL_INT(0, go2rtc_parse_external_candidates(" , ", 8555, out, GO2RTC_MAX_EXTERNAL_CANDIDATES));
+    TEST_ASSERT_EQUAL_INT(0, go2rtc_parse_external_candidates(NULL, 8555, out, GO2RTC_MAX_EXTERNAL_CANDIDATES));
+
+    TEST_ASSERT_EQUAL_INT(1, go2rtc_parse_external_candidates("203.0.113.7", 8555, out, GO2RTC_MAX_EXTERNAL_CANDIDATES));
+    TEST_ASSERT_EQUAL_STRING("203.0.113.7:8555", out[0]);
+    TEST_ASSERT_EQUAL_INT(1, go2rtc_parse_external_candidates("stun", 9000, out,
+                                                              GO2RTC_MAX_EXTERNAL_CANDIDATES));
+    TEST_ASSERT_EQUAL_STRING("stun:9000", out[0]);
+    TEST_ASSERT_EQUAL_INT(1, go2rtc_parse_external_candidates("[::ffff:192.0.2.1]", 8555, out,
+                                                              GO2RTC_MAX_EXTERNAL_CANDIDATES));
+    TEST_ASSERT_EQUAL_STRING("[::ffff:192.0.2.1]:8555", out[0]);
+
+    TEST_ASSERT_EQUAL_INT(6, go2rtc_parse_external_candidates(
+        "auto,\nnvr.example.com:9000; [fd7a:115c::1]:8556 fd7a:115c::2 stun:9001 203.0.113.7",
+        8555, out, GO2RTC_MAX_EXTERNAL_CANDIDATES));
+    TEST_ASSERT_EQUAL_STRING("*:8555", out[0]);
+    TEST_ASSERT_EQUAL_STRING("nvr.example.com:9000", out[1]);
+    TEST_ASSERT_EQUAL_STRING("[fd7a:115c::1]:8556", out[2]);
+    TEST_ASSERT_EQUAL_STRING("[fd7a:115c::2]:8555", out[3]);
+    TEST_ASSERT_EQUAL_STRING("stun:9001", out[4]);
+    TEST_ASSERT_EQUAL_STRING("203.0.113.7:8555", out[5]);
+
+    /* Duplicates collapse. */
+    TEST_ASSERT_EQUAL_INT(1, go2rtc_parse_external_candidates("10.0.0.1, 10.0.0.1:8555", 8555, out,
+                                                              GO2RTC_MAX_EXTERNAL_CANDIDATES));
+
+    /* Anything that could break the YAML or is not a host is rejected. */
+    const char *invalid[] = {
+        "10.0.0.1\"", "10.0.0.1:0", "10.0.0.1:70000", "10.0.0.1:port", "host/name",
+        "a\\b", "[fd00::1", "fd00::1]:80", "stun:", "*:x", "-bad.example", "10.0.0.1:",
+        "1,2,3,4,5,6,7,8,9", "[:::]", "1:2:3", "[12345::1]", "[::ffff:999.1.1.1]",
+        "stun:stun.example.org", "stun:stun.example.org:3478", "stun:0", "stun:65536",
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        TEST_ASSERT_EQUAL_INT_MESSAGE(-1, go2rtc_parse_external_candidates(invalid[i], 8555, out,
+                                                                          GO2RTC_MAX_EXTERNAL_CANDIDATES),
+                                      invalid[i]);
+    }
+}
+
+void test_external_candidates_output_bounds(void) {
+    char out[2][GO2RTC_CANDIDATE_SIZE];
+    memset(out, 'X', sizeof(out));
+    char original[sizeof(out)];
+    memcpy(original, out, sizeof(out));
+
+    /* No candidates means no output storage is needed. */
+    const char *empty[] = {NULL, "", " ,;\t\n\r "};
+    for (size_t i = 0; i < sizeof(empty) / sizeof(empty[0]); i++) {
+        TEST_ASSERT_EQUAL_INT(0, go2rtc_parse_external_candidates(empty[i], 8555, NULL, 1));
+        TEST_ASSERT_EQUAL_INT(0, go2rtc_parse_external_candidates(empty[i], 8555, NULL, 0));
+        TEST_ASSERT_EQUAL_INT(0, go2rtc_parse_external_candidates(empty[i], 8555, out, -1));
+    }
+
+    TEST_ASSERT_EQUAL_INT(-1, go2rtc_parse_external_candidates(" ,; 203.0.113.7", 8555, NULL, 1));
+    TEST_ASSERT_EQUAL_INT(-1, go2rtc_parse_external_candidates("203.0.113.7", 8555, NULL, 0));
+    TEST_ASSERT_EQUAL_INT(-1, go2rtc_parse_external_candidates("203.0.113.7", 8555, out, 0));
+    TEST_ASSERT_EQUAL_INT(-1, go2rtc_parse_external_candidates("203.0.113.7", 8555, out, -1));
+    TEST_ASSERT_EQUAL_MEMORY(original, out, sizeof(out));
+
+    /* A duplicate at capacity is valid, but a new entry cannot overwrite the sentinel. */
+    TEST_ASSERT_EQUAL_INT(1, go2rtc_parse_external_candidates("203.0.113.7,203.0.113.7:8555", 8555, out, 1));
+    TEST_ASSERT_EQUAL_STRING("203.0.113.7:8555", out[0]);
+    TEST_ASSERT_EQUAL_MEMORY(original + GO2RTC_CANDIDATE_SIZE, out[1], GO2RTC_CANDIDATE_SIZE);
+    TEST_ASSERT_EQUAL_INT(-1, go2rtc_parse_external_candidates("203.0.113.7,203.0.113.8", 8555, out, 1));
+    TEST_ASSERT_EQUAL_MEMORY(original + GO2RTC_CANDIDATE_SIZE, out[1], GO2RTC_CANDIDATE_SIZE);
 }
 
 void test_generate_startup_config_writes_db_override_file(void) {
@@ -165,6 +316,31 @@ void test_generate_startup_config_writes_db_override_file(void) {
     TEST_ASSERT_NULL_MESSAGE(strstr(base_contents, "  level: trace"),
                              "Base config must not contain DB-backed override content");
 
+    /* Existing files must be private too, regardless of the creation umask. */
+    TEST_ASSERT_EQUAL_INT(0, chmod(config_path, 0666));
+    TEST_ASSERT_EQUAL_INT(0, chmod(override_path, 0666));
+    TEST_ASSERT_TRUE(go2rtc_process_generate_startup_config("/bin/true", config_dir, g_config.go2rtc_api_port));
+    struct stat mode;
+    TEST_ASSERT_EQUAL_INT(0, stat(config_path, &mode));
+    TEST_ASSERT_EQUAL_UINT(0600, mode.st_mode & 0777);
+    TEST_ASSERT_EQUAL_INT(0, stat(override_path, &mode));
+    TEST_ASSERT_EQUAL_UINT(0600, mode.st_mode & 0777);
+
+    /* Failure to establish private permissions must not truncate or replace
+     * the previous configuration, nor continue to write credential material. */
+    fail_private_chmod = true;
+    bool base_result = go2rtc_process_generate_config(config_path, g_config.go2rtc_api_port);
+    int override_result = go2rtc_process_generate_override_file(override_path);
+    fail_private_chmod = false;
+    TEST_ASSERT_FALSE(base_result);
+    TEST_ASSERT_EQUAL_INT(-1, override_result);
+    char *unchanged = read_text_file(config_path);
+    TEST_ASSERT_NOT_NULL(unchanged);
+    TEST_ASSERT_EQUAL_STRING(base_contents, unchanged); free(unchanged);
+    unchanged = read_text_file(override_path);
+    TEST_ASSERT_NOT_NULL(unchanged);
+    TEST_ASSERT_EQUAL_STRING(override_contents, unchanged); free(unchanged);
+
     free(base_contents);
     free(override_contents);
     if (yaml_validate_is_available()) {
@@ -183,6 +359,60 @@ void test_generate_startup_config_writes_db_override_file(void) {
     }
     shutdown_database();
     remove_tree(root_dir);
+}
+
+void test_override_publication_preserves_old_file_on_io_failure_and_recovers(void) {
+    load_default_config(&g_config);
+    char root[] = "/tmp/lightnvr-override-atomic-XXXXXX";
+    TEST_ASSERT_NOT_NULL(mkdtemp(root));
+    char database[256], path[256], stale[300];
+    snprintf(database, sizeof(database), "%s/test.db", root);
+    snprintf(path, sizeof(path), "%s/override.yaml", root);
+    snprintf(stale, sizeof(stale), "%s.tmp.%ld", path, (long)getpid());
+    TEST_ASSERT_EQUAL_INT(0, init_database(database));
+    const char *old = "api: {base_path: /before}\n";
+    const char *next = "api: {base_path: /after}\nlog: {level: debug}\n";
+    TEST_ASSERT_EQUAL_INT(0, db_set_system_setting("go2rtc_config_override", old));
+    TEST_ASSERT_EQUAL_INT(0, go2rtc_process_generate_override_file(path));
+    FILE *abandoned = fopen(stale, "w");
+    TEST_ASSERT_NOT_NULL(abandoned);
+    fputs("abandoned", abandoned);
+    fclose(abandoned);
+    TEST_ASSERT_EQUAL_INT(0, db_set_system_setting("go2rtc_config_override", next));
+    for (enum override_fault fault = PARTIAL_WRITE_FAILURE; fault <= RENAME_FAILURE; fault++) {
+        override_fault = fault;
+        write_calls = 0;
+        int result = go2rtc_process_generate_override_file(path);
+        override_fault = NO_FAULT;
+        TEST_ASSERT_EQUAL_INT(-1, result);
+        char *contents = read_text_file(path);
+        TEST_ASSERT_EQUAL_STRING(old, contents);
+        free(contents);
+        if (yaml_validate_is_available()) TEST_ASSERT_EQUAL_STRING("/before", go2rtc_api_get_base_path());
+        DIR *dir = opendir(root);
+        TEST_ASSERT_NOT_NULL(dir);
+        unsigned temporary_files = 0;
+        struct dirent *entry;
+        while ((entry = readdir(dir)))
+            if (strncmp(entry->d_name, "override.yaml.tmp.", 18) == 0) temporary_files++;
+        closedir(dir);
+        TEST_ASSERT_EQUAL_UINT(1, temporary_files); // Only the pre-existing abandoned file.
+    }
+    override_fault = SHORT_INTERRUPTED_WRITE;
+    write_calls = 0;
+    int result = go2rtc_process_generate_override_file(path);
+    override_fault = NO_FAULT;
+    TEST_ASSERT_EQUAL_INT(0, result);
+    char *contents = read_text_file(path);
+    TEST_ASSERT_EQUAL_STRING(next, contents);
+    free(contents);
+    struct stat info;
+    TEST_ASSERT_EQUAL_INT(0, stat(path, &info));
+    TEST_ASSERT_EQUAL_UINT(0600, info.st_mode & 0777);
+    TEST_ASSERT_EQUAL_INT(0, access(stale, F_OK));
+    shutdown_database();
+    remove_tree(root);
+    go2rtc_api_apply_base_path_override(NULL, 0);
 }
 
 void test_audio_policy_keeps_db_override_dormant(void) {
@@ -416,7 +646,11 @@ int main(int argc, char **argv) {
 
     UNITY_BEGIN();
     RUN_TEST(test_generate_startup_config_uses_saved_webrtc_settings);
+    RUN_TEST(test_generate_startup_config_writes_one_candidate_per_external_ip);
+    RUN_TEST(test_external_candidates_parse_valid_and_reject_invalid);
+    RUN_TEST(test_external_candidates_output_bounds);
     RUN_TEST(test_generate_startup_config_writes_db_override_file);
+    RUN_TEST(test_override_publication_preserves_old_file_on_io_failure_and_recovers);
     RUN_TEST(test_audio_policy_keeps_db_override_dormant);
     RUN_TEST(test_base_config_has_no_user_override_append_block);
     RUN_TEST(test_override_helpers_are_linkable_stubs);

@@ -1,3 +1,4 @@
+import {ContractValidationError} from '../js/api/contractErrors.ts';
 import { recordingsAPI } from '../js/components/preact/recordings/recordingsAPI.tsx';
 
 jest.mock('../js/components/preact/ToastContainer.tsx', () => ({
@@ -25,14 +26,29 @@ jest.mock('../js/query-client.ts', () => ({
 
 const { fetchJSON, enhancedFetch } = require('../js/fetch-utils.ts');
 const { showStatusMessage } = require('../js/components/preact/ToastContainer.tsx');
+const detection = (label) => ({label,confidence:0.9,x:0,y:0,width:1,height:1,timestamp:1771390800,end_timestamp:1771390800});
+const detectionResponse = (detections) => new Response(JSON.stringify({detections,timestamp:'2026-02-18 05:00:00',stream_status:'Running'}),{status:200,headers:{'Content-Type':'application/json'}});
 
 describe('recordingsAPI', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    fetchJSON.mockReset();
+    enhancedFetch.mockReset();
   });
 
   afterEach(() => {
     jest.restoreAllMocks();
+  });
+
+  test('tag requests preserve an exact large timeline recording ID', async () => {
+    const id = '9007199254740993';
+    fetchJSON.mockResolvedValue({tags: ['event']});
+    await expect(recordingsAPI.getRecordingTags(id)).resolves.toEqual(['event']);
+    expect(fetchJSON).toHaveBeenLastCalledWith(`/api/recordings/${id}/tags`, expect.any(Object));
+    await recordingsAPI.setRecordingTags(id, ['event']);
+    expect(fetchJSON).toHaveBeenLastCalledWith(`/api/recordings/${id}/tags`, expect.objectContaining({
+      method: 'PUT', body: JSON.stringify({tags: ['event']}),
+    }));
   });
 
   test.each(['invalid_media', 'no_video', 'decode_error'])('explains %s without opening a broken player', playback_issue => {
@@ -59,10 +75,10 @@ describe('recordingsAPI', () => {
     const start = recordingsAPI.parseRecordingTimestamp(recording.start_time);
     const end = recordingsAPI.parseRecordingTimestamp(recording.end_time);
 
-    fetchJSON.mockResolvedValue({ detections: [{ label: 'person' }] });
+    enhancedFetch.mockImplementation(async()=>detectionResponse([detection('person')]));
 
     await expect(recordingsAPI.checkRecordingHasDetections(recording)).resolves.toBe(true);
-    expect(fetchJSON).toHaveBeenCalledWith(
+    expect(enhancedFetch).toHaveBeenCalledWith(
       `/api/detection/results/front-yard?start=${start}&end=${end}`,
       expect.objectContaining({ timeout: 10000, retries: 1, retryDelay: 500 })
     );
@@ -76,7 +92,7 @@ describe('recordingsAPI', () => {
       end_time: '2026-02-18T06:01:00Z'
     };
 
-    fetchJSON.mockResolvedValue({ detections: [] });
+    enhancedFetch.mockImplementation(async()=>detectionResponse([]));
 
     await expect(recordingsAPI.checkRecordingHasDetections(recording)).resolves.toBe(false);
   });
@@ -94,26 +110,25 @@ describe('recordingsAPI', () => {
     ).resolves.toBe(false);
   });
 
-  test('checkRecordingHasDetections returns false when timestamp parsing fails', async () => {
+  test.each([
+    ['start', 'invalid-timestamp', '2026-02-18T05:01:00Z'],
+    ['end', '2026-02-18T05:00:00Z', 'invalid-timestamp'],
+    ['both', 'invalid-timestamp', 'invalid-timestamp']
+  ])('checkRecordingHasDetections returns false without requesting detections when %s timestamps are invalid', async (_invalid, start_time, end_time) => {
     const recording = {
       id: 44,
       stream: 'front-yard',
-      start_time: 'invalid-timestamp',
-      end_time: 'invalid-timestamp'
+      start_time,
+      end_time
     };
-
-    const parseSpy = jest
-      .spyOn(recordingsAPI, 'parseRecordingTimestamp')
-      .mockImplementation(() => {
-        throw new Error('parse error');
-      });
+    const errorLog = jest.spyOn(console, 'error').mockImplementation(() => {});
 
     await expect(recordingsAPI.checkRecordingHasDetections(recording)).resolves.toBe(false);
-
-    parseSpy.mockRestore();
+    expect(enhancedFetch).not.toHaveBeenCalled();
+    expect(errorLog).toHaveBeenCalledWith('Failed to parse recording timestamps');
   });
 
-  test('checkRecordingHasDetections returns false when fetchJSON throws an error', async () => {
+  test('checkRecordingHasDetections returns false when enhancedFetch throws an error', async () => {
     const recording = {
       id: 45,
       stream: 'front-yard',
@@ -121,7 +136,7 @@ describe('recordingsAPI', () => {
       end_time: '2026-02-18T08:01:00Z'
     };
 
-    fetchJSON.mockRejectedValue(new Error('network error'));
+    enhancedFetch.mockRejectedValue(new Error('network error'));
 
     await expect(recordingsAPI.checkRecordingHasDetections(recording)).resolves.toBe(false);
   });
@@ -135,12 +150,12 @@ describe('recordingsAPI', () => {
     };
     const start = recordingsAPI.parseRecordingTimestamp(recording.start_time);
     const end = recordingsAPI.parseRecordingTimestamp(recording.end_time);
-    const detections = [{ label: 'car' }];
+    const detections = [detection('car')];
 
-    fetchJSON.mockResolvedValue({ detections });
+    enhancedFetch.mockImplementation(async()=>detectionResponse(detections));
 
     await expect(recordingsAPI.getRecordingDetections(recording)).resolves.toEqual(detections);
-    expect(fetchJSON).toHaveBeenCalledWith(
+    expect(enhancedFetch).toHaveBeenCalledWith(
       `/api/detection/results/driveway?start=${start}&end=${end}`,
       expect.objectContaining({ timeout: 15000, retries: 1, retryDelay: 1000 })
     );
@@ -157,32 +172,30 @@ describe('recordingsAPI', () => {
     const result = await recordingsAPI.getRecordingDetections(recording);
 
     expect(result).toEqual([]);
-    expect(fetchJSON).not.toHaveBeenCalled();
+    expect(enhancedFetch).not.toHaveBeenCalled();
   });
 
-  test('getRecordingDetections returns empty array when timestamp parsing fails', async () => {
+  test.each([
+    ['start', 'invalid-timestamp', '2026-02-18T05:01:00Z'],
+    ['end', '2026-02-18T05:00:00Z', 'invalid-timestamp'],
+    ['both', 'invalid-timestamp', 'invalid-timestamp']
+  ])('getRecordingDetections returns empty array without requesting detections when %s timestamps are invalid', async (_invalid, start_time, end_time) => {
     const recording = {
       id: 89,
       stream: 'backyard',
-      start_time: 'invalid-start-timestamp',
-      end_time: 'invalid-end-timestamp'
+      start_time,
+      end_time
     };
-
-    const parseSpy = jest
-      .spyOn(recordingsAPI, 'parseRecordingTimestamp')
-      .mockImplementation(() => {
-        throw new Error('parse error');
-      });
+    const errorLog = jest.spyOn(console, 'error').mockImplementation(() => {});
 
     const result = await recordingsAPI.getRecordingDetections(recording);
 
     expect(result).toEqual([]);
-    expect(fetchJSON).not.toHaveBeenCalled();
-
-    parseSpy.mockRestore();
+    expect(enhancedFetch).not.toHaveBeenCalled();
+    expect(errorLog).toHaveBeenCalledWith('Failed to parse recording timestamps');
   });
 
-  test('getRecordingDetections returns empty array when fetchJSON rejects', async () => {
+  test('getRecordingDetections returns empty array when enhancedFetch rejects', async () => {
     const recording = {
       id: 90,
       stream: 'side-yard',
@@ -190,14 +203,14 @@ describe('recordingsAPI', () => {
       end_time: '2026-02-18T05:21:00Z'
     };
 
-    fetchJSON.mockRejectedValue(new Error('network error'));
+    enhancedFetch.mockRejectedValue(new Error('network error'));
 
     const result = await recordingsAPI.getRecordingDetections(recording);
 
     expect(result).toEqual([]);
   });
 
-  test('getRecordingDetections returns empty array when response is missing detections property', async () => {
+  test('getRecordingDetections reports a contract error before its tolerant empty fallback', async () => {
     const recording = {
       id: 91,
       stream: 'garage',
@@ -205,11 +218,14 @@ describe('recordingsAPI', () => {
       end_time: '2026-02-18T05:31:00Z'
     };
 
-    fetchJSON.mockResolvedValue({});
+    const errorLog=jest.spyOn(console,'error').mockImplementation(()=>{});
+    enhancedFetch.mockImplementation(async()=>new Response('{}',{status:200,headers:{'Content-Type':'application/json'}}));
 
     const result = await recordingsAPI.getRecordingDetections(recording);
 
     expect(result).toEqual([]);
+    expect(errorLog).toHaveBeenCalledWith('Error getting detections:',expect.any(ContractValidationError));
+    expect(errorLog.mock.calls[0][1]).toMatchObject({phase:'response'});
   });
 
   test('filter option loaders retain their tolerant default behavior', async () => {
@@ -235,6 +251,33 @@ describe('recordingsAPI', () => {
       timeout: 15000,
       retries: 0
     });
+  });
+
+  test.each([true, false])('selected deletion preserves exact keys with modal=%s', async useModal => {
+    const priorWindow = global.window;
+    const expected = {succeeded: 2, failed: 0};
+    const modal = jest.fn().mockResolvedValue(expected);
+    global.window = useModal ? {batchDeleteRecordingsByHttpRequest: modal} : {};
+    const direct = jest.spyOn(recordingsAPI, 'deleteSelectedRecordingsHttp').mockResolvedValue(expected);
+    try {
+      await expect(recordingsAPI.deleteSelectedRecordings({
+        '42': true, '9007199254740993': true, '9007199254740992': false,
+      })).resolves.toEqual(expected);
+      if (useModal) {
+        expect(modal).toHaveBeenCalledWith({ids: ['42', '9007199254740993']});
+        expect(direct).not.toHaveBeenCalled();
+      } else expect(direct).toHaveBeenCalledWith(['42', '9007199254740993']);
+    } finally {global.window = priorWindow;}
+  });
+
+  test('direct deletion sends large IDs as unchanged strings', async () => {
+    const response = {json: jest.fn()};
+    enhancedFetch.mockResolvedValue(response);
+    jest.spyOn(recordingsAPI, 'handleBatchDeleteResponse').mockResolvedValue({succeeded: 1, failed: 0});
+    await recordingsAPI.deleteSelectedRecordingsHttp(['9007199254740993']);
+    expect(enhancedFetch).toHaveBeenCalledWith('/api/recordings/batch-delete', expect.objectContaining({
+      body: JSON.stringify({ids: ['9007199254740993']}),
+    }));
   });
 
   test('deleteSelectedRecordingsHttp delegates response handling to shared helper', async () => {
@@ -296,12 +339,23 @@ describe('recordingsAPI', () => {
 
 describe('archive batch deletion outcomes', () => {
   const { useMutation, useQueryClient } = require('../js/query-client.ts');
+  let previousWindow;
+  let hadWindow;
   beforeEach(() => {
     jest.clearAllMocks();
     fetchJSON.mockReset();
+    hadWindow = Object.prototype.hasOwnProperty.call(global, 'window');
+    previousWindow = global.window;
     global.window = {};
   });
-  afterEach(() => { jest.restoreAllMocks(); delete global.window; });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    if (hadWindow) {
+      global.window = previousWindow;
+    } else {
+      delete global.window;
+    }
+  });
 
   test('mutation waits for the durable job outcome before resolving and refreshing', async () => {
     const invalidateQueries = jest.fn();
@@ -336,5 +390,100 @@ describe('archive batch deletion outcomes', () => {
   test('job polling preserves pending cleanup and failure counts', async () => {
     fetchJSON.mockResolvedValueOnce({ complete: true, succeeded: 3, pending_deletions: 2, failed: 1 });
     await expect(recordingsAPI.pollBatchDeleteProgress('finished')).resolves.toEqual({ succeeded: 3, pending_deletions: 2, failed: 1 });
+  });
+});
+
+describe('batch deletion polling deadline', () => {
+  let priorWindow;
+  beforeEach(() => {
+    jest.useFakeTimers();
+    fetchJSON.mockReset();
+    priorWindow = global.window;
+    global.window = {updateBatchDeleteProgress: jest.fn()};
+    for (const method of ['log', 'debug', 'warn', 'error']) {
+      jest.spyOn(console, method).mockImplementation(() => {});
+    }
+  });
+  afterEach(() => {
+    jest.clearAllTimers();
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+    global.window = priorWindow;
+  });
+
+  async function expiresAtDeadline() {
+    let settled = false;
+    const result = recordingsAPI.pollBatchDeleteProgress('slow-job').catch(error => error)
+      .then(value => { settled = true; return value; });
+    await jest.advanceTimersByTimeAsync(119999);
+    expect(settled).toBe(false);
+    await jest.advanceTimersByTimeAsync(1);
+    expect(await result).toEqual(new Error('Batch delete operation timed out'));
+    const calls = fetchJSON.mock.calls.length;
+    await jest.advanceTimersByTimeAsync(60000);
+    expect(fetchJSON).toHaveBeenCalledTimes(calls);
+    expect(jest.getTimerCount()).toBe(0);
+  }
+
+  test('pending responses and exponential backoff share a two-minute deadline', async () => {
+    fetchJSON.mockResolvedValue({complete: false});
+    await expiresAtDeadline();
+    expect(fetchJSON.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  test('a stalled response is aborted and cannot publish a late completion', async () => {
+    let finish;
+    let signal;
+    fetchJSON.mockImplementation((_url, options) => {
+      signal = options.signal;
+      return new Promise(resolve => {finish = resolve;});
+    });
+    await expiresAtDeadline();
+    expect(signal.aborted).toBe(true);
+    finish({complete: true, succeeded: 1});
+    await jest.advanceTimersByTimeAsync(0);
+    expect(window.updateBatchDeleteProgress).not.toHaveBeenCalled();
+    expect(fetchJSON).toHaveBeenCalledTimes(1);
+  });
+
+  test('real fetch timeouts and internal retries cannot extend the deadline', async () => {
+    const actual = jest.requireActual('../js/fetch-utils.ts');
+    fetchJSON.mockImplementation(actual.fetchJSON);
+    const signals = [];
+    const fetch = jest.spyOn(global, 'fetch').mockImplementation((_url, {signal}) => {
+      signals.push(signal);
+      return new Promise((_, reject) => {
+        signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), {once: true});
+      });
+    });
+    await expiresAtDeadline();
+    expect(fetch.mock.calls.length).toBeGreaterThan(fetchJSON.mock.calls.length);
+    expect(signals.every(signal => signal.aborted)).toBe(true);
+  });
+
+  test('a completed job after a transient failure clears all deadline timers', async () => {
+    fetchJSON.mockRejectedValueOnce(new Error('temporary failure'))
+      .mockResolvedValueOnce({complete: true, succeeded: 3, pending_deletions: 2, failed: 1});
+    const result = recordingsAPI.pollBatchDeleteProgress('recovered');
+    await jest.advanceTimersByTimeAsync(1000);
+    await expect(result).resolves.toEqual({succeeded: 3, pending_deletions: 2, failed: 1});
+    expect(jest.getTimerCount()).toBe(0);
+    await jest.advanceTimersByTimeAsync(120000);
+    expect(fetchJSON).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('recording detection URL encoding', () => {
+  afterEach(() => jest.restoreAllMocks());
+  test.each(['checkRecordingHasDetections', 'getRecordingDetections'])('%s encodes stream path characters', async method => {
+    enhancedFetch.mockReset();
+    enhancedFetch.mockImplementation(async () => detectionResponse([detection('person')]));
+    const stream = 'Front #1?zone=2%/east';
+    const recording = {id: 42, stream, start_time: '2026-02-18T05:00:00Z', end_time: '2026-02-18T05:01:00Z'};
+    const result = await recordingsAPI[method](recording);
+    expect(result).toEqual(method === 'checkRecordingHasDetections' ? true : [detection('person')]);
+    const url = enhancedFetch.mock.calls[0][0];
+    expect(url.split('?')[0]).toBe(`/api/detection/results/${encodeURIComponent(stream)}`);
+    expect(new URL(url, 'http://localhost').searchParams.has('zone')).toBe(false);
   });
 });

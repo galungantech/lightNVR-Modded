@@ -1,5 +1,5 @@
 import type { ComponentChildren } from 'preact';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useState, useRef } from 'preact/hooks';
 
 import { useI18n } from '../../i18n.ts';
 import {
@@ -7,6 +7,7 @@ import {
   redirectToLogin,
   validateSession,
 } from '../../utils/auth-utils.ts';
+import { changePassword } from '../../api/authentication.ts';
 import { validateForcedPasswordChange } from './forcedPasswordChange.ts';
 
 type SessionInfo = Awaited<ReturnType<typeof validateSession>>;
@@ -18,6 +19,8 @@ export function RequiredPasswordChange({ session }: { session: SessionInfo }) {
   const [confirmation, setConfirmation] = useState('');
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const requestRef = useRef<AbortController | null>(null);
+  useEffect(() => () => requestRef.current?.abort(), [session.id]);
 
   useEffect(() => {
     document.title = `${t('passwordChangeRequired.title')} - LightNVR`;
@@ -25,6 +28,7 @@ export function RequiredPasswordChange({ session }: { session: SessionInfo }) {
 
   const handleSubmit = async (event: Event) => {
     event.preventDefault();
+    if (requestRef.current && !requestRef.current.signal.aborted) return;
     const validationError = validateForcedPasswordChange(
       currentPassword,
       newPassword,
@@ -35,29 +39,21 @@ export function RequiredPasswordChange({ session }: { session: SessionInfo }) {
       return;
     }
 
-    setSaving(true);
-    setError('');
+    const controller = new AbortController();
+    requestRef.current = controller;
+    setSaving(true); setError('');
     try {
-      const response = await fetch(`/api/auth/users/${session.id}/password`, {
-        method: 'PUT',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          old_password: currentPassword,
-          new_password: newPassword,
-        }),
-      });
-
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({})) as { error?: string };
-        throw new Error(payload.error || t('passwordChangeRequired.error.generic'));
-      }
-
+      if (session.id === undefined) throw new Error('Missing identity');
+      await changePassword(session.id, {old_password: currentPassword, new_password: newPassword}, {signal: controller.signal});
+      if (controller.signal.aborted) return;
+      setCurrentPassword(''); setNewPassword(''); setConfirmation('');
       clearAuthState();
       window.location.assign('/login.html?password_changed=true');
-    } catch (requestError) {
-      setError((requestError as Error).message || t('passwordChangeRequired.error.generic'));
-      setSaving(false);
+    } catch {
+      if (!controller.signal.aborted) setError(t('passwordChangeRequired.error.generic'));
+    } finally {
+      controller.abort();
+      if (requestRef.current === controller) { requestRef.current = null; setSaving(false); }
     }
   };
 
@@ -147,20 +143,47 @@ export function RequiredPasswordChange({ session }: { session: SessionInfo }) {
 export function AuthGate({ children }: { children?: ComponentChildren }) {
   const { t } = useI18n();
   const [session, setSession] = useState<SessionInfo | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let active = true;
-    validateSession().then((result) => {
-      if (!active) return;
-      if (!result.valid) {
+    const controller = new AbortController();
+    setUnavailable(false);
+    const cleared = () => {
+      controller.abort();
+      setSession(null);
+      setUnavailable(false);
+    };
+    window.addEventListener('lightnvr:auth-cleared', cleared);
+    validateSession({signal: controller.signal}).then((result) => {
+      if (!active || controller.signal.aborted) return;
+      if (result.status === 'invalid') {
         clearAuthState();
         redirectToLogin('session_expired');
         return;
       }
+      if (!result.valid) {
+        setUnavailable(true);
+        return;
+      }
       setSession(result);
     });
-    return () => { active = false; };
-  }, []);
+    return () => {
+      active = false;
+      controller.abort();
+      window.removeEventListener('lightnvr:auth-cleared', cleared);
+    };
+  }, [attempt]);
+
+  if (!session && unavailable) {
+    return <section className="flex min-h-screen flex-col items-center justify-center gap-4" role="alert">
+      <p>{t('auth.sessionVerificationUnavailable')}</p>
+      <button type="button" className="btn btn-primary" onClick={() => setAttempt(value => value + 1)}>
+        {t('common.retry')}
+      </button>
+    </section>;
+  }
 
   if (!session) {
     return <div className="flex min-h-screen items-center justify-center">{t('common.loading')}</div>;

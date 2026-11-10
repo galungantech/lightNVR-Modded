@@ -1,10 +1,10 @@
 /**
- * Types for the Streams page and its modals. Response shapes come from the C
- * handlers in src/web/, named on each type; see js/types/core.ts for the shared
- * Stream and StreamSummary shapes.
+ * Types for the Streams page and its modals. Pilot wire shapes use generated
+ * contracts; editable state and non-pilot create/test/ONVIF shapes stay separate.
  */
 import type { EptzFormFields } from '../utils/eptz-config.ts';
-import type { Stream, StreamSummariesResponse, StreamSummary } from './core.ts';
+import type { components } from '../../generated/api/schema';
+import type { ObservationFormFields } from '../utils/observation-evidence.ts';
 
 /**
  * A numeric form field: a number until the user edits it, then the input's
@@ -45,59 +45,41 @@ export interface ZonesResponse {
 // Stream API: api_handlers_streams_get.c, api_handlers_streams_test.c
 // ---------------------------------------------------------------------------
 
-/**
- * Item of the Streams page list. The summary handler does not emit `url` or
- * `error_message`, so both are undefined at runtime; they are typed because
- * isDeviceAlreadyAdded and StreamCard read them.
- */
-export interface StreamListItem extends StreamSummary {
-  url?: string;
-  error_message?: string;
-}
+/** Validated pilot wire shapes; editable form state is defined separately. */
+export type StreamListResponse = components['schemas']['StreamSummaryPage'];
+export type StreamListItem = StreamListResponse['streams'][number];
+export type StreamFullResponse = components['schemas']['StreamFullResponse'];
+export type StreamFull = StreamFullResponse['stream'];
 
-export interface StreamListResponse extends Omit<StreamSummariesResponse, 'streams'> {
-  streams?: StreamListItem[];
-}
-
-/**
- * Stream from GET /api/streams/:name/full. No handler emits `detection_zones`;
- * it is typed because the edit modal reads it.
- */
-export interface StreamFull extends Stream {
-  detection_zones?: DetectionZone[];
-}
-
-/** handle_get_stream_full wraps the stream in this object. */
-export interface StreamFullResponse {
-  stream?: StreamFull;
-}
-
-/** Body of POST /api/streams and PUT /api/streams/:name. */
-export interface StreamSavePayload {
+/** Explicit form-to-wire mapping shared by manual creation and ordinary PUT. */
+export type StreamSavePayload = components['schemas']['StreamConfigurationUpdate'] & {
   name: string;
   is_deleted?: boolean;
-  [field: string]: unknown;
+};
+
+/** Existing ONVIF POST shape, outside the generated pilot. */
+export interface OnvifStreamCreatePayload {
+  name: string;
+  url: string;
+  enabled: boolean;
+  streaming_enabled: boolean;
+  protocol: number;
+  priority: number;
+  segment_duration: number;
+  record: boolean;
+  record_audio: boolean;
+  audio_voice_enhancement: boolean;
+  backchannel_enabled: boolean;
+  isOnvif: boolean;
+  onvif_username: string;
+  onvif_password: string;
+  onvif_profile: string;
+  onvif_port: number;
 }
 
 /** Body of POST /api/streams/test. */
-export interface StreamTestRequest {
-  url: string;
-  protocol: number;
-  onvif_username?: string;
-  onvif_password?: string;
-}
-
-/** POST /api/streams/test. `message` is only present on failure. */
-export interface StreamTestResponse {
-  success: boolean;
-  message?: string;
-  info?: {
-    width: number;
-    height: number;
-    fps: number;
-    codec: string;
-  };
-}
+export type StreamTestRequest = components['schemas']['StreamProbeRequest'];
+export type StreamTestResponse = components['schemas']['StreamProbeResponse'];
 
 /** fetchJSON rejects with HTTPError, which has `status`, or a plain Error, which does not. */
 export type StreamRequestError = Error & { status?: number };
@@ -189,7 +171,7 @@ export interface StreamFormFields {
   adminUrl: string;
   enabled: boolean;
   streamingEnabled: boolean;
-  playbackTransport: string;
+  playbackTransport: components['schemas']['PlaybackTransport'];
   width: number;
   height: number;
   fps: number;
@@ -247,14 +229,10 @@ export type StreamEptzFormFields =
   Pick<EptzFormFields, 'eptzEnabled'> &
   { [K in Exclude<keyof EptzFormFields, 'eptzEnabled'>]: FormNumber };
 
-/**
- * StreamsView's form state. The edit and clone forms spread the API stream into
- * it, so API fields the form does not own are present there and absent otherwise.
- */
-export type StreamFormState =
-  Omit<Partial<StreamFull>, keyof StreamFormFields | keyof StreamEptzFormFields> &
-  StreamFormFields &
-  StreamEptzFormFields;
+/** UI-owned fields only; full wire responses are mapped explicitly. */
+export type StreamFormState = StreamFormFields & StreamEptzFormFields & ObservationFormFields & {
+  canControlPrivacy?: boolean;
+};
 
 /** The part of an input's target that handleInputChange reads. */
 export interface StreamFieldTarget {
@@ -281,6 +259,7 @@ export interface ExpandedSections {
   eptz: boolean;
   ptz: boolean;
   advanced: boolean;
+  observation: boolean;
   go2rtcOverride: boolean;
   restream: boolean;
 }

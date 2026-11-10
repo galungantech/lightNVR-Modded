@@ -1,3 +1,4 @@
+import {getSystemSettings,updateSystemSettings} from '../../api/system.ts';
 /**
  * LightNVR Web Interface SettingsView Component
  *
@@ -11,7 +12,9 @@
 import { useState, useEffect, useMemo, useRef } from 'preact/hooks';
 import { showStatusMessage } from './ToastContainer.tsx';
 import { ContentLoader } from './LoadingIndicator.tsx';
-import { useQuery, useMutation, fetchJSON } from '../../query-client.ts';
+import { useQuery, useMutation } from '../../query-client.ts';
+import { listAuthSessions, listTrustedDevices, revokeAuthSession, revokeTrustedDevice } from '../../api/identity.ts';
+import type { CredentialRevoked } from '../../api/identity.ts';
 import { AsyncButton } from './AsyncButton.tsx';
 import { validateSession } from '../../utils/auth-utils.ts';
 import { formatLocalDateTime } from '../../utils/date-utils.ts';
@@ -224,30 +227,16 @@ export function SettingsView() {
   // Fetch settings
   const {
     data: settingsData,
+    error: settingsError,
     isLoading,
     refetch
-  } = useQuery<SettingsResponse>(
-    ['settings'],
-    '/api/settings',
-    {
-      timeout: 15000,
-      retries: 2,
-      retryDelay: 1000
-    }
-  );
+  } = useQuery<SettingsResponse>({queryKey:['settings'], queryFn:({signal}) => getSystemSettings({signal})});
 
   // Save settings mutation
   const saveSettingsMutation = useMutation<SaveSettingsResponse, Error, Record<string, unknown>>({
     mutationKey: ['saveSettings'],
     mutationFn: async (mappedSettings) => {
-      return await fetchJSON<SaveSettingsResponse>('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(mappedSettings),
-        timeout: 20000,
-        retries: 1,
-        retryDelay: 2000
-      });
+      return await updateSystemSettings(mappedSettings);
     },
     onSuccess: (response) => {
       if (response?.restart_required) {
@@ -274,10 +263,9 @@ export function SettingsView() {
     isLoading: authSessionsLoading,
     isError: authSessionsIsError,
     error: authSessionsError
-  } = useQuery<AuthSessionsResponse>(['auth-sessions'], '/api/auth/sessions', {
-    timeout: 10000,
-    retries: 1,
-    retryDelay: 1000
+  } = useQuery<AuthSessionsResponse>({
+    queryKey: ['auth-sessions'], queryFn: ({ signal }) => listAuthSessions({ signal }),
+    staleTime: 0, cacheTime: 0, retry: false
   });
 
   const {
@@ -286,33 +274,36 @@ export function SettingsView() {
     isLoading: trustedDevicesLoading,
     isError: trustedDevicesIsError,
     error: trustedDevicesError
-  } = useQuery<TrustedDevicesResponse>(['trusted-devices'], '/api/auth/trusted-devices', {
-    timeout: 10000,
-    retries: 1,
-    retryDelay: 1000
+  } = useQuery<TrustedDevicesResponse>({
+    queryKey: ['trusted-devices'], queryFn: ({ signal }) => listTrustedDevices({ signal }),
+    staleTime: 0, cacheTime: 0, retry: false
   });
 
-  const revokeSessionMutation = useMutation<unknown, Error, number>({
+  const revokeSessionMutation = useMutation<CredentialRevoked, Error, number>({
     mutationKey: ['revokeSession'],
-    mutationFn: async (sessionId) => fetchJSON(`/api/auth/sessions/${sessionId}`, { method: 'DELETE' }),
+    mutationFn: (sessionId) => revokeAuthSession(sessionId),
+    retry: false,
     onSuccess: () => {
       showStatusMessage(t('settings.sessionRevoked'));
       refetchAuthSessions();
     },
     onError: (error) => {
       showStatusMessage(t('settings.revokeSessionError', { message: error.message }));
+      void refetchAuthSessions();
     }
   });
 
-  const revokeTrustedDeviceMutation = useMutation<unknown, Error, number>({
+  const revokeTrustedDeviceMutation = useMutation<CredentialRevoked, Error, number>({
     mutationKey: ['revokeTrustedDevice'],
-    mutationFn: async (deviceId) => fetchJSON(`/api/auth/trusted-devices/${deviceId}`, { method: 'DELETE' }),
+    mutationFn: (deviceId) => revokeTrustedDevice(deviceId),
+    retry: false,
     onSuccess: () => {
       showStatusMessage(t('settings.trustedDeviceRevoked'));
       refetchTrustedDevices();
     },
     onError: (error) => {
       showStatusMessage(t('settings.revokeTrustedDeviceError', { message: error.message }));
+      void refetchTrustedDevices();
     }
   });
 
@@ -378,7 +369,7 @@ export function SettingsView() {
       apiDetectionBackend: settingsData.api_detection_backend || 'onnx',
       apiDetectionFormat: settingsData.api_detection_format || 'light-object-detect',
       apiDetectionDetectorName: settingsData.api_detection_detector_name || 'default',
-      defaultDetectionThreshold: settingsData.default_detection_threshold || 50,
+      defaultDetectionThreshold: settingsData.default_detection_threshold ?? 50,
       defaultPreBuffer: settingsData.pre_detection_buffer ?? 5,
       defaultPostBuffer: settingsData.post_detection_buffer ?? 10,
       defaultPlaybackTransport: settingsData.default_playback_transport || 'auto',
@@ -837,9 +828,13 @@ export function SettingsView() {
         </div>
       </div>
 
+      {settingsError && <div role="alert" class="rounded-lg border border-border p-4">
+        <p>{settingsError.message}</p>
+        <button type="button" class="btn-secondary mt-3" onClick={() => refetch()}>{t('common.retry')}</button>
+      </div>}
       <ContentLoader
         isLoading={isLoading}
-        hasData={!!settingsData}
+        hasData={!!settingsData && !settingsError}
         loadingMessage={t('settings.loading')}
         emptyMessage={t('settings.empty')}
       >

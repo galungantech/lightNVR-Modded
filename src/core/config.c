@@ -20,6 +20,7 @@
 #include <limits.h>
 #include <syslog.h>
 #include <pthread.h>
+#include <stdatomic.h>
 
 #include "ini.h"
 #include "core/config.h"
@@ -163,7 +164,7 @@ static const env_config_mapping_t env_config_mappings[] = {
     {"GO2RTC_WEBRTC_ENABLED",  CONFIG_TYPE_BOOL,   CONFIG_OFFSET(go2rtc_webrtc_enabled),    0,   NULL, 0, true},
     {"GO2RTC_STUN_ENABLED",    CONFIG_TYPE_BOOL,   CONFIG_OFFSET(go2rtc_stun_enabled),      0,   NULL, 0, true},
     {"GO2RTC_STUN_SERVER",     CONFIG_TYPE_STRING, CONFIG_OFFSET(go2rtc_stun_server),       256, "stun.l.google.com:19302", 0, false},
-    {"GO2RTC_EXTERNAL_IP",     CONFIG_TYPE_STRING, CONFIG_OFFSET(go2rtc_external_ip),       64,  "",   0, false},
+    {"GO2RTC_EXTERNAL_IP",     CONFIG_TYPE_STRING, CONFIG_OFFSET(go2rtc_external_ip),       256,  "",   0, false},
     {"GO2RTC_ICE_SERVERS",     CONFIG_TYPE_STRING, CONFIG_OFFSET(go2rtc_ice_servers),       512, "",   0, false},
     {"GO2RTC_WEBRTC_LISTEN_PORT", CONFIG_TYPE_INT, CONFIG_OFFSET(go2rtc_webrtc_listen_port), 0,  NULL, 8555, false},
     {"WEBRTC_CONNECTION_TIMEOUT_MS", CONFIG_TYPE_INT, CONFIG_OFFSET(webrtc_connection_timeout_ms),   0, NULL, 30000, false},
@@ -556,6 +557,12 @@ void load_default_config(config_t *config) {
         config->streams[i].tier_important_multiplier = 2.0;
         config->streams[i].tier_ephemeral_multiplier = 0.25;
         config->streams[i].storage_priority = 5;
+
+        // INT_01 observation evidence is off by default (contract section 13)
+        config->streams[i].observation_evidence_enabled = false;
+        config->streams[i].observation_labels[0] = '\0';
+        config->streams[i].observation_max_age_days = OBSERVATION_DEFAULT_MAX_AGE_DAYS;
+        config->streams[i].observation_max_bytes = OBSERVATION_DEFAULT_MAX_BYTES;
     }
 
     // MQTT settings for detection event streaming
@@ -1758,11 +1765,11 @@ int save_config(const config_t *config, const char *path) {
     }
 
     int config_fd = openat(dir_fd, validated_filename,
-                           O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC,
+                           O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK,
                            0600);
-    close(dir_fd);
     if (config_fd < 0) {
         log_error("Could not open config file for writing: %s (error: %s)", canonical_save_path, strerror(errno));
+        close(dir_fd);
         return -1;
     }
 
@@ -1770,11 +1777,48 @@ int save_config(const config_t *config, const char *path) {
     if (fstat(config_fd, &config_stat) != 0) {
         log_error("Could not stat config file after opening: %s (error: %s)", canonical_save_path, strerror(errno));
         close(config_fd);
+        close(dir_fd);
         return -1;
     }
-    if (!S_ISREG(config_stat.st_mode)) {
-        log_error("Config save target is not a regular file: %s", canonical_save_path);
+    if (!S_ISREG(config_stat.st_mode) || config_stat.st_nlink != 1) {
+        log_error("Config save target must be a regular file with one link: %s", canonical_save_path);
         close(config_fd);
+        close(dir_fd);
+        return -1;
+    }
+
+    /* A legacy root-owned, group-writable config can be written by a non-root
+     * service but cannot be chmod'd by it. Publish a private replacement in the
+     * writable directory in that case; never write secrets to the broad-mode
+     * original. Keep in-place saves for owned files (including bind mounts). */
+    char replacement_name[96] = {0};
+    if (fchmod(config_fd, 0600) != 0) {
+        int mode_error = errno;
+        close(config_fd);
+        config_fd = -1;
+        if (mode_error == EPERM) {
+            static atomic_uint replacement_sequence = 0;
+            for (int attempt = 0; attempt < 100; attempt++) {
+                snprintf(replacement_name, sizeof(replacement_name),
+                         ".lightnvr-config-%ld-%u.tmp", (long)getpid(),
+                         atomic_fetch_add(&replacement_sequence, 1));
+                config_fd = openat(dir_fd, replacement_name,
+                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+                if (config_fd >= 0 || errno != EEXIST) break;
+            }
+        }
+        if (config_fd < 0) {
+            log_error("Could not prepare private config replacement: %s", strerror(errno));
+            close(dir_fd);
+            return -1;
+        }
+    }
+    if ((replacement_name[0] && fchmod(config_fd, 0600) != 0) ||
+        ftruncate(config_fd, 0) != 0) {
+        log_error("Could not prepare private config file: %s", strerror(errno));
+        close(config_fd);
+        if (replacement_name[0]) unlinkat(dir_fd, replacement_name, 0);
+        close(dir_fd);
         return -1;
     }
 
@@ -1782,6 +1826,8 @@ int save_config(const config_t *config, const char *path) {
     if (!file) {
         log_error("Could not open config file for writing: %s (error: %s)", canonical_save_path, strerror(errno));
         close(config_fd);
+        if (replacement_name[0]) unlinkat(dir_fd, replacement_name, 0);
+        close(dir_fd);
         return -1;
     }
     
@@ -2034,8 +2080,27 @@ int save_config(const config_t *config, const char *path) {
     // Stream configurations are stored exclusively in the database.
     // Do NOT write [stream.X] sections here.
     
-    fclose(file);
-    
+    int write_failed = ferror(file);
+    if (replacement_name[0] && (fflush(file) != 0 || fsync(fileno(file)) != 0)) write_failed = 1;
+    if (fclose(file) != 0) write_failed = 1;
+    if (!write_failed && replacement_name[0]) {
+        /* Do not replace a symlink, hardlink, or changed target introduced
+         * while the replacement was being written. */
+        struct stat current;
+        if (fstatat(dir_fd, validated_filename, &current, AT_SYMLINK_NOFOLLOW) != 0 ||
+            !S_ISREG(current.st_mode) || current.st_nlink != 1 ||
+            current.st_dev != config_stat.st_dev || current.st_ino != config_stat.st_ino ||
+            renameat(dir_fd, replacement_name, dir_fd, validated_filename) != 0) {
+            write_failed = 1;
+        }
+    }
+    if (replacement_name[0]) unlinkat(dir_fd, replacement_name, 0);
+    close(dir_fd);
+    if (write_failed) {
+        log_error("Failed to write config file: %s", canonical_save_path);
+        return -1;
+    }
+
     // We don't need to save stream configurations when saving settings
     // This was causing the server to hang due to database locks
     // Stream configurations are managed separately through the streams API

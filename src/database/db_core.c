@@ -165,6 +165,15 @@ static int get_backup_directory(char *backup_dir, size_t backup_dir_size) {
         return -1;
     }
 
+    int directory_fd = open(backup_dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (directory_fd < 0) return -1;
+    int private_result = fchmod(directory_fd, 0700);
+    close(directory_fd);
+    if (private_result != 0) {
+        log_error("Cannot restrict database backup directory permissions");
+        return -1;
+    }
+
     return 0;
 }
 
@@ -937,6 +946,53 @@ int maybe_run_scheduled_database_backup(void) {
 }
 
 // Initialize the database
+/* Startup only, before this process opens SQLite connections: closing a raw
+ * descriptor for a live SQLite inode could release its POSIX locks. Existing
+ * sidecars can contain credentials too. Read-only initialization bypasses this. */
+static int private_database_file(const char *path, bool create) {
+    int flags = O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
+    int fd = open(path, flags | (create ? O_CREAT : 0), 0600);
+    if (fd < 0) return !create && errno == ENOENT ? 0 : -1;
+    struct stat info;
+    int result = -1;
+    if (fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink == 1 &&
+        fchmod(fd, 0600) == 0) result = 0;
+    close(fd);
+    return result;
+}
+
+static int private_existing_database_files(const char *path) {
+    static const char *suffixes[] = {"", "-wal", "-shm", "-journal"};
+    char file[PATH_MAX];
+    for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); ++i) {
+        int length = snprintf(file, sizeof(file), "%s%s", path, suffixes[i]);
+        if (length < 0 || (size_t)length >= sizeof(file) ||
+            private_database_file(file, false) != 0) return -1;
+    }
+    return 0;
+}
+
+/*
+ * INT_01 D9: same effect as db_observation_meta_regenerate_epoch(), done with
+ * raw SQL on the init connection because nothing else can use the database
+ * yet, and so db_core.c does not pull the observation layer (and its
+ * event-identity dependencies) into tools such as rebuild_recordings.
+ */
+static int regenerate_observation_epoch_after_restore(void) {
+    char epoch[LIGHTNVR_UUID_STRING_SIZE];
+    if (!db || lightnvr_uuid_generate_v4(epoch) != 0) return -1;
+    sqlite3_stmt *stmt = NULL;
+    int rc = -1;
+    if (sqlite3_prepare_v2(db, "UPDATE observation_meta SET epoch_uuid = ? WHERE id = 1;",
+                           -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, epoch, -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt) == SQLITE_DONE) rc = 0;
+    }
+    sqlite3_finalize(stmt);
+    if (rc == 0) log_info("Regenerated observation cursor epoch after database restore");
+    return rc;
+}
+
 int init_database(const char *db_path) {
     return init_database_ex(db_path, DB_INIT_DEFAULT);
 }
@@ -945,6 +1001,8 @@ int init_database_ex(const char *db_path, unsigned flags) {
     int rc;
     char *err_msg = NULL;
     bool is_new_database = false;
+    /* D9: a restored backup carries the old observation cursor epoch. */
+    bool restored_from_backup = false;
     sqlite3 *test_db = NULL;
     sqlite3_stmt *stmt = NULL;
 
@@ -1065,6 +1123,11 @@ int init_database_ex(const char *db_path, unsigned flags) {
         return 0;
     }
 
+    if (private_existing_database_files(db_path) != 0) {
+        log_error("Cannot restrict database/sidecar permissions; refusing writable initialization");
+        return -1;
+    }
+
     // Check if database already exists
     FILE *test_file = fopen(db_path, "r");
     if (test_file) {
@@ -1094,6 +1157,7 @@ int init_database_ex(const char *db_path, unsigned flags) {
                     // Continue anyway, we'll try to create a new database
                 } else {
                     log_info("Successfully restored database from backup");
+                    restored_from_backup = true;
                 }
             } else {
                 log_warn("No backup database file found, will create a new database");
@@ -1154,6 +1218,7 @@ int init_database_ex(const char *db_path, unsigned flags) {
                                 // Continue anyway, we'll try to repair the database
                             } else {
                                 log_info("Successfully restored database from backup");
+                                restored_from_backup = true;
                             }
                         } else {
                             log_warn("No backup database file found, will attempt to repair");
@@ -1210,10 +1275,17 @@ int init_database_ex(const char *db_path, unsigned flags) {
     // Free the directory path, invalidating the dir pointer
     free(dir_path);
 
+    /* Create privately before SQLite opens it, so new journals/WAL inherit 0600
+     * even with a permissive umask. Do not change the process-wide umask. */
+    if (private_database_file(db_path, true) != 0) {
+        log_error("Cannot create private database file");
+        return -1;
+    }
+
     // Open database with extended options for better error handling
     log_info("Opening database at: %s", db_path);
     rc = sqlite3_open_v2(db_path, &db,
-                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
+                        SQLITE_OPEN_READWRITE |
                         SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_PRIVATECACHE,
                         NULL);
     if (rc != SQLITE_OK) {
@@ -1371,6 +1443,15 @@ int init_database_ex(const char *db_path, unsigned flags) {
         sqlite3_close_v2(db); // Use close_v2 for better cleanup
         db = NULL;
         return -1;
+    }
+
+    /* INT_01 D9 (contract section 7.6): the restored backup carries the old
+     * observation_meta.epoch_uuid while its change seq rewinds, so cursors
+     * issued against the lost history must stop validating. Runs after the
+     * migrations so observation_meta exists. */
+    if (restored_from_backup && !(db_init_flags & DB_INIT_NO_MIGRATE) &&
+        regenerate_observation_epoch_after_restore() != 0) {
+        log_error("Failed to regenerate the observation cursor epoch after restore");
     }
 
     /* Normalize legacy comma-separated camera tags after the schema exists.

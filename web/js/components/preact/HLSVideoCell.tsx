@@ -1,3 +1,4 @@
+import { refreshStream } from '../../api/mediaLifecycle.ts';
 /**
  * HLSVideoCell Component
  * A self-contained component for displaying an HLS video stream
@@ -158,22 +159,8 @@ export function HLSVideoCell({
 
     try {
       console.log(`Refreshing go2rtc registration for stream ${stream.name}`);
-      const response = await fetch(`/api/streams/${encodeURIComponent(stream.name)}/refresh`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (response.ok) {
-        const data: unknown = await response.json();
-        console.log(`Successfully refreshed go2rtc registration for stream ${stream.name}:`, data);
-        return true;
-      } else {
-        const errorText = await response.text();
-        console.warn(`Failed to refresh stream ${stream.name}: ${response.status} - ${errorText}`);
-        return false;
-      }
+      await refreshStream(stream.name);
+      return true;
     } catch (err) {
       console.error(`Error refreshing stream ${stream.name}:`, err);
       return false;
@@ -204,6 +191,8 @@ export function HLSVideoCell({
     const initHls = async () => {
       let hlsStreamUrl;
       let usingGo2rtc = false;
+      // Recovery callbacks also run for the force-native branch below.
+      let go2rtcEnabled = false;
 
       // Check if force native HLS is enabled in settings.
       // When enabled, always use lightNVR's native FFmpeg-based HLS regardless of go2rtc state.
@@ -217,7 +206,7 @@ export function HLSVideoCell({
       } else {
       // Check if go2rtc is enabled in runtime settings.
       // When enabled, we NEVER fall back to ffmpeg HLS - it's go2rtc or nothing.
-      const go2rtcEnabled = await isGo2rtcEnabled();
+      go2rtcEnabled = await isGo2rtcEnabled();
       if (!isMounted) return;
 
       // If go2rtc is enabled in settings, always use go2rtc mode regardless of initial hlsMode.
@@ -426,7 +415,6 @@ export function HLSVideoCell({
               hlsPlayerRef.current = null;
             }
             if (isMounted) {
-              // @ts-expect-error TS2552: go2rtcEnabled is block-scoped to the !forceNative branch above; at runtime this throws ReferenceError (logged bug in T6, left in place)
               if (usingGo2rtc && !go2rtcEnabled) {
                 // go2rtc was auto-detected but not force-enabled, fall back to native
                 console.warn(`[HLS ${stream.name}] Falling back to native HLS`);
@@ -480,7 +468,6 @@ export function HLSVideoCell({
               hlsPlayerRef.current = null;
             }
             if (isMounted) {
-              // @ts-expect-error TS2552: go2rtcEnabled is block-scoped to the !forceNative branch above; at runtime this throws ReferenceError (logged bug in T6, left in place)
               if (usingGo2rtc && !go2rtcEnabled) {
                 fatalErrorCountRef.current = 0;
                 setHlsMode('native');
@@ -509,7 +496,6 @@ export function HLSVideoCell({
         nativeErrorHandler = function() {
           if (!isMounted) return;
           if (usingGo2rtc) {
-            // @ts-expect-error TS2552: go2rtcEnabled is block-scoped to the !forceNative branch above; at runtime this throws ReferenceError (logged bug in T6, left in place)
             if (go2rtcEnabled) {
               console.error(`[HLS ${stream.name}] go2rtc HLS failed (native player) - no fallback (go2rtc enabled)`);
               setError(t('live.go2rtcHlsFailedRetry'));

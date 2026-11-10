@@ -149,6 +149,18 @@ No additional configuration is required for basic functionality.
 
 Browser signaling uses the dashboard origin through the authenticated routes documented in [Reverse Proxy & HTTPS](REVERSE_PROXY.md). WebRTC SDP is posted to `/go2rtc/api/webrtc?src=<stream-id>`; MSE connects to `/go2rtc/api/ws?src=<stream-id>`. Keep port 1984 on loopback.
 
+Managed go2rtc also binds RTSP to `127.0.0.1` (default port 8554). External direct
+RTSP clients must move to LightNVR playback; the local recorder still uses RTSP.
+A final managed configuration pins both listeners after user overrides and
+disables extra HTTPS/Unix API listeners. It leaves WebRTC ICE media connectivity
+available. Use the maintained OpenSensor fork shipped with LightNVR; older or
+incompatible external binaries fail closed for protected playback. The fork's
+media lease callback requires LightNVR's web listener to be reachable at
+`127.0.0.1` in the same network namespace. A web listener bound only to a
+non-loopback address will deny playback rather than bypass authorization.
+See [media authority requirements and revocation timing](CONFIGURATION.md#media-authority-deployment-requirements)
+and [override behavior and external-service limits](GO2RTC_CONFIG_OVERRIDE.md).
+
 ## Configuration
 
 ### go2rtc Configuration
@@ -198,7 +210,8 @@ LightNVR includes a health monitoring system for go2rtc:
 - **Auto-restart**: Automatically restarts go2rtc if it becomes unresponsive
 
 Key files:
-- `src/video/go2rtc/go2rtc_health.c`: Health monitoring implementation
+- `src/video/go2rtc/go2rtc_integration.c`: the unified health monitor thread and `go2rtc_integration_check_health()`
+- `src/video/go2rtc/go2rtc_process.c`: starting, supervising and restarting the go2rtc child process
 
 ## Frame Extraction for Detection
 

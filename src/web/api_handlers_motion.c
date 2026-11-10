@@ -37,6 +37,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <errno.h>
 
 #include <cjson/cJSON.h>
 
@@ -51,6 +52,7 @@
 
 #include "core/event_producers.h"
 #include "database/db_auth.h"
+#include "database/db_core.h"
 #include "database/db_detections.h"
 #include "database/db_recording_tags.h"
 #include "video/detection_result.h"
@@ -90,7 +92,40 @@ typedef struct {
 
 static pulse_gen_entry_t g_pulse_gen[MAX_STREAMS];
 static int               g_pulse_gen_count = 0;
+static uint64_t          g_pulse_gen_sequence = 0;
 static pthread_mutex_t   g_pulse_gen_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Reclaim only names absent from a complete database snapshot. Disabled
+ * cameras still exist. On query failure, preserve the table unchanged.
+ * Caller MUST hold g_pulse_gen_mutex. */
+static void pulse_gen_prune_stale_locked(void) {
+    sqlite3 *db = NULL;
+    if (db_open_readonly_connection(&db) != 0) return;
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, "SELECT name FROM streams;", -1, &stmt, NULL);
+    bool present[MAX_STREAMS] = {false};
+    if (rc == SQLITE_OK) {
+        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+            const char *name = (const char *)sqlite3_column_text(stmt, 0);
+            if (!name) continue;
+            for (int i = 0; i < g_pulse_gen_count; i++) {
+                if (strcmp(g_pulse_gen[i].name, name) == 0) {
+                    present[i] = true;
+                    break;
+                }
+            }
+        }
+    }
+    sqlite3_finalize(stmt);
+    db_close_readonly_connection(db);
+    if (rc != SQLITE_DONE) return;
+
+    int count = 0;
+    for (int i = 0; i < g_pulse_gen_count; i++) {
+        if (present[i]) g_pulse_gen[count++] = g_pulse_gen[i];
+    }
+    g_pulse_gen_count = count;
+}
 
 /* Return the current generation for stream_name (0 if not seen before).
  * Caller MUST hold g_pulse_gen_mutex. */
@@ -105,33 +140,35 @@ static uint64_t pulse_gen_get(const char *stream_name) {
 /* Increment the generation counter for stream_name and return the new value.
  * Caller MUST hold g_pulse_gen_mutex. */
 static uint64_t pulse_gen_increment(const char *stream_name) {
+    // Never recycle a token after a name is pruned and later reused: an old
+    // sleeping worker may still carry that name and its previous token.
+    if (g_pulse_gen_sequence == UINT64_MAX) return 0;
+    if (g_pulse_gen_count == MAX_STREAMS && pulse_gen_get(stream_name) == 0)
+        pulse_gen_prune_stale_locked();
     for (int i = 0; i < g_pulse_gen_count; i++) {
         if (strcmp(g_pulse_gen[i].name, stream_name) == 0)
-            return ++g_pulse_gen[i].generation;
+            return g_pulse_gen[i].generation = ++g_pulse_gen_sequence;
     }
     /* First time we see this stream — add an entry. */
     if (g_pulse_gen_count < MAX_STREAMS) {
         int i = g_pulse_gen_count++;
         safe_strcpy(g_pulse_gen[i].name, stream_name,
                     sizeof(g_pulse_gen[i].name), 0);
-        g_pulse_gen[i].generation = 1;
-        return 1;
+        g_pulse_gen[i].generation = ++g_pulse_gen_sequence;
+        return g_pulse_gen[i].generation;
     }
-    /* Table full (shouldn't happen with at most MAX_STREAMS streams).
-     * Return 0 — the reserved "generation tracking disabled" sentinel.
-     * The pulse worker treats generation==0 as "always fire the stop",
-     * which is safer than leaving the stream permanently in motion-active. */
-    log_warn("pulse_gen table full; pulse stop for '%s' will fire unconditionally",
+    /* Reject before dispatch when supersession cannot be tracked. */
+    log_warn("pulse_gen table full; cannot track motion action for '%s'",
              stream_name);
     return 0;
 }
 
 typedef struct {
     char     stream_name[MAX_STREAM_NAME];
+    char     camera_uuid[CAMERA_UUID_STRING_SIZE];
     int      duration_ms;
-    /* Generation counter snapshot taken when this pulse was scheduled.
-     * 0 is the reserved sentinel meaning "generation tracking disabled":
-     * the worker will fire the stop unconditionally in that case. */
+    /* Nonzero generation snapshot taken when this pulse was scheduled.
+     * Zero is invalid: an untracked worker must never stop newer motion. */
     uint64_t generation;
     /* False when the stream has no detection-based recording: there is no UDT
      * to notify, so the worker only does the cross-stream fan-out. */
@@ -146,34 +183,46 @@ static void *motion_pulse_worker(void *arg) {
     motion_pulse_task_t *task = (motion_pulse_task_t *)arg;
     if (!task) return NULL;
 
-    useconds_t usec = (useconds_t)task->duration_ms * 1000u;
-    /* usleep is limited to <1s on some platforms; loop in 500ms chunks. */
-    while (usec > 0) {
-        useconds_t chunk = usec > 500000u ? 500000u : usec;
-        usleep(chunk);
-        usec -= chunk;
+    int remaining_ms = task->duration_ms;
+    /* Sleep in <=500ms chunks and handle EINTR without losing remaining time. */
+    while (remaining_ms > 0) {
+        int chunk_ms = remaining_ms > 500 ? 500 : remaining_ms;
+        struct timespec req;
+        req.tv_sec = chunk_ms / 1000;
+        req.tv_nsec = (long)(chunk_ms % 1000) * 1000000L;
+
+        int rc;
+        do {
+            rc = nanosleep(&req, &req);
+        } while (rc == -1 && errno == EINTR);
+        if (rc == -1) {
+            log_warn("Pulse sleep failed for '%s': %s; ending pulse",
+                     task->stream_name, strerror(errno));
+            break;
+        }
+
+        remaining_ms -= chunk_ms;
     }
 
-    /* Check whether a newer action has superseded this pulse.
-     * generation==0 means tracking was disabled (table-full fallback);
-     * in that case always fire the stop rather than leave motion active. */
+    /* Only a tracked, current generation may emit a deferred stop. */
     bool still_current;
-    if (task->generation == 0) {
-        still_current = true;
-    } else {
-        pthread_mutex_lock(&g_pulse_gen_mutex);
-        uint64_t current_gen = pulse_gen_get(task->stream_name);
-        still_current = (current_gen == task->generation);
-        pthread_mutex_unlock(&g_pulse_gen_mutex);
-    }
+    // Keep validation and all stop effects atomic with respect to a new
+    // trigger incrementing the generation; otherwise a stale stop can win.
+    pthread_mutex_lock(&g_pulse_gen_mutex);
+    uint64_t current_gen = pulse_gen_get(task->stream_name);
+    still_current = task->generation != 0 && current_gen == task->generation;
 
     if (still_current) {
         time_t now = time(NULL);
-        close_external_motion_detections(task->stream_name, now);
+        close_external_motion_detections(task->camera_uuid, task->stream_name, now);
         if (task->trigger_recording) {
             unified_detection_notify_motion(task->stream_name, false);
         }
         process_motion_event(task->stream_name, false, now, false);
+    }
+    pthread_mutex_unlock(&g_pulse_gen_mutex);
+
+    if (still_current) {
         log_info("Pulse ended for stream '%s' after %d ms",
                  task->stream_name, task->duration_ms);
     } else {
@@ -406,6 +455,11 @@ void handle_post_motion_trigger(const http_request_t *req, http_response_t *res)
     }
 
     char stream_name[MAX_STREAM_NAME];
+    if (strlen(j_stream->valuestring) >= sizeof(stream_name)) {
+        cJSON_Delete(body);
+        http_response_set_json_error(res, 400, "Invalid stream name");
+        return;
+    }
     safe_strcpy(stream_name, j_stream->valuestring, sizeof(stream_name), 0);
     cJSON_Delete(body);
 
@@ -445,15 +499,22 @@ void handle_post_motion_trigger(const http_request_t *req, http_response_t *res)
     }
 
     /* ---- Dispatch -------------------------------------------------------- */
-    time_t now = time(NULL);
     bool active = (action != MOTION_ACTION_STOP);
 
     /* Increment the per-stream generation counter before dispatching.  This
      * invalidates any in-flight pulse worker for this stream so it will not
-     * emit a spurious stop that could cut short the new motion activity. */
+     * emit a spurious stop that could cut short the new motion activity. Keep
+     * the lock through dispatch and any rollback: accepting a newer generation
+     * must not allow an older request to overwrite its motion state. */
     pthread_mutex_lock(&g_pulse_gen_mutex);
     uint64_t new_gen = pulse_gen_increment(stream_name);
-    pthread_mutex_unlock(&g_pulse_gen_mutex);
+    if (new_gen == 0) {
+        pthread_mutex_unlock(&g_pulse_gen_mutex);
+        http_response_set_json_error(res, 500, "Motion trigger tracking capacity exhausted");
+        return;
+    }
+
+    time_t now = time(NULL);
 
     /* Record the reported objects before arming motion so a detection-triggered
      * recording can pick them up via the existing update_detections_recording_id
@@ -466,7 +527,7 @@ void handle_post_motion_trigger(const http_request_t *req, http_response_t *res)
         /* A new leading edge supersedes an unclosed prior session. This keeps
          * repeated Home Assistant "start" messages from leaving overlapping
          * open intervals. */
-        close_external_motion_detections(stream_name, now);
+        close_external_motion_detections(cfg.camera_uuid, stream_name, now);
 
         bool caller_supplied_objects = detections.count > 0;
         /* Honour zone filtering so an external trigger respects the same zone
@@ -505,7 +566,7 @@ void handle_post_motion_trigger(const http_request_t *req, http_response_t *res)
             }
         }
     } else {
-        close_external_motion_detections(stream_name, now);
+        close_external_motion_detections(cfg.camera_uuid, stream_name, now);
     }
 
     /* Tags attach to whatever recording is currently open for the stream. With
@@ -543,30 +604,39 @@ void handle_post_motion_trigger(const http_request_t *req, http_response_t *res)
             if (can_trigger_recording) {
                 unified_detection_notify_motion(stream_name, false);
             }
-            close_external_motion_detections(stream_name, now);
+            close_external_motion_detections(cfg.camera_uuid, stream_name, now);
             process_motion_event(stream_name, false, now, false);
+            pthread_mutex_unlock(&g_pulse_gen_mutex);
             http_response_set_json_error(res, 500, "Out of memory");
             return;
         }
         safe_strcpy(task->stream_name, stream_name, sizeof(task->stream_name), 0);
+        /* Preserve the identity even if the camera is renamed or its old name
+         * is reused before the deferred stop runs. */
+        safe_strcpy(task->camera_uuid, cfg.camera_uuid, sizeof(task->camera_uuid), 0);
         task->duration_ms       = duration_ms;
         task->generation        = new_gen;
         task->trigger_recording = can_trigger_recording;
 
         pthread_t tid;
         pthread_attr_t attr;
-        pthread_attr_init(&attr);
-        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-        int rc = pthread_create(&tid, &attr, motion_pulse_worker, task);
-        pthread_attr_destroy(&attr);
+        int rc = pthread_attr_init(&attr);
+        if (rc == 0) {
+            rc = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+            if (rc == 0) {
+                rc = pthread_create(&tid, &attr, motion_pulse_worker, task);
+            }
+            pthread_attr_destroy(&attr);
+        }
 
         if (rc != 0) {
             if (can_trigger_recording) {
                 unified_detection_notify_motion(stream_name, false);
             }
-            close_external_motion_detections(stream_name, now);
+            close_external_motion_detections(cfg.camera_uuid, stream_name, now);
             process_motion_event(stream_name, false, now, false);
             free(task);
+            pthread_mutex_unlock(&g_pulse_gen_mutex);
             http_response_set_json_error(res, 500,
                 "Failed to schedule pulse end");
             return;
@@ -575,6 +645,8 @@ void handle_post_motion_trigger(const http_request_t *req, http_response_t *res)
     } else {
         log_info("Motion %s for stream '%s'", action_str, stream_name);
     }
+
+    pthread_mutex_unlock(&g_pulse_gen_mutex);
 
     /* ---- Response -------------------------------------------------------- */
     cJSON *resp = cJSON_CreateObject();

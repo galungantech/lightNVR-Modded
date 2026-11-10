@@ -1,3 +1,4 @@
+import { getStreamZones } from '../../api/mediaLifecycle.ts';
 /**
  * Stream Configuration Modal Component
  * Expanded, responsive modal with accordion sections for stream configuration
@@ -17,7 +18,6 @@ import type {
   ExpandedSections,
   StreamFormState,
   StreamInputHandler,
-  ZonesResponse,
 } from '../../types/streams.ts';
 import { inlineSideOfArrow } from '../../utils/a11y.ts';
 
@@ -409,27 +409,9 @@ export function StreamConfigModal({
       }
 
       try {
-        const response = await fetch(`/api/streams/${encodeURIComponent(currentStream.name)}/zones`);
-        if (response.ok) {
-          const data: ZonesResponse = await response.json();
-          if (data.zones && Array.isArray(data.zones)) {
-            setDetectionZones(data.zones);
-            // Use ref so we always call the latest callback without making it
-            // a dependency of this effect.
-            onInputChangeRef.current({ target: { name: 'detectionZones', value: data.zones } });
-          }
-        } else {
-          console.error('Failed to load zones:', response.status, response.statusText);
-          const statusCode = response.status;
-          const statusText = response.statusText || '';
-          showStatusMessage(
-            t('streamsConfig.zonesLoadFailed', {
-              statusCode,
-              statusText: statusText ? `: ${statusText}` : '',
-            }),
-            'error'
-          );
-        }
+        const data = await getStreamZones(currentStream.name);
+        setDetectionZones(data.zones);
+        onInputChangeRef.current({ target: { name: 'detectionZones', value: data.zones } });
       } catch (error) {
         console.error('Error loading zones:', error);
         const errorMessage = ((error as Error) && (error as Error).message) ? (error as Error).message : String(error || '');
@@ -461,7 +443,7 @@ export function StreamConfigModal({
           onClose={() => setShowZoneEditor(false)}
         />
       )}
-    <div id="stream-modal" className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+    <div id="stream-modal" className="app-modal-overlay fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
       <div className="bg-card text-card-foreground rounded-lg shadow-xl w-full max-w-5xl max-h-[95vh] overflow-hidden flex flex-col">
         {/* Header */}
         <div className="flex justify-between items-center p-6 border-b border-border flex-shrink-0">
@@ -1479,6 +1461,81 @@ export function StreamConfigModal({
                 </div>
               </AccordionSection>
             )}
+
+            {/* INT_01: per-camera observation evidence for integrations (off by default). */}
+            <AccordionSection
+              title={t('streamsConfig.observationEvidence')}
+              isExpanded={expandedSections.observation}
+              onToggle={() => onToggleSection('observation')}
+            >
+              <div className="space-y-4">
+                <p className="text-xs text-muted-foreground">{t('streamsConfig.observationEvidenceHelp')}</p>
+                <div className="rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
+                  {t('streamsConfig.observationEvidenceDetectorRequired')}
+                </div>
+                <label className="touch-target flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    id="observation-evidence-enabled"
+                    name="observationEvidenceEnabled"
+                    className="h-4 w-4 text-primary focus:ring-primary border-input rounded"
+                    checked={!!currentStream.observationEvidenceEnabled}
+                    onChange={onInputChange}
+                  />
+                  <span className="text-sm font-medium">{t('streamsConfig.observationEvidenceEnable')}</span>
+                </label>
+                <div>
+                  <label htmlFor="observation-labels" className="block text-sm font-medium mb-2">
+                    {t('streamsConfig.observationLabels')}
+                  </label>
+                  <input
+                    type="text"
+                    id="observation-labels"
+                    name="observationLabels"
+                    className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
+                    maxLength={511}
+                    value={currentStream.observationLabels ?? ''}
+                    onChange={onInputChange}
+                  />
+                  <p className="mt-1 text-xs text-muted-foreground">{t('streamsConfig.observationLabelsHelp')}</p>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label htmlFor="observation-max-age-days" className="block text-sm font-medium mb-2">
+                      {t('streamsConfig.observationMaxAgeDays')}
+                    </label>
+                    <input
+                      type="number"
+                      id="observation-max-age-days"
+                      name="observationMaxAgeDays"
+                      className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
+                      min="1"
+                      max="90"
+                      step="1"
+                      value={currentStream.observationMaxAgeDays ?? 7}
+                      onChange={onInputChange}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="observation-max-mib" className="block text-sm font-medium mb-2">
+                      {t('streamsConfig.observationMaxSizeMib')}
+                    </label>
+                    <input
+                      type="number"
+                      id="observation-max-mib"
+                      name="observationMaxMib"
+                      className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:ring-2 focus:ring-primary bg-background text-foreground"
+                      min="64"
+                      max="1048576"
+                      step="1"
+                      value={currentStream.observationMaxMib ?? 2048}
+                      onChange={onInputChange}
+                    />
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground">{t('streamsConfig.observationBudgetHelp')}</p>
+              </div>
+            </AccordionSection>
 
             {/* Browser-side fisheye ePTZ (independent of mechanical ONVIF PTZ). */}
             <AccordionSection

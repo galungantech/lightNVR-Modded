@@ -4,11 +4,20 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Keep the same gates on the explicitly stacked hardening PRs.
+    branches: [main, 'codex/hardening-*']
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# A generated Rust follow-up queues behind its source run instead of cancelling
+# work that just passed. Other pushes and PR updates still supersede older runs.
+# Match commit metadata: deploy-key pushes are attributed to the key owner.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: >-
+    ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.author.email == '41898282+github-actions[bot]@users.noreply.github.com' && startsWith(github.event.head_commit.message, 'lightnvr-rs: regenerate from C')) }}
 
 jobs:
   asan-ubsan:
@@ -29,7 +38,7 @@ jobs:
             git build-essential cmake pkg-config python3 \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev \
             libsqlite3-dev libuv1-dev libllhttp-dev libcurl4-openssl-dev \
-            libcjson-dev libmbedtls-dev
+            libcjson-dev libmbedtls-dev libmosquitto-dev
 
       - name: Checkout
         uses: actions/checkout@v6
@@ -60,6 +69,8 @@ jobs:
         run: |
           cd build
           echo "Running tests with ASan + UBSan enabled..."
+          # Snapshot, projection, discovery handler and HTTP worker ownership
+          # regressions belong to this label beside their CMake registrations.
           ctest --output-on-failure --no-tests=error -V -L '^ci-sanitizer$'
 
       - name: Smoke test - start and stop service

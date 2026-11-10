@@ -9,6 +9,7 @@
  * @file go2rtc_process.c
  * @brief Implementation of the go2rtc process management module
  */
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -252,6 +253,7 @@ static bool process_owns_tcp_listen_port(pid_t pid, int port) {
             char remote[80] = {0};
             char state[8] = {0};
             unsigned long inode = 0;
+            /* After state: tx/rx queues, timer, retransmits, uid, timeout, inode. */
             int matched = sscanf(line,
                                  " %*d: %79s %79s %7s %*s %*s %*s %*u %*u %lu",
                                  local, remote, state, &inode);
@@ -362,30 +364,10 @@ static pid_t g_process_pid = -1;
 static unsigned long long g_process_start_ticks = 0;
 static bool g_initialized = false;
 static bool g_using_external_service = false; // true when init detected a live service
-static bool g_created_config_symlink = false;
+/* Exact final --config argument of the last successfully launched child. */
+static char g_managed_listener_policy[512];
 static int g_rtsp_port = 8554; // Default RTSP port
 static int g_api_port = 1984;  // Configured API port (updated during init)
-
-static void remove_owned_config_symlink(void) {
-    if (!g_created_config_symlink || !g_config_path) return;
-
-    struct stat st;
-    if (lstat("/dev/shm/go2rtc.yaml", &st) != 0 || !S_ISLNK(st.st_mode)) {
-        return;
-    }
-
-    char target[PATH_MAX];
-    ssize_t length = readlink("/dev/shm/go2rtc.yaml", target,
-                              sizeof(target) - 1);
-    if (length <= 0) return;
-    target[length] = '\0';
-    if (strcmp(target, g_config_path) == 0 &&
-        unlink("/dev/shm/go2rtc.yaml") != 0 && errno != ENOENT) {
-        log_warn("Failed to remove managed /dev/shm/go2rtc.yaml symlink: %s",
-                 strerror(errno));
-    }
-    g_created_config_symlink = false;
-}
 
 /* T4b — crash-loop quarantine bookkeeping.
  *
@@ -1003,9 +985,16 @@ static bool go2rtc_process_generate_config_locked(const char *config_path, int a
     // Use 0600 permissions so credentials written to the go2rtc config file
     // are not world-readable. open()+fdopen() instead of fopen() lets us specify
     // the mode explicitly without relying on the process umask.
-    int config_fd = open(config_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    int config_fd = open(config_path, O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0600);
     if (config_fd < 0) {
         log_error("Failed to open go2rtc config file for writing: %s", config_path);
+        return false;
+    }
+    struct stat private_config;
+    if (fstat(config_fd, &private_config) != 0 || !S_ISREG(private_config.st_mode) ||
+        private_config.st_nlink != 1 || fchmod(config_fd, 0600) != 0 || ftruncate(config_fd, 0) != 0) {
+        log_error("Cannot prepare private go2rtc config file");
+        close(config_fd);
         return false;
     }
     FILE *config_file = fdopen(config_fd, "w");
@@ -1037,7 +1026,7 @@ static bool go2rtc_process_generate_config_locked(const char *config_path, int a
     // RTSP configuration - use configured port or default to 8554
     int rtsp_port = global_config->go2rtc_rtsp_port > 0 ? global_config->go2rtc_rtsp_port : 8554;
     fprintf(config_file, "\nrtsp:\n");
-    fprintf(config_file, "  listen: \":%d\"\n", rtsp_port);
+    fprintf(config_file, "  listen: \"127.0.0.1:%d\"\n", rtsp_port);
 
     // WebRTC configuration for NAT traversal
     if (global_config->go2rtc_webrtc_enabled) {
@@ -1106,21 +1095,27 @@ static bool go2rtc_process_generate_config_locked(const char *config_path, int a
         // Candidates configuration for NAT traversal
         fprintf(config_file, "  candidates:\n");
 
-        // If external IP is specified, use it
-        if (global_config->go2rtc_external_ip[0] != '\0') {
-            fprintf(config_file, "    - \"%s:%d\"\n",
-                    global_config->go2rtc_external_ip,
-                    global_config->go2rtc_webrtc_listen_port > 0 ? global_config->go2rtc_webrtc_listen_port : 8555);
-        } else {
-            // Auto-detect external IP using wildcard
-            // Use separate entries for IPv4 and IPv6 to handle both
-            fprintf(config_file, "    - \"*:%d\"\n",
-                    global_config->go2rtc_webrtc_listen_port > 0 ? global_config->go2rtc_webrtc_listen_port : 8555);
+        // External IP is a list: one candidate per entry, so LAN, VPN and
+        // public clients can each reach go2rtc. Empty (or invalid, which the
+        // settings API refuses to save) falls back to auto-detect.
+        int webrtc_port = global_config->go2rtc_webrtc_listen_port > 0 ? global_config->go2rtc_webrtc_listen_port : 8555;
+        char candidates[GO2RTC_MAX_EXTERNAL_CANDIDATES][GO2RTC_CANDIDATE_SIZE];
+        int candidate_count = go2rtc_parse_external_candidates(global_config->go2rtc_external_ip, webrtc_port,
+                                                               candidates, GO2RTC_MAX_EXTERNAL_CANDIDATES);
+        if (candidate_count < 0) {
+            log_warn("go2rtc config: ignoring invalid external_ip list; using auto-detect");
+        }
+        if (candidate_count <= 0) {
+            fprintf(config_file, "    - \"*:%d\"\n", webrtc_port);
+        }
+        for (int i = 0; i < candidate_count; i++) {
+            fprintf(config_file, "    - \"%s\"\n", candidates[i]);
         }
 
-        // Add STUN server as candidate for ICE gathering
+        // go2rtc discovers the public host through ice_servers, then advertises
+        // our WebRTC listening port. A STUN server URL is not a candidate.
         if (global_config->go2rtc_stun_enabled) {
-            fprintf(config_file, "    - \"stun:%s\"\n", global_config->go2rtc_stun_server);
+            fprintf(config_file, "    - \"stun:%d\"\n", webrtc_port);
         }
 
         fprintf(config_file, "\n");
@@ -1170,7 +1165,12 @@ static bool go2rtc_process_generate_config_locked(const char *config_path, int a
     // second `--config` argument, letting go2rtc merge the two YAMLs with
     // its native yaml.v3 logic.
 
-    fclose(config_file);
+    int write_failed = ferror(config_file);
+    if (fclose(config_file) != 0) write_failed = 1;
+    if (write_failed) {
+        log_error("Failed to write go2rtc configuration file");
+        return false;
+    }
     log_info("Generated go2rtc configuration file: %s", config_path);
 
     // Intentionally do not dump generated config contents to logs.
@@ -1752,35 +1752,46 @@ static int go2rtc_process_generate_override_file_locked(const char *override_pat
         return 0;
     }
 
-    /* Write the content to override.yaml with mode 0600. We use open()+fdopen
-     * (not fopen) so we can specify the create-mode explicitly and so umask
-     * cannot loosen the permissions. */
-    int fd = open(override_path,
-                  O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
-                  0600);
-    if (fd < 0) {
-        log_error("Failed to open go2rtc override file %s for writing: %s",
-                  override_path, strerror(errno));
+    /* Write to a private temporary file first, then atomically rename it over
+     * override.yaml. I/O failures leave the previous file intact. Randomized
+     * exclusive creation also tolerates abandoned files after a crash. */
+    char override_tmp_path[PATH_MAX];
+    if (snprintf(override_tmp_path, sizeof(override_tmp_path), "%s.tmp.XXXXXX",
+                 override_path) >= (int)sizeof(override_tmp_path)) {
+        log_error("Temporary path for go2rtc override file is too long: %s",
+                  override_path);
         free(content);
         return -1;
     }
 
-    /* Belt-and-braces: chmod again in case the file pre-existed with looser
-     * perms and O_TRUNC kept the inode. */
-    if (fchmod(fd, 0600) != 0) {
-        log_warn("fchmod(%s, 0600) failed: %s; continuing with existing filesystem permissions",
-                 override_path, strerror(errno));
+    int fd = mkostemp(override_tmp_path, O_CLOEXEC);
+    if (fd < 0) {
+        log_error("Failed to open temporary go2rtc override file %s for writing: %s",
+                  override_tmp_path, strerror(errno));
+        free(content);
+        return -1;
+    }
+
+    struct stat private_override;
+    if (fstat(fd, &private_override) != 0 || !S_ISREG(private_override.st_mode) ||
+        private_override.st_nlink != 1 || fchmod(fd, 0600) != 0) {
+        log_error("Cannot prepare private temporary go2rtc override file %s",
+                  override_tmp_path);
+        close(fd);
+        unlink(override_tmp_path);
+        free(content);
+        return -1;
     }
 
     size_t written = 0;
     while (written < content_len) {
         ssize_t n = write(fd, content + written, content_len - written);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            log_error("Write to go2rtc override file %s failed: %s",
-                      override_path, strerror(errno));
+        if (n <= 0) {
+            if (n < 0 && errno == EINTR) continue;
+            log_error("Write to temporary go2rtc override file %s failed: %s",
+                      override_tmp_path, strerror(errno));
             close(fd);
-            unlink(override_path);
+            unlink(override_tmp_path);
             free(content);
             return -1;
         }
@@ -1788,15 +1799,26 @@ static int go2rtc_process_generate_override_file_locked(const char *override_pat
     }
 
     if (fsync(fd) != 0) {
-        log_warn("fsync on go2rtc override file %s failed: %s",
-                 override_path, strerror(errno));
-        /* Non-fatal: the data is in the page cache and go2rtc will read it
-         * via the same kernel; only durability across crashes is at risk. */
+        log_error("fsync on temporary go2rtc override file %s failed: %s",
+                 override_tmp_path, strerror(errno));
+        close(fd);
+        unlink(override_tmp_path);
+        free(content);
+        return -1;
     }
 
     if (close(fd) != 0) {
-        log_error("close on go2rtc override file %s failed: %s",
+        log_error("close on temporary go2rtc override file %s failed: %s",
+                  override_tmp_path, strerror(errno));
+        unlink(override_tmp_path);
+        free(content);
+        return -1;
+    }
+
+    if (rename(override_tmp_path, override_path) != 0) {
+        log_error("Failed to atomically publish go2rtc override file %s: %s",
                   override_path, strerror(errno));
+        unlink(override_tmp_path);
         free(content);
         return -1;
     }
@@ -1827,6 +1849,20 @@ int go2rtc_process_generate_override_file(const char *override_path) {
 
 const char *go2rtc_process_get_override_path(void) {
     return g_override_path;
+}
+
+bool go2rtc_process_get_listener_policy(char *policy, size_t capacity) {
+    if (!policy || capacity == 0) return false;
+    policy[0] = '\0';
+    go2rtc_lifecycle_guard_t guard;
+    if (!go2rtc_lifecycle_begin(GO2RTC_LIFECYCLE_CHECK, false, false, &guard))
+        return false;
+    bool available = g_initialized && !g_using_external_service &&
+                     g_process_pid > 0 && g_managed_listener_policy[0] &&
+                     strlen(g_managed_listener_policy) < capacity;
+    if (available) strcpy(policy, g_managed_listener_policy);
+    go2rtc_lifecycle_end(&guard, available);
+    return available;
 }
 
 const char *go2rtc_process_get_config_path(void) {
@@ -2307,21 +2343,8 @@ static bool go2rtc_process_start_locked(int api_port) {
     // silently using the hardcoded default.
     g_rtsp_port = (g_config.go2rtc_rtsp_port > 0) ? g_config.go2rtc_rtsp_port : 8554;
 
-    // Create a symbolic link from /dev/shm/go2rtc.yaml to our config file
-    // This ensures that even if something tries to use the /dev/shm path, it will use our config
-    struct stat shared_config_stat;
-    if (lstat("/dev/shm/go2rtc.yaml", &shared_config_stat) == 0 &&
-        unlink("/dev/shm/go2rtc.yaml") != 0) {
-        log_warn("Failed to replace /dev/shm/go2rtc.yaml: %s", strerror(errno));
-    }
-    g_created_config_symlink = false;
-    if (symlink(g_config_path, "/dev/shm/go2rtc.yaml") != 0) {
-        log_warn("Failed to create symlink from /dev/shm/go2rtc.yaml to %s: %s",
-                g_config_path, strerror(errno));
-        // Continue anyway, this is not critical
-    } else {
-        g_created_config_symlink = true;
-    }
+    // The child receives its private configuration via --config. Do not
+    // create or remove a shared /dev/shm alias owned by another instance.
 
     // Prepare everything the child needs BEFORE forking.
     //
@@ -2399,7 +2422,22 @@ static bool go2rtc_process_start_locked(int api_port) {
                           && override_path[0] != '\0'
                           && access(override_path, R_OK) == 0);
 
-    char *argv[6];
+    /* Apply last using go2rtc's own merge semantics. Overrides (including
+     * aliases, environment expansion and builds without libyaml) cannot
+     * reopen direct HTTP/RTSP access around LightNVR authorization. The
+     * WebRTC ICE listener remains externally reachable for negotiated media.
+     * An independently managed service is outside this launch policy. */
+    char listener_policy[sizeof(g_managed_listener_policy)];
+    int managed_api_port = api_port > 0 ? api_port : 1984;
+    int managed_rtsp_port = g_config.go2rtc_rtsp_port > 0 ? g_config.go2rtc_rtsp_port : 8554;
+    if (managed_api_port > 65535 || managed_rtsp_port > 65535) {
+        log_error("Invalid managed go2rtc listener port");
+        return false;
+    }
+    snprintf(listener_policy, sizeof(listener_policy),
+        "{\"api\":{\"listen\":\"127.0.0.1:%d\",\"tls_listen\":\"\",\"unix_listen\":\"\",\"media_authority_port\":%d},"
+        "\"rtsp\":{\"listen\":\"127.0.0.1:%d\"}}", managed_api_port, g_config.web_port, managed_rtsp_port);
+    char *argv[8];
     int ai = 0;
     argv[ai++] = (char *)"go2rtc";
     argv[ai++] = (char *)"--config";
@@ -2408,6 +2446,8 @@ static bool go2rtc_process_start_locked(int api_port) {
         argv[ai++] = (char *)"--config";
         argv[ai++] = (char *)override_path;
     }
+    argv[ai++] = (char *)"--config";
+    argv[ai++] = listener_policy;
     argv[ai] = NULL;
 
     if (have_override) {
@@ -2417,6 +2457,7 @@ static bool go2rtc_process_start_locked(int api_port) {
         log_info("Executing go2rtc with command: %s --config %s",
                  resolved_binary, g_config_path);
     }
+    log_info("Managed go2rtc listener policy (applied last): %s", listener_policy);
     log_info("Using go2rtc log file: %s", log_path);
 
     // Fork a new process
@@ -2451,12 +2492,20 @@ static bool go2rtc_process_start_locked(int api_port) {
         sigprocmask(SIG_SETMASK, &empty_mask, NULL);
 
         // Redirect stdout and stderr to the go2rtc log file
-        int log_fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        int log_fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_NONBLOCK, 0600);
         if (log_fd == -1) {
             _exit(EXIT_FAILURE);
         }
-        dup2(log_fd, STDOUT_FILENO);
-        dup2(log_fd, STDERR_FILENO);
+        struct stat log_stat;
+        if (fstat(log_fd, &log_stat) != 0 || !S_ISREG(log_stat.st_mode) ||
+            log_stat.st_nlink != 1 || fchmod(log_fd, 0600) != 0) {
+            close(log_fd);
+            _exit(EXIT_FAILURE);
+        }
+        if (dup2(log_fd, STDOUT_FILENO) < 0 || dup2(log_fd, STDERR_FILENO) < 0) {
+            close(log_fd);
+            _exit(EXIT_FAILURE);
+        }
         if (log_fd > STDERR_FILENO) {
             close(log_fd);
         }
@@ -2583,6 +2632,7 @@ static bool go2rtc_process_start_locked(int api_port) {
         g_process_pid = pid;
         g_process_start_ticks = start_ticks;
         g_using_external_service = false;
+        strcpy(g_managed_listener_policy, listener_policy);
         g_last_start_time = time(NULL);  /* T4b crash-loop bookkeeping */
         log_info("Verified go2rtc serving PID: %d", pid);
 
@@ -2712,7 +2762,6 @@ static void go2rtc_process_cleanup_locked(void) {
         log_info("Not stopping go2rtc during cleanup as we're using an existing service");
     }
 
-    remove_owned_config_symlink();
 
     // Free allocated memory
     free(g_binary_path);
@@ -2729,7 +2778,7 @@ static void go2rtc_process_cleanup_locked(void) {
     g_process_pid = -1;
     g_process_start_ticks = 0;
     g_using_external_service = false;
-    g_created_config_symlink = false;
+    g_managed_listener_policy[0] = '\0';
     g_api_port = 1984;
     g_initialized = false;
     /* Reset T4b crash-loop bookkeeping so a fresh init starts clean. */

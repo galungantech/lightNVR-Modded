@@ -3,7 +3,7 @@
  * src/web/api_handlers_detection.c, and the timelineState store in
  * components/preact/timeline/TimelinePage.tsx.
  */
-import type { StreamSummary } from './core.ts';
+import type { DetectionObservation, StreamSummary } from './core.ts';
 
 /** Anything with a Unix-second span: segments and exact detection intervals. */
 export interface TimelineRange {
@@ -11,9 +11,12 @@ export interface TimelineRange {
   end_timestamp: number;
 }
 
+/** Exact recording identity; large IDs stay decimal strings throughout the UI. */
+export type TimelineRecordingId = number | string;
+
 /** One entry of `segments` from /api/timeline/segments and /segments-by-ids. */
 export interface TimelineSegment extends TimelineRange {
-  id: number;
+  id: TimelineRecordingId;
   stream: string;
   camera_uuid: string | null;
   /** Local time, "YYYY-MM-DD HH:MM:SS". */
@@ -71,6 +74,7 @@ export interface TimelineDetection {
   height: number;
   timestamp: number;
   end_timestamp: number;
+  observation?: DetectionObservation;
 }
 
 export interface TimelineDetectionsResponse {
@@ -103,7 +107,7 @@ export interface TimelineDayBounds {
 export interface TimelineDragPreview {
   frameIndex: number;
   label: string;
-  recordingId: number;
+  recordingId: TimelineRecordingId;
   url: string;
 }
 
@@ -113,7 +117,7 @@ export interface TimelineStateFields {
   timelineSegments: TimelineSegment[];
   selectedStream: string | null;
   selectedDate: string | null;
-  currentRecordingId: number | null;
+  currentRecordingId: TimelineRecordingId | null;
   currentRecordingProtected: boolean;
   currentRecordingTags: string[];
   isPlaying: boolean;

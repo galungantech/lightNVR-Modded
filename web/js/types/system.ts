@@ -86,6 +86,55 @@ export interface SystemInfoData {
   recordings?: { count?: number; size?: number };
   streamStorage?: StreamStorageEntry[];
   versions?: SystemVersions;
+  /** INT_01 L10 (core/observation_diagnostics.c). */
+  observation_pipeline?: ObservationPipelineDiagnostics;
+}
+
+/** GET /api/system/info "observation_pipeline": observation_diagnostics_to_json(). */
+export interface ObservationPipelineDiagnostics {
+  /** False when evidence is unused: counters are zero and no queue exists. */
+  active: boolean;
+  accepted?: number;
+  dropped?: { queue_full?: number; budget_exhausted?: number; disabled?: number; untracked?: number };
+  evidence?: {
+    queue_allocated?: boolean;
+    worker_running?: boolean;
+    backlog_items?: number;
+    backlog_bytes?: number;
+    high_water_items?: number;
+    high_water_bytes?: number;
+    drop_ring_depth?: number;
+    ready?: number;
+    unavailable_submitted?: number;
+    bytes_written?: number;
+    /** Counts by reason; OpenAPI allows additional members, so values are unknown. */
+    failures?: Record<string, unknown>;
+  };
+  history?: {
+    available?: boolean;
+    observations?: number;
+    oldest_seq?: number;
+    head_seq?: number;
+    oldest_observed_at?: string | null;
+    epoch_regenerations?: number;
+  };
+  publications?: {
+    pending?: number;
+    failed?: number;
+    expired?: number;
+    relay_lag_seconds?: number;
+    relay_running?: boolean;
+    relayed?: number;
+    relayed_no_route?: number;
+  };
+  budget_exhausted_cameras?: number;
+  cameras?: Array<{
+    camera_uuid: string;
+    retained_bytes?: number;
+    max_bytes?: number;
+    max_age_days?: number;
+    budget_exhausted?: boolean;
+  }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +289,10 @@ export interface HealthActiveIncident {
   thresholds?: HealthThresholdPolicy;
 }
 
+/** safe_stored_observation(): historical values have no live freshness. */
+export type HealthStoredObservation = Pick<HealthObservation,
+  'metric' | 'resource' | 'scope' | 'capability' | 'unit' | 'value'>;
+
 /** stored_incident_to_json(): the items of /api/system/health/incidents. */
 export interface HealthStoredIncident {
   incident_id: string;
@@ -253,7 +306,7 @@ export interface HealthStoredIncident {
   closed_at_ms: number | null;
   reconciliation: string;
   revision: number;
-  observation: HealthObservation;
+  observation: HealthStoredObservation;
 }
 
 export interface HealthIncidentsResponse {

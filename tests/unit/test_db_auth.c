@@ -27,6 +27,14 @@
 
 #define TEST_DB_PATH "/tmp/lightnvr_unit_auth_test.db"
 
+static time_t security_time;
+time_t __real_time(time_t *);
+time_t __wrap_time(time_t *value) {
+    if (!security_time) return __real_time(value);
+    if (value) *value=security_time;
+    return security_time;
+}
+
 static void clear_users(void) {
     sqlite3 *db = get_db_handle();
     /* Remove non-admin users to keep db_auth_init's default admin */
@@ -37,6 +45,10 @@ static void clear_users(void) {
 }
 
 void setUp(void) {
+    security_time=0;
+    g_config.login_rate_limit_enabled=true;
+    g_config.login_rate_limit_max_attempts=5;
+    g_config.login_rate_limit_window_seconds=300;
     g_config.web_password[0] = '\0';
     g_config.demo_mode = false;
     clear_users();
@@ -564,6 +576,310 @@ static void test_admin_bootstrap_serializes_with_storage_transactions(void) {
     TEST_ASSERT_TRUE(sqlite3_get_autocommit(get_db_handle()));
 }
 
+static int64_t challenge_user(char token[33]) {
+    int64_t user_id;
+    TEST_ASSERT_EQUAL_INT(0, db_auth_create_user("challenge", "password", NULL, USER_ROLE_USER, true, &user_id));
+    TEST_ASSERT_EQUAL_INT(0, db_auth_set_totp_secret(user_id, "JBSWY3DPEHPK3PXP"));
+    TEST_ASSERT_EQUAL_INT(0, db_auth_enable_totp(user_id, true));
+    TEST_ASSERT_EQUAL_INT(0, db_auth_create_mfa_challenge(user_id, "127.0.0.1", "fixture", token, 33));
+    return user_id;
+}
+
+void test_mfa_challenge_is_not_a_session_and_is_consumed_once(void) {
+    char pending[33], session[33];
+    int64_t owner = challenge_user(pending), found = 0;
+    TEST_ASSERT_NOT_EQUAL(0, db_auth_validate_session(pending, &found));
+    session_t sessions[32];
+    TEST_ASSERT_EQUAL_INT(0, db_auth_list_user_sessions(owner, sessions, 32));
+    TEST_ASSERT_EQUAL_INT(0, db_auth_validate_mfa_challenge(pending, &found, "127.0.0.1", "fixture"));
+    TEST_ASSERT_EQUAL_INT64(owner, found);
+    TEST_ASSERT_NOT_EQUAL(0, db_auth_consume_mfa_challenge(pending, owner + 1));
+    TEST_ASSERT_EQUAL_INT(0, db_auth_consume_mfa_challenge(pending, owner));
+    TEST_ASSERT_NOT_EQUAL(0, db_auth_consume_mfa_challenge(pending, owner));
+    TEST_ASSERT_NOT_EQUAL(0, db_auth_validate_mfa_challenge(pending, &found, "127.0.0.1", "fixture"));
+    TEST_ASSERT_EQUAL_INT(0, db_auth_create_session(owner, "127.0.0.1", "fixture", 300, session, sizeof(session)));
+    TEST_ASSERT_EQUAL_INT(0, db_auth_validate_session(session, &found));
+    TEST_ASSERT_NOT_EQUAL(0, db_auth_validate_mfa_challenge(session, &found, "127.0.0.1", "fixture"));
+    TEST_ASSERT_NOT_EQUAL(0, db_auth_consume_mfa_challenge(session, owner));
+    TEST_ASSERT_EQUAL_INT(1, db_auth_list_user_sessions(owner, sessions, 32));
+}
+
+void test_mfa_challenge_attempt_limit_expiry_and_context(void) {
+    char pending[33];
+    int64_t owner = challenge_user(pending), found = 0;
+    TEST_ASSERT_NOT_EQUAL(0, db_auth_validate_mfa_challenge(pending, &found, "127.0.0.2", "fixture"));
+    TEST_ASSERT_NOT_EQUAL(0, db_auth_validate_mfa_challenge(pending, &found, "127.0.0.1", "other"));
+    for (int attempt = 0; attempt < 5; ++attempt)
+        TEST_ASSERT_EQUAL_INT(0, db_auth_validate_mfa_challenge(pending, &found, "127.0.0.1", "fixture"));
+    TEST_ASSERT_NOT_EQUAL(0, db_auth_validate_mfa_challenge(pending, &found, "127.0.0.1", "fixture"));
+    TEST_ASSERT_EQUAL_INT64(owner, found);
+    TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(get_db_handle(),
+        "UPDATE sessions SET expires_at=0 WHERE mfa_pending=1;", NULL, NULL, NULL));
+    TEST_ASSERT_NOT_EQUAL(0, db_auth_consume_mfa_challenge(pending, owner));
+    TEST_ASSERT_EQUAL_INT(0, db_auth_create_mfa_challenge(owner, "127.0.0.1", "fixture", pending, sizeof(pending)));
+    TEST_ASSERT_EQUAL_INT(0, db_auth_delete_user_sessions(owner));
+    TEST_ASSERT_NOT_EQUAL(0, db_auth_validate_mfa_challenge(pending, &found, "127.0.0.1", "fixture"));
+}
+
+void test_missing_mfa_discriminator_fails_closed(void) {
+    char pending[33], authenticated[33];
+    int64_t owner = challenge_user(pending), found = 0;
+    TEST_ASSERT_EQUAL_INT(0, db_auth_create_session(owner, "127.0.0.1", "fixture", 300,
+                                                  authenticated, sizeof(authenticated)));
+    sqlite3 *db = get_db_handle();
+    TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(db,
+        "ALTER TABLE sessions RENAME COLUMN mfa_pending TO unavailable_pending;", NULL, NULL, NULL));
+    int pending_result = db_auth_validate_session(pending, &found);
+    int full_result = db_auth_validate_session(authenticated, &found);
+    session_t sessions[4];
+    int listed = db_auth_list_user_sessions(owner, sessions, 4);
+    int restored = sqlite3_exec(db,
+        "ALTER TABLE sessions RENAME COLUMN unavailable_pending TO mfa_pending;", NULL, NULL, NULL);
+    TEST_ASSERT_EQUAL_INT(SQLITE_OK, restored);
+    TEST_ASSERT_NOT_EQUAL(0, pending_result);
+    TEST_ASSERT_NOT_EQUAL(0, full_result);
+    TEST_ASSERT_EQUAL_INT(-1, listed);
+    TEST_ASSERT_EQUAL_INT(0, db_auth_validate_session(authenticated, &found));
+}
+
+void test_mfa_database_failures_leave_no_partial_credentials_or_transaction(void) {
+    char pending[33], rejected[33] = "unchanged";
+    int64_t owner = challenge_user(pending), found = 0;
+    sqlite3 *db = get_db_handle();
+    TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(db,
+        "CREATE TRIGGER reject_challenge_check BEFORE UPDATE ON sessions "
+        "BEGIN SELECT RAISE(ABORT,'fixture update failure'); END;", NULL, NULL, NULL));
+    int checked = db_auth_validate_mfa_challenge(pending, &found, "127.0.0.1", "fixture");
+    bool autocommit = sqlite3_get_autocommit(db);
+    TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(db, "DROP TRIGGER reject_challenge_check;", NULL, NULL, NULL));
+    TEST_ASSERT_NOT_EQUAL(0, checked);
+    TEST_ASSERT_TRUE(autocommit);
+    TEST_ASSERT_EQUAL_INT(0, db_auth_validate_mfa_challenge(pending, &found, "127.0.0.1", "fixture"));
+
+    TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(db,
+        "CREATE TRIGGER reject_challenge_delete BEFORE DELETE ON sessions "
+        "BEGIN SELECT RAISE(ABORT,'fixture delete failure'); END;", NULL, NULL, NULL));
+    int consumed = db_auth_consume_mfa_challenge(pending, owner);
+    TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(db, "DROP TRIGGER reject_challenge_delete;", NULL, NULL, NULL));
+    TEST_ASSERT_NOT_EQUAL(0, consumed);
+    TEST_ASSERT_EQUAL_INT(0, db_auth_consume_mfa_challenge(pending, owner));
+
+    TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(db,
+        "CREATE TRIGGER reject_challenge_insert BEFORE INSERT ON sessions "
+        "BEGIN SELECT RAISE(ABORT,'fixture insert failure'); END;", NULL, NULL, NULL));
+    int created = db_auth_create_mfa_challenge(owner, "127.0.0.1", "fixture", rejected, sizeof(rejected));
+    TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(db, "DROP TRIGGER reject_challenge_insert;", NULL, NULL, NULL));
+    TEST_ASSERT_NOT_EQUAL(0, created);
+    TEST_ASSERT_EQUAL_STRING("", rejected);
+    session_t sessions[4];
+    TEST_ASSERT_EQUAL_INT(0, db_auth_list_user_sessions(owner, sessions, 4));
+    TEST_ASSERT_TRUE(sqlite3_get_autocommit(db));
+}
+
+static char concurrent_challenge[33];
+static int64_t concurrent_owner;
+static void *consume_challenge(void *argument) {
+    int *result = argument;
+    *result = db_auth_consume_mfa_challenge(concurrent_challenge, concurrent_owner);
+    return NULL;
+}
+void test_concurrent_mfa_completion_has_exactly_one_winner(void) {
+    concurrent_owner = challenge_user(concurrent_challenge);
+    int64_t found;
+    TEST_ASSERT_EQUAL_INT(0, db_auth_validate_mfa_challenge(concurrent_challenge, &found, "127.0.0.1", "fixture"));
+    pthread_t threads[2];
+    int results[2];
+    for (int i = 0; i < 2; ++i)
+        TEST_ASSERT_EQUAL_INT(0, pthread_create(&threads[i], NULL, consume_challenge, &results[i]));
+    for (int i = 0; i < 2; ++i) pthread_join(threads[i], NULL);
+    TEST_ASSERT_EQUAL_INT(1, (results[0] == 0) + (results[1] == 0));
+}
+
+static void test_owned_revocation_identifies_cookie_and_preserves_other_credentials(void) {
+    int64_t owner;
+    TEST_ASSERT_EQUAL_INT(0, db_auth_create_user("revoker", "password", NULL, USER_ROLE_USER, true, &owner));
+    char token[33];
+    TEST_ASSERT_EQUAL_INT(0, db_auth_create_session(owner, "127.0.0.1", "fixture", 300, token, sizeof(token)));
+    session_t row[1];
+    TEST_ASSERT_EQUAL_INT(1, db_auth_list_user_sessions(owner, row, 1));
+    bool current = true;
+    TEST_ASSERT_EQUAL_INT(1, db_auth_revoke_session(owner + 1, row[0].id, token, &current));
+    TEST_ASSERT_FALSE(current);
+    TEST_ASSERT_EQUAL_INT(0, db_auth_revoke_session(owner, row[0].id, token, &current));
+    TEST_ASSERT_TRUE(current);
+    int64_t found;
+    TEST_ASSERT_NOT_EQUAL(0, db_auth_validate_session(token, &found));
+    TEST_ASSERT_EQUAL_INT(1, db_auth_revoke_session(owner, row[0].id, token, &current));
+    TEST_ASSERT_FALSE(current);
+
+    TEST_ASSERT_EQUAL_INT(0, db_auth_create_trusted_device(owner, "127.0.0.1", "fixture", 300, token, sizeof(token)));
+    trusted_device_t device[1];
+    TEST_ASSERT_EQUAL_INT(1, db_auth_list_trusted_devices(owner, device, 1));
+    TEST_ASSERT_EQUAL_INT(1, db_auth_revoke_trusted_device(owner + 1, device[0].id, token, &current));
+    TEST_ASSERT_FALSE(current);
+    TEST_ASSERT_EQUAL_INT(0, db_auth_revoke_trusted_device(owner, device[0].id, "another-cookie", &current));
+    TEST_ASSERT_FALSE(current);
+    TEST_ASSERT_NOT_EQUAL(0, db_auth_validate_trusted_device(owner, token));
+}
+
+static void test_revocation_database_error_never_clears_cookie(void) {
+    int64_t owner;
+    TEST_ASSERT_EQUAL_INT(0, db_auth_create_user("revoker", "password", NULL, USER_ROLE_USER, true, &owner));
+    char token[33];
+    TEST_ASSERT_EQUAL_INT(0, db_auth_create_session(owner, "127.0.0.1", "fixture", 300, token, sizeof(token)));
+    session_t row[1];
+    TEST_ASSERT_EQUAL_INT(1, db_auth_list_user_sessions(owner, row, 1));
+    sqlite3 *db = get_db_handle();
+    TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(db,
+        "CREATE TRIGGER block_revoke BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT,'fixture'); END;",
+        NULL, NULL, NULL));
+    bool current = true;
+    int revoked = db_auth_revoke_session(owner, row[0].id, token, &current);
+    TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(db, "DROP TRIGGER block_revoke;", NULL, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(-1, revoked);
+    TEST_ASSERT_FALSE(current);
+    int64_t found;
+    TEST_ASSERT_EQUAL_INT(0, db_auth_validate_session(token, &found));
+    TEST_ASSERT_TRUE(sqlite3_get_autocommit(db));
+}
+
+static int64_t security_scalar(int64_t user_id, const char *sql) {
+    sqlite3_stmt *stmt=NULL;
+    TEST_ASSERT_EQUAL_INT(SQLITE_OK,sqlite3_prepare_v2(get_db_handle(),sql,-1,&stmt,NULL));
+    sqlite3_bind_int64(stmt,1,user_id);
+    TEST_ASSERT_EQUAL_INT(SQLITE_ROW,sqlite3_step(stmt));
+    int64_t value=sqlite3_column_int64(stmt,0);
+    sqlite3_finalize(stmt);return value;
+}
+static int64_t security_user(bool enabled) {
+    security_time=1111111111;
+    int64_t id=0;
+    TEST_ASSERT_EQUAL_INT(0,db_auth_create_user("security","password123",NULL,USER_ROLE_USER,true,&id));
+    TEST_ASSERT_EQUAL_INT(0,db_auth_set_totp_secret(id,"GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"));
+    if(enabled) TEST_ASSERT_EQUAL_INT(0,db_auth_enable_totp(id,true));
+    return id;
+}
+static void security_sql(const char *sql) {
+    TEST_ASSERT_EQUAL_INT(SQLITE_OK,sqlite3_exec(get_db_handle(),sql,NULL,NULL,NULL));
+}
+static void test_totp_session_failure_rolls_back_code_and_challenge(void) {
+    int64_t id=security_user(true),found;
+    char pending[33],session[33],trusted[33];
+    TEST_ASSERT_EQUAL_INT(0,db_auth_create_mfa_challenge(id,"127.0.0.1","fixture",pending,sizeof(pending)));
+    TEST_ASSERT_EQUAL_INT(0,db_auth_validate_mfa_challenge(pending,&found,"127.0.0.1","fixture"));
+    security_sql("CREATE TRIGGER fail_security_insert BEFORE INSERT ON trusted_devices BEGIN SELECT RAISE(ABORT,'fixture'); END");
+    int result=db_auth_complete_totp_login(id,"050471",pending,NULL,"127.0.0.1","fixture",300,session,trusted);
+    security_sql("DROP TRIGGER fail_security_insert");
+    TEST_ASSERT_EQUAL_INT(DB_AUTH_IDENTITY_ERROR,result);
+    TEST_ASSERT_EQUAL_STRING("",session);TEST_ASSERT_EQUAL_STRING("",trusted);
+    TEST_ASSERT_TRUE(sqlite3_get_autocommit(get_db_handle()));
+    TEST_ASSERT_EQUAL_INT64(-1,security_scalar(id,"SELECT totp_last_used_step FROM users WHERE id=?"));
+    TEST_ASSERT_EQUAL_INT64(1,security_scalar(id,"SELECT count(*) FROM sessions WHERE user_id=? AND mfa_pending=1"));
+    TEST_ASSERT_EQUAL_INT64(0,security_scalar(id,"SELECT count(*) FROM sessions WHERE user_id=? AND mfa_pending=0"));
+    TEST_ASSERT_EQUAL_INT(0,db_auth_complete_totp_login(id,"050471",pending,NULL,"127.0.0.1","fixture",300,session,trusted));
+}
+static void test_totp_enable_and_disable_roll_back_when_revocation_fails(void) {
+    int64_t id=security_user(false);
+    char session[33],trusted[33];
+    TEST_ASSERT_EQUAL_INT(0,db_auth_create_session(id,"127.0.0.1","fixture",300,session,sizeof(session)));
+    TEST_ASSERT_EQUAL_INT(0,db_auth_create_trusted_device(id,"127.0.0.1","fixture",300,trusted,sizeof(trusted)));
+    security_sql("CREATE TRIGGER fail_security_delete BEFORE DELETE ON trusted_devices BEGIN SELECT RAISE(ABORT,'fixture'); END");
+    int enabled=db_auth_verify_totp_enrollment(id,"050471",session);
+    security_sql("DROP TRIGGER fail_security_delete");
+    TEST_ASSERT_EQUAL_INT(DB_AUTH_IDENTITY_ERROR,enabled);
+    TEST_ASSERT_EQUAL_INT64(0,security_scalar(id,"SELECT totp_enabled FROM users WHERE id=?"));
+    TEST_ASSERT_EQUAL_INT64(-1,security_scalar(id,"SELECT totp_last_used_step FROM users WHERE id=?"));
+    TEST_ASSERT_EQUAL_INT(0,db_auth_verify_totp_enrollment(id,"050471",session));
+    TEST_ASSERT_EQUAL_INT(0,db_auth_create_session(id,"127.0.0.1","other",300,trusted,sizeof(trusted)));
+    security_sql("CREATE TRIGGER fail_security_disable BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT,'fixture'); END");
+    int disabled=db_auth_disable_totp(id,session);
+    security_sql("DROP TRIGGER fail_security_disable");
+    TEST_ASSERT_EQUAL_INT(DB_AUTH_IDENTITY_ERROR,disabled);
+    TEST_ASSERT_EQUAL_INT64(1,security_scalar(id,"SELECT totp_enabled FROM users WHERE id=?"));
+    TEST_ASSERT_TRUE(sqlite3_get_autocommit(get_db_handle()));
+    TEST_ASSERT_EQUAL_INT(0,db_auth_disable_totp(id,session));
+    TEST_ASSERT_EQUAL_INT64(1,security_scalar(id,"SELECT count(*) FROM sessions WHERE user_id=?"));
+    TEST_ASSERT_EQUAL_INT64(1,security_scalar(id,"SELECT totp_secret IS NULL FROM users WHERE id=?"));
+}
+static void test_password_verification_and_revocation_are_atomic(void) {
+    int64_t id=security_user(true);
+    char session[33],trusted[33],pending[33];
+    TEST_ASSERT_EQUAL_INT(0,db_auth_create_session(id,"127.0.0.1","fixture",300,session,sizeof(session)));
+    TEST_ASSERT_EQUAL_INT(0,db_auth_create_trusted_device(id,"127.0.0.1","fixture",300,trusted,sizeof(trusted)));
+    TEST_ASSERT_EQUAL_INT(0,db_auth_create_mfa_challenge(id,"127.0.0.1","fixture",pending,sizeof(pending)));
+    security_sql("CREATE TRIGGER fail_security_revoke BEFORE DELETE ON trusted_devices BEGIN SELECT RAISE(ABORT,'fixture'); END");
+    int result=db_auth_change_password_verified(id,"newpassword123","password123");
+    security_sql("DROP TRIGGER fail_security_revoke");
+    TEST_ASSERT_EQUAL_INT(-1,result);
+    TEST_ASSERT_EQUAL_INT(0,db_auth_verify_password(id,"password123"));
+    TEST_ASSERT_EQUAL_INT64(2,security_scalar(id,"SELECT count(*) FROM sessions WHERE user_id=?"));
+    TEST_ASSERT_EQUAL_INT(0,db_auth_change_password_verified(id,"newpassword123","password123"));
+    TEST_ASSERT_EQUAL_INT(-4,db_auth_change_password_verified(id,"anotherpassword","password123"));
+    TEST_ASSERT_EQUAL_INT64(0,security_scalar(id,"SELECT count(*) FROM sessions WHERE user_id=?"));
+    TEST_ASSERT_EQUAL_INT64(0,security_scalar(id,"SELECT count(*) FROM trusted_devices WHERE user_id=?"));
+    TEST_ASSERT_NOT_EQUAL(0,db_auth_create_mfa_challenge_verified(id,"password123","127.0.0.1","fixture",pending,sizeof(pending)));
+    TEST_ASSERT_EQUAL_STRING("",pending);
+}
+typedef struct {int64_t id;char challenge[33];int result;} security_completion_t;
+static void *security_complete(void *arg) {
+    security_completion_t *request=arg;char session[33],trusted[33];
+    request->result=db_auth_complete_totp_login(request->id,"050471",request->challenge,NULL,"127.0.0.1","fixture",300,session,trusted);
+    return NULL;
+}
+static void test_two_challenges_cannot_consume_one_totp_step(void) {
+    int64_t id=security_user(true),found;
+    security_completion_t requests[2]={{.id=id},{.id=id}};
+    pthread_t threads[2];
+    for(int i=0;i<2;++i) {
+        TEST_ASSERT_EQUAL_INT(0,db_auth_create_mfa_challenge(id,"127.0.0.1","fixture",requests[i].challenge,33));
+        TEST_ASSERT_EQUAL_INT(0,db_auth_validate_mfa_challenge(requests[i].challenge,&found,"127.0.0.1","fixture"));
+    }
+    for(int i=0;i<2;++i) TEST_ASSERT_EQUAL_INT(0,pthread_create(&threads[i],NULL,security_complete,&requests[i]));
+    for(int i=0;i<2;++i) pthread_join(threads[i],NULL);
+    TEST_ASSERT_EQUAL_INT(1,(requests[0].result==0)+(requests[1].result==0));
+    TEST_ASSERT_EQUAL_INT64(1,security_scalar(id,"SELECT count(*) FROM sessions WHERE user_id=? AND mfa_pending=0"));
+    TEST_ASSERT_EQUAL_INT64(1,security_scalar(id,"SELECT count(*) FROM trusted_devices WHERE user_id=?"));
+}
+static void test_totp_window_and_replay_survive_database_reopen(void) {
+    int64_t id=security_user(true);
+    char session[33],trusted[33];
+    g_config.login_rate_limit_enabled=true;g_config.login_rate_limit_max_attempts=2;g_config.login_rate_limit_window_seconds=300;
+    for(int i=0;i<2;++i) TEST_ASSERT_EQUAL_INT(DB_AUTH_IDENTITY_INVALID,
+        db_auth_complete_totp_login(id,"000000",NULL,"password123","127.0.0.1","fixture",0,session,trusted));
+    shutdown_database();
+    TEST_ASSERT_EQUAL_INT(0,init_database_ex(TEST_DB_PATH,DB_INIT_NO_BACKUP));
+    TEST_ASSERT_EQUAL_INT(DB_AUTH_IDENTITY_LIMITED,
+        db_auth_complete_totp_login(id,"050471",NULL,"password123","127.0.0.1","fixture",0,session,trusted));
+    security_sql("UPDATE users SET totp_window_started_at=0");
+    TEST_ASSERT_EQUAL_INT(0,db_auth_complete_totp_login(id,"050471",NULL,"password123","127.0.0.1","fixture",0,session,trusted));
+    shutdown_database();
+    TEST_ASSERT_EQUAL_INT(0,init_database_ex(TEST_DB_PATH,DB_INIT_NO_BACKUP));
+    TEST_ASSERT_EQUAL_INT(DB_AUTH_IDENTITY_INVALID,
+        db_auth_complete_totp_login(id,"050471",NULL,"password123","127.0.0.1","fixture",0,session,trusted));
+}
+
+static void test_missing_replay_column_cannot_issue_credentials(void) {
+    int64_t id=security_user(true);
+    char session[33],trusted[33];
+    security_sql("ALTER TABLE users RENAME COLUMN totp_last_used_step TO hidden_replay_step");
+    int result=db_auth_complete_totp_login(id,"050471",NULL,"password123","127.0.0.1","fixture",300,session,trusted);
+    security_sql("ALTER TABLE users RENAME COLUMN hidden_replay_step TO totp_last_used_step");
+    TEST_ASSERT_EQUAL_INT(DB_AUTH_IDENTITY_ERROR,result);
+    TEST_ASSERT_EQUAL_STRING("",session);TEST_ASSERT_EQUAL_STRING("",trusted);
+    TEST_ASSERT_TRUE(sqlite3_get_autocommit(get_db_handle()));
+    TEST_ASSERT_EQUAL_INT64(0,security_scalar(id,"SELECT count(*) FROM sessions WHERE user_id=?"));
+}
+static void test_disabling_rate_limit_does_not_disable_replay_protection(void) {
+    int64_t id=security_user(true);
+    char session[33],trusted[33];
+    g_config.login_rate_limit_enabled=false;
+    for(int i=0;i<6;++i) TEST_ASSERT_EQUAL_INT(DB_AUTH_IDENTITY_INVALID,
+        db_auth_complete_totp_login(id,"000000",NULL,"password123","127.0.0.1","fixture",0,session,trusted));
+    TEST_ASSERT_EQUAL_INT(0,db_auth_complete_totp_login(id,"050471",NULL,"password123","127.0.0.1","fixture",0,session,trusted));
+    TEST_ASSERT_EQUAL_INT(DB_AUTH_IDENTITY_INVALID,
+        db_auth_complete_totp_login(id,"050471",NULL,"password123","127.0.0.1","fixture",0,session,trusted));
+}
+
 int main(void) {
     unlink(TEST_DB_PATH);
     if (init_database(TEST_DB_PATH) != 0) {
@@ -573,7 +889,21 @@ int main(void) {
     db_auth_init();
 
     UNITY_BEGIN();
+    RUN_TEST(test_missing_replay_column_cannot_issue_credentials);
+    RUN_TEST(test_disabling_rate_limit_does_not_disable_replay_protection);
+    RUN_TEST(test_totp_session_failure_rolls_back_code_and_challenge);
+    RUN_TEST(test_totp_enable_and_disable_roll_back_when_revocation_fails);
+    RUN_TEST(test_password_verification_and_revocation_are_atomic);
+    RUN_TEST(test_two_challenges_cannot_consume_one_totp_step);
+    RUN_TEST(test_totp_window_and_replay_survive_database_reopen);
+    RUN_TEST(test_owned_revocation_identifies_cookie_and_preserves_other_credentials);
+    RUN_TEST(test_revocation_database_error_never_clears_cookie);
     RUN_TEST(test_admin_bootstrap_serializes_with_storage_transactions);
+    RUN_TEST(test_mfa_challenge_is_not_a_session_and_is_consumed_once);
+    RUN_TEST(test_mfa_challenge_attempt_limit_expiry_and_context);
+    RUN_TEST(test_concurrent_mfa_completion_has_exactly_one_winner);
+    RUN_TEST(test_missing_mfa_discriminator_fails_closed);
+    RUN_TEST(test_mfa_database_failures_leave_no_partial_credentials_or_transaction);
     RUN_TEST(test_auth_init_creates_admin);
     RUN_TEST(test_auth_init_flags_only_fresh_fallback_admin);
     RUN_TEST(test_auth_init_configured_password_skips_requirement);
