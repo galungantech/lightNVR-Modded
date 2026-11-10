@@ -392,8 +392,8 @@ export function Header({ version = VERSION }: { version?: string }) {
               }
             }}
           >
-            <h1 className="text-xl font-bold m-0">LightNVR</h1>
-            <span className="version text-xs ms-2" style={{color: 'hsl(var(--muted-foreground))'}}>v{version}</span>
+            <h1 className="!text-base font-bold m-0">LightNVR-Modded</h1>
+            <span className="version text-xs ml-2" style={{color: 'hsl(var(--muted-foreground))'}}>v{version}</span>
           </a>
 
           {/* Desktop Navigation */}

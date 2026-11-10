@@ -28,31 +28,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Debian sid (unstable) builds
-          - runner: ubuntu-latest
-            platform: linux/amd64
-            deb_arch: amd64
-            debian_suite: sid
-          - runner: ubuntu-24.04-arm
-            platform: linux/arm64
-            deb_arch: arm64
-            debian_suite: sid
-          - runner: ubuntu-latest
-            platform: linux/arm/v7
-            deb_arch: armhf
-            debian_suite: sid
           # Debian trixie (13/stable) builds
-          - runner: ubuntu-latest
-            platform: linux/amd64
-            deb_arch: amd64
-            debian_suite: trixie
           - runner: ubuntu-24.04-arm
             platform: linux/arm64
             deb_arch: arm64
-            debian_suite: trixie
-          - runner: ubuntu-latest
-            platform: linux/arm/v7
-            deb_arch: armhf
             debian_suite: trixie
 
     steps:
