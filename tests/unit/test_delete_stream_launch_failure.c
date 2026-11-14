@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include "unity.h"
@@ -24,12 +25,14 @@ static unsigned launch_attempts, task_frees;
 static void *failed_task;
 static void *(*captured_worker)(void *);
 static unsigned backend_calls;
+static uintptr_t next_fake_thread = 1, last_fake_thread;
 static stream_handle_t original_stream;
 static stream_config_t original_config, original_persisted;
 static http_request_t request;
 static http_response_t response;
 
 int __real_pthread_create(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *);
+int __real_pthread_detach(pthread_t);
 int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                           void *(*callback)(void *), void *argument) {
     if (!inject_failure && !capture_success) return __real_pthread_create(thread, attr, callback, argument);
@@ -38,8 +41,17 @@ int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     captured_worker = callback;
     /* Capture a successful handoff without starting a worker in this fixture.
      * These controls test the handler response, not asynchronous completion. */
-    if (capture_success) return 0;
+    if (capture_success) {
+        if (thread == NULL) return EINVAL;
+        last_fake_thread = next_fake_thread++;
+        *thread = (pthread_t)last_fake_thread;
+        return 0;
+    }
     return EAGAIN; /* POSIX failure: callback is never scheduled. */
+}
+int __wrap_pthread_detach(pthread_t thread) {
+    if ((uintptr_t)thread == last_fake_thread && last_fake_thread != 0) return 0;
+    return __real_pthread_detach(thread);
 }
 bool __wrap_go2rtc_integration_full_start(void) { backend_calls++; return false; }
 bool __wrap_go2rtc_integration_unregister_stream(const char *name) {
@@ -75,6 +87,7 @@ void setUp(void) {
     failed_task = NULL;
     captured_worker = NULL;
     backend_calls = 0;
+    last_fake_thread = 0;
     g_config.web_auth_enabled = false;
     TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(get_db_handle(), "DELETE FROM streams", NULL, NULL, NULL));
     TEST_ASSERT_EQUAL_INT(0, init_stream_state_manager(4));
@@ -108,13 +121,13 @@ void tearDown(void) {
     g_config.web_auth_enabled = false;
 }
 static void assert_unchanged(void) {
+    TEST_ASSERT_EQUAL_INT(1, get_total_stream_count());
     TEST_ASSERT_EQUAL_PTR(original_stream, get_stream_by_name(original_config.name));
     stream_config_t runtime = {0}, persisted = {0};
     TEST_ASSERT_EQUAL_INT(0, get_stream_config(original_stream, &runtime));
     TEST_ASSERT_EQUAL_MEMORY(&original_config, &runtime, sizeof(runtime));
     TEST_ASSERT_EQUAL_INT(0, get_stream_config_by_name(original_config.name, &persisted));
     TEST_ASSERT_EQUAL_MEMORY(&original_persisted, &persisted, sizeof(persisted));
-    TEST_ASSERT_EQUAL_INT(1, get_total_stream_count());
 }
 static void assert_failed_launch(bool permanent) {
     strcpy(request.query_string, permanent ? "permanent=true" : "");
@@ -166,8 +179,9 @@ static void assert_successful_handoff(bool permanent) {
 }
 static void test_soft_delete_successful_handoff(void) { assert_successful_handoff(false); }
 static void test_permanent_delete_successful_handoff(void) { assert_successful_handoff(true); }
-static void test_reader_during_permanent_delete_cannot_resurrect_camera(void) {
+static void test_reader_at_runtime_database_transition_cannot_resurrect_camera(void) {
     assert_successful_handoff(true);
+    /* Trigger the simulated reader lookup at the delete transition hook used by the worker path. */
     lookup_before_delete = true;
     captured_worker(failed_task);
     lookup_before_delete = false;
@@ -218,8 +232,9 @@ static void queued_name_reuse(bool refresh) {
     TEST_ASSERT_NOT_NULL(original_stream);
     TEST_ASSERT_EQUAL_INT(0, get_stream_config(original_stream, &original_config));
     void *task = failed_task;
-    failed_task = NULL;
     captured_worker(task);
+    TEST_ASSERT_EQUAL_UINT(1, task_frees);
+    TEST_ASSERT_NULL(failed_task);
     TEST_ASSERT_EQUAL_UINT(0, backend_calls);
     assert_unchanged();
 }
@@ -236,7 +251,7 @@ int main(void) {
     if (mkdir(g_config.storage_path, 0700) != 0) return 1;
     if (init_database_ex(path, DB_INIT_NO_CHECK | DB_INIT_NO_BACKUP) != 0) return 1;
     UNITY_BEGIN();
-    RUN_TEST(test_reader_during_permanent_delete_cannot_resurrect_camera);
+    RUN_TEST(test_reader_at_runtime_database_transition_cannot_resurrect_camera);
     RUN_TEST(test_database_delete_failure_keeps_runtime_camera);
     RUN_TEST(test_queued_delete_rejects_reused_camera_name);
     RUN_TEST(test_queued_refresh_rejects_reused_camera_name);

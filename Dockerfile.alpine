@@ -3,6 +3,9 @@ ARG SQLITE_YEAR=2026
 ARG SQLITE_AUTOCONF_VERSION=3540100
 ARG LIBUV_VERSION=1.53.0
 ARG LLHTTP_VERSION=9.4.3
+ARG SQLITE_TGZ_SHA256=926ef8d3eab93fbf6e06011901273eec076b25594a4e1cdadd50c987f4f6d64e
+ARG LIBUV_TGZ_SHA256=279f3f67a24bb9921fe999ca6cd5e332fade8d515873ef9ba054b70e70a31d9e
+ARG LLHTTP_TGZ_SHA256=1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39
 
 FROM alpine:3.24 AS builder
 
@@ -10,8 +13,11 @@ ARG SQLITE_YEAR
 ARG SQLITE_AUTOCONF_VERSION
 ARG LIBUV_VERSION
 ARG LLHTTP_VERSION
+ARG SQLITE_TGZ_SHA256
+ARG LIBUV_TGZ_SHA256
+ARG LLHTTP_TGZ_SHA256
 
-RUN apk update && apk add --no-cache \
+RUN apk add --no-cache \
     git cmake build-base pkgconfig \
     ffmpeg-dev \
     curl-dev \
@@ -25,7 +31,8 @@ RUN apk update && apk add --no-cache \
 
 # Build upstream SQLite because Alpine stable can lag the latest SQLite security fixes
 RUN cd /tmp && \
-    wget -q "https://www.sqlite.org/${SQLITE_YEAR}/sqlite-autoconf-${SQLITE_AUTOCONF_VERSION}.tar.gz" && \
+    wget -q "https://www.sqlite.org/${SQLITE_YEAR}/sqlite-autoconf-${SQLITE_AUTOCONF_VERSION}.tar.gz" -O "sqlite-autoconf-${SQLITE_AUTOCONF_VERSION}.tar.gz" && \
+    echo "${SQLITE_TGZ_SHA256}  sqlite-autoconf-${SQLITE_AUTOCONF_VERSION}.tar.gz" | sha256sum -c - && \
     tar -xzf "sqlite-autoconf-${SQLITE_AUTOCONF_VERSION}.tar.gz" && \
     cd "sqlite-autoconf-${SQLITE_AUTOCONF_VERSION}" && \
     ./configure --prefix=/usr --disable-static && \
@@ -36,6 +43,7 @@ RUN cd /tmp && \
 # Build upstream libuv because distro packages can lag the latest stable release
 RUN cd /tmp && \
     wget -q "https://github.com/libuv/libuv/archive/refs/tags/v${LIBUV_VERSION}.tar.gz" -O libuv.tar.gz && \
+    echo "${LIBUV_TGZ_SHA256}  libuv.tar.gz" | sha256sum -c - && \
     tar -xzf libuv.tar.gz && \
     cd "libuv-${LIBUV_VERSION}" && \
     cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DCMAKE_INSTALL_PREFIX=/usr && \
@@ -44,18 +52,18 @@ RUN cd /tmp && \
     pkg-config --modversion libuv
 
 # Build upstream llhttp so container builds use the latest parser without relying on distro lag
-RUN mkdir -p /tmp/llhttp/include /tmp/llhttp/src /usr/include && \
-    wget -q "https://raw.githubusercontent.com/nodejs/llhttp/release/v${LLHTTP_VERSION}/include/llhttp.h" -O /tmp/llhttp/include/llhttp.h && \
-    wget -q "https://raw.githubusercontent.com/nodejs/llhttp/release/v${LLHTTP_VERSION}/src/llhttp.c" -O /tmp/llhttp/src/llhttp.c && \
-    wget -q "https://raw.githubusercontent.com/nodejs/llhttp/release/v${LLHTTP_VERSION}/src/api.c" -O /tmp/llhttp/src/api.c && \
-    wget -q "https://raw.githubusercontent.com/nodejs/llhttp/release/v${LLHTTP_VERSION}/src/http.c" -O /tmp/llhttp/src/http.c && \
-    cc -fPIC -I/tmp/llhttp/include -c /tmp/llhttp/src/llhttp.c -o /tmp/llhttp/llhttp.o && \
-    cc -fPIC -I/tmp/llhttp/include -c /tmp/llhttp/src/api.c -o /tmp/llhttp/api.o && \
-    cc -fPIC -I/tmp/llhttp/include -c /tmp/llhttp/src/http.c -o /tmp/llhttp/http.o && \
-    cc -shared -Wl,-soname,libllhttp.so.9 -o /usr/lib/libllhttp.so.${LLHTTP_VERSION} /tmp/llhttp/llhttp.o /tmp/llhttp/api.o /tmp/llhttp/http.o && \
+RUN cd /tmp && \
+    wget -q "https://github.com/nodejs/llhttp/archive/refs/tags/release/v${LLHTTP_VERSION}.tar.gz" -O llhttp.tar.gz && \
+    echo "${LLHTTP_TGZ_SHA256}  llhttp.tar.gz" | sha256sum -c - && \
+    tar -xzf llhttp.tar.gz && \
+    cd "llhttp-release-v${LLHTTP_VERSION}" && \
+    cc -O2 -fPIC -Iinclude -c src/llhttp.c -o /tmp/llhttp.o && \
+    cc -O2 -fPIC -Iinclude -c src/api.c -o /tmp/api.o && \
+    cc -O2 -fPIC -Iinclude -c src/http.c -o /tmp/http.o && \
+    cc -shared -Wl,-soname,libllhttp.so.9 -o /usr/lib/libllhttp.so.${LLHTTP_VERSION} /tmp/llhttp.o /tmp/api.o /tmp/http.o && \
     ln -sf /usr/lib/libllhttp.so.${LLHTTP_VERSION} /usr/lib/libllhttp.so.9 && \
     ln -sf /usr/lib/libllhttp.so.${LLHTTP_VERSION} /usr/lib/libllhttp.so && \
-    install -m 644 /tmp/llhttp/include/llhttp.h /usr/include/llhttp.h && \
+    install -m 644 include/llhttp.h /usr/include/llhttp.h && \
     printf 'prefix=/usr\nexec_prefix=${prefix}\nlibdir=${prefix}/lib\nincludedir=${prefix}/include\n\nName: libllhttp\nDescription: llhttp parser\nVersion: %s\nLibs: -L${libdir} -lllhttp\nCflags: -I${includedir}\n' "$LLHTTP_VERSION" > /usr/lib/pkgconfig/libllhttp.pc && \
     pkg-config --modversion libllhttp
 
@@ -65,7 +73,8 @@ COPY . .
 
 # Clean any existing build files and build the application
 RUN mkdir -p /etc/lightnvr /var/lib/lightnvr/data /var/log/lightnvr /var/run/lightnvr && \
-    chmod -R 777 /var/lib/lightnvr /var/log/lightnvr /var/run/lightnvr && \
+    chmod 755 /etc/lightnvr && \
+    chmod -R 750 /var/lib/lightnvr /var/log/lightnvr /var/run/lightnvr && \
     # Clean any existing build files
     rm -rf build/ && \
     # Build the application
@@ -90,7 +99,8 @@ RUN apk update && apk add --no-cache \
 
 # Create necessary directories in runtime
 RUN mkdir -p /etc/lightnvr /var/lib/lightnvr/data /var/log/lightnvr /var/run/lightnvr && \
-    chmod -R 777 /var/lib/lightnvr /var/log/lightnvr /var/run/lightnvr
+    chmod 755 /etc/lightnvr && \
+    chmod -R 750 /var/lib/lightnvr /var/log/lightnvr /var/run/lightnvr
 
 # Copy compiled binary and config files from builder stage
 RUN apk add --no-cache brotli-libs=1.2.1-r0
@@ -123,15 +133,18 @@ RUN addgroup -g 10001 -S lightnvr && adduser -u 10001 -S -D -H -G lightnvr light
       /var/lib/lightnvr/data/models /var/log/lightnvr /var/run/lightnvr && \
     chmod -R go-w /var/lib/lightnvr /var/log/lightnvr /var/run/lightnvr && \
     chown -R 10001:10001 /etc/lightnvr /var/lib/lightnvr/data \
-      /var/log/lightnvr /var/run/lightnvr
+      /var/log/lightnvr /var/run/lightnvr && \
+    chmod 755 /var/lib/lightnvr
 
 USER 10001:10001
 
 # Volume for configuration and data persistence
 # /etc/lightnvr - Configuration files
 # /var/lib/lightnvr/data - Persistent data (database, recordings, models, etc.)
+# Declare only the parent: implicit child volumes hide legacy data binds (#946).
+# Explicit child mounts in Compose remain supported.
 VOLUME /etc/lightnvr
-VOLUME /var/lib/lightnvr/data/database /var/lib/lightnvr/data/recordings /var/lib/lightnvr/data/models
+VOLUME /var/lib/lightnvr/data
 
 # Command to start the service
 CMD ["/bin/lightnvr", "-c", "/etc/lightnvr/lightnvr.ini"]

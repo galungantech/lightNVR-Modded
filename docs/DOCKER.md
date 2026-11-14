@@ -35,8 +35,9 @@ take effect only when the container starts as root. In recordings, only director
 changed: segments written by root stay root-owned but remain readable and can be
 deleted by retention. This run needs the default `CHOWN`, `DAC_OVERRIDE`, `FOWNER`,
 `SETUID` and `SETGID` capabilities, so do not combine it with `cap_drop: ALL`. NFS exports
-with `root_squash` must be fixed on the server. Remove `user: "0:0"` afterwards
-to return to a start without root.
+with `root_squash` must be fixed on the server. Afterwards, stop starting as root:
+if you use the default runtime IDs, remove `user: "0:0"`; if you set custom
+`PUID`/`PGID`, replace it with `user: "<PUID>:<PGID>"` (for example `user: "99:100"`).
 
 Change an existing `pid_file = /var/run/lightnvr.pid` to
 `pid_file = /var/run/lightnvr/lightnvr.pid` in `lightnvr.ini`.
@@ -49,8 +50,55 @@ names and supported codec/input presets; raw command fragments, local file/devic
 inputs, and arbitrary filter/query parameters are rejected. The supported synthetic
 `virtual?video=...` test patterns accept only validated pattern parameters.
 
+### Upgrade shows the setup wizard or no recordings
 
-*Verified against LightNVR 0.37.x.*
+Images including 0.45.1 declared separate Docker `VOLUME` paths for
+`/var/lib/lightnvr/data/database`, `recordings`, and `models`. If your existing
+Compose file binds only the parent `/var/lib/lightnvr/data`, Docker creates
+anonymous volumes at those child paths. They hide the original database and
+recordings, so LightNVR sees an empty installation even after ownership is fixed.
+The host files are not deleted by this mount behavior. See [discussion #946](https://github.com/opensensor/lightNVR/discussions/946).
+
+Inspect the affected container (replace `lightnvr` with its name):
+
+```bash
+docker inspect lightnvr --format '{{range .Mounts}}{{println .Type .Source "->" .Destination}}{{end}}'
+```
+
+A parent `bind` plus child `volume` entries at those three paths confirms the
+mount conflict. Stop the container and back up the original configuration and
+database directory, including any SQLite `-wal` and `-shm` files, before recovery.
+Preserve any new data written into the anonymous volumes as well; do not run
+`docker compose down -v` or prune volumes during recovery.
+
+For an affected image, explicitly bind the existing child directories. For
+example, if `/mnt/user/nvr-recording` is your existing data root and contains
+`database/lightnvr.db`, `recordings/`, and `models/`, use:
+
+```yaml
+volumes:
+  - /mnt/user/appdata/lightnvr/config:/etc/lightnvr
+  - /mnt/user/nvr-recording:/var/lib/lightnvr/data
+  - /mnt/user/nvr-recording/database:/var/lib/lightnvr/data/database
+  - /mnt/user/nvr-recording/recordings:/var/lib/lightnvr/data/recordings
+  - /mnt/user/nvr-recording/models:/var/lib/lightnvr/data/models
+```
+
+Verify these host paths contain the original data before starting; binding a
+missing path creates an empty directory. Keep the existing `[database] path`,
+`[storage] path`, and `mp4_path` in `lightnvr.ini`, and check for a `DB_PATH`
+environment override. Recreate the container to apply the mounts:
+
+```bash
+docker compose up -d --force-recreate lightnvr
+```
+
+A restart alone does not change mounts. Current source declares only the parent
+data volume again, allowing both legacy parent binds and explicit child mounts.
+Containers that already have anonymous child mounts must still be recreated
+with the corrected mounts; updating the image alone may retain those volumes.
+
+*Verified against LightNVR 0.45.1 (including 0.44+ runtime and volume behavior changes).*
 
 This guide provides comprehensive information about deploying LightNVR using Docker.
 
@@ -92,7 +140,7 @@ services:
     volumes:
       - lightnvr-config:/etc/lightnvr
       - lightnvr-database:/var/lib/lightnvr/data/database
-      - lightnvr-recordings:/var/lib/lightnvr/data/recordings
+      - ./data/recordings:/var/lib/lightnvr/data/recordings
       - lightnvr-models:/var/lib/lightnvr/data/models
     security_opt:
       - no-new-privileges:true
@@ -104,13 +152,16 @@ services:
 volumes:
   lightnvr-config:
   lightnvr-database:
-  lightnvr-recordings:
   lightnvr-models:
 ```
 
 Then start it:
 
 ```bash
+# The recordings bind mount must be writable by the container's runtime user.
+mkdir -p ./data/recordings
+sudo chown -R 10001:10001 ./data/recordings
+
 # Pull the image and start the container
 docker compose up -d
 
@@ -213,7 +264,7 @@ NFS volumes may have different permission models than local filesystems. If you 
      config:
        driver_opts:
          type: "nfs"
-         o: "nfsvers=4,addr=192.168.1.100,rw,nolock"  # Add nolock if needed
+         o: "nfsvers=4,addr=192.168.1.100,rw"
          device: ":/volume1/docker/lightnvr/config"
    ```
 
@@ -236,34 +287,53 @@ If recordings are not being created:
 1. **Check write permissions**: The container logs will show write permission test results on startup
 2. **Verify NFS mount**: Ensure the NFS volume is actually mounted inside the container:
    ```bash
-   docker exec lightnvr-latest ls -la /var/lib/lightnvr/data/recordings/mp4
+   docker exec lightnvr ls -la /var/lib/lightnvr/data/recordings/mp4
    ```
 3. **Check available space**: Ensure your NAS has sufficient free space
 4. **Review logs**: Check for "Failed to open input" or "Operation not permitted" errors:
    ```bash
-   docker logs lightnvr-latest | grep -i error
+   docker logs lightnvr | grep -i error
    ```
 
 #### Example NFS Configuration
 
-Here's a complete example for Synology NAS with Traefik:
+For a Synology NAS, this Compose example keeps configuration and recordings on NFS,
+and the database and models in local Docker volumes. Create the two NFS directories
+on the NAS and grant UID:GID `10001:10001` write access before starting the container.
 
 ```yaml
+services:
+  lightnvr:
+    image: ghcr.io/opensensor/lightnvr:latest
+    ports:
+      - "8080:8080"
+      - "8554:8554"
+      - "8555:8555"
+      - "8555:8555/udp"
+    volumes:
+      - config:/etc/lightnvr
+      - database:/var/lib/lightnvr/data/database
+      - recordings:/var/lib/lightnvr/data/recordings
+      - models:/var/lib/lightnvr/data/models
+
 volumes:
   config:
     driver_opts:
       type: "nfs"
-      o: "nfsvers=4,addr=${IpAddressNFS},rw,nolock"
+      o: "nfsvers=4,addr=${IpAddressNFS},rw"
       device: ":/${NFSVolumePath}/${SystemId}/lightnvr-config"
 
-  data:
+  recordings:
     driver_opts:
       type: "nfs"
-      o: "nfsvers=4,addr=${IpAddressNFS},rw,nolock"
-      device: ":/${NFSVolumePath}/${SystemId}/lightnvr-data"
+      o: "nfsvers=4,addr=${IpAddressNFS},rw"
+      device: ":/${NFSVolumePath}/${SystemId}/lightnvr-recordings"
+
+  database:
+  models:
 ```
 
-**Note**: The `nolock` option can help with some NFS permission issues but may reduce file locking safety. Use with caution in production environments.
+**Note**: `nolock` is not a fix for filesystem ownership or permission errors, and it does not disable NFSv4 locking. If you see permission issues, verify UID:GID mapping (`10001:10001`), NFS export permissions, and server-side ACLs on the NAS.
 
 ### Web Assets
 
@@ -443,10 +513,15 @@ the default password to be replaced immediately after login and blocks the rest 
 and password-authenticated APIs until that succeeds. You then sign in again with the new
 password; MFA, when enabled, follows on that sign-in.
 
-To avoid the default ever being valid, set `password` in the `[web]` section of
-`config/lightnvr.ini` *before* the first start — the admin account is then created with
-that password instead. The setting is only read when the account is created; afterwards
-users are managed from the **Users** page.
+To avoid the default ever being valid, set `password` in the `[web]` section *before*
+the first start. In the default Compose setup (named volumes), set it in
+`/etc/lightnvr/lightnvr.ini` inside the mounted config volume, and make sure that file is
+populated before the container is started for the first time (for example, by starting a
+temporary container with the config volume mounted and writing `lightnvr.ini` there). If
+you want to manage config from the host, first switch Compose to a `./config` bind mount,
+then edit `./config/lightnvr.ini`. The admin account is created with that password
+instead. The setting is only read when the account is created; afterwards users are
+managed from the **Users** page.
 
 Existing accounts are not flagged during an upgrade. API-key authentication and demo
 mode remain available while a freshly bootstrapped administrator is awaiting a password
@@ -465,12 +540,12 @@ webrtc:
     - urls: [stun:stun.l.google.com:19302]
   candidates:
     - "*:8555"
-    - stun:stun.l.google.com:19302
+    - stun:8555
 ```
 
 ### Customizing WebRTC
 
-Edit `./config/go2rtc/go2rtc.yaml`:
+Edit `/etc/lightnvr/go2rtc/go2rtc.yaml` in the container's named config volume (for example via `docker compose exec`):
 
 ```yaml
 webrtc:
@@ -484,6 +559,8 @@ webrtc:
     - "YOUR_PUBLIC_IP:8555"
 ```
 
+If you intentionally switched Compose to use a prepared host `./config` bind mount, edit `./config/go2rtc/go2rtc.yaml` instead.
+
 Restart the container to apply changes:
 ```bash
 docker compose restart
@@ -493,8 +570,9 @@ docker compose restart
 
 If running behind NAT/firewall, forward these ports:
 
-- **8555/TCP** - WebRTC signaling
-- **8555/UDP** - WebRTC media
+- **8555/TCP** - WebRTC media (ICE-TCP fallback)
+- **8555/UDP** - WebRTC media (preferred ICE transport)
+- **Dashboard HTTP(S) port** (for example `8080`, or your reverse-proxy HTTPS port) - WebRTC signaling via LightNVR's authenticated proxy
 
 ## Troubleshooting
 
@@ -504,20 +582,16 @@ If running behind NAT/firewall, forward these ports:
 
 **Causes:**
 1. Mounted `/var/lib/lightnvr` directly (overwrote web assets)
-2. Web assets not copied during initialization
 
 **Solution:**
 ```bash
-# Stop container
+# Stop and remove container so mount changes apply cleanly
 docker compose down
 
-# Remove incorrect volume mount
-# Edit docker-compose.yml to use /var/lib/lightnvr/data instead
+# Fix incorrect volume mount
+# Edit docker-compose.yml to use /var/lib/lightnvr/data instead of /var/lib/lightnvr
 
-# Remove web directory to force re-initialization
-rm -rf ./data/web
-
-# Start container
+# Recreate container with corrected mounts
 docker compose up -d
 ```
 
@@ -529,12 +603,17 @@ docker compose up -d
 
 **Solution:**
 ```bash
-# Verify volume mounts
-docker inspect lightnvr | grep -A 10 Mounts
+# Verify volume mounts (shows each source -> destination mount)
+docker inspect -f '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}' lightnvr
 
-# Should show:
-# /etc/lightnvr
-# /var/lib/lightnvr/data
+# A healthy deployment can use either layout:
+# 1) Recommended split mounts:
+#    /etc/lightnvr
+#    /var/lib/lightnvr/data/database
+#    /var/lib/lightnvr/data/recordings
+#    /var/lib/lightnvr/data/models
+# 2) Legacy parent data mount:
+#    /etc/lightnvr and /var/lib/lightnvr/data
 ```
 
 ### WebRTC Not Working
@@ -549,12 +628,14 @@ docker inspect lightnvr | grep -A 10 Mounts
 
 **Solution:**
 
-The most common fix is setting your host machine's local IP as `external_ip` in `./config/lightnvr.ini`:
+The most common fix is setting your host machine's local IP as `external_ip` in `/etc/lightnvr/lightnvr.ini` (default Compose/named-volume setup):
 
 ```ini
 [go2rtc]
 external_ip = 192.168.1.100  ; Replace with your machine's local IP
 ```
+
+If your deployment explicitly bind-mounts `./config` to `/etc/lightnvr`, edit `./config/lightnvr.ini` on the host instead.
 
 To find your local IP:
 ```bash
@@ -598,17 +679,33 @@ environment:
 
 ### Custom Configuration Path
 
-Mount a custom config file:
+Mount an existing custom config file. Before first start, prepare both bind-mounted paths for UID:GID `10001:10001`. The source file must contain a valid LightNVR configuration; an empty file prevents the entrypoint from creating its default configuration.
+
+```bash
+mkdir -p ./data
+sudo chown -R 10001:10001 ./data
+
+# Copy your existing config to the bind-mount source. -D creates its parent directory.
+sudo install -D -o 10001 -g 10001 -m 640 /path/to/existing/lightnvr.ini /path/to/custom/lightnvr.ini
+```
 
 ```bash
 docker run -d \
   --name lightnvr \
+  -p 8080:8080 \
   -v /path/to/custom/lightnvr.ini:/etc/lightnvr/lightnvr.ini \
   -v ./data:/var/lib/lightnvr/data \
   ghcr.io/opensensor/lightnvr:latest
 ```
 
 ### Running Multiple Instances
+
+Before starting, create the bind-mount directories and set ownership for the non-root runtime user:
+
+```bash
+mkdir -p ./config-1 ./data-1 ./config-2 ./data-2
+sudo chown -R 10001:10001 ./config-1 ./data-1 ./config-2 ./data-2
+```
 
 ```yaml
 services:
@@ -661,7 +758,9 @@ services:
 ## Migration from Previous Versions
 
 If you're upgrading from an older version that mounted `/var/lib/lightnvr` directly, change
-the mount to `/var/lib/lightnvr/data` and move your existing content down one level:
+the mount to `/var/lib/lightnvr/data` and move your existing content down one level.
+Back up the old volume first. The destination directories must not already exist;
+otherwise `mv` can place the old directories inside them.
 
 ```bash
 docker compose down
@@ -669,7 +768,17 @@ docker compose down
 # Your old volume held database/, recordings/ and models/ at its root, alongside
 # the web assets. Only the first three should persist.
 mkdir -p ./data
-mv ./old-volume/database ./old-volume/recordings ./old-volume/models ./data/ 2>/dev/null
+# Check all sources and destinations before moving any data.
+for dir in database recordings models; do
+  if [ ! -d "./old-volume/$dir" ] || [ -e "./data/$dir" ]; then
+    echo "Check ./old-volume/$dir and ./data/$dir before migrating" >&2
+    exit 1
+  fi
+done
+sudo mv ./old-volume/database ./old-volume/recordings ./old-volume/models ./data/ || exit 1
+
+# Ensure migrated content is writable by the non-root runtime user (UID:GID 10001:10001)
+sudo chown -R 10001:10001 ./data
 
 # Then point the volume at the data subdirectory:
 #   - ./data:/var/lib/lightnvr/data
@@ -691,6 +800,10 @@ git submodule update --init --recursive
 
 # Build image
 docker build --pull -t lightnvr:local .
+
+# Prepare bind-mount directories for non-root runtime (UID:GID 10001:10001)
+mkdir -p ./config ./data
+sudo chown -R 10001:10001 ./config ./data
 
 # Run locally built image
 docker run -d \

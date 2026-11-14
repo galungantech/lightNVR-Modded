@@ -101,6 +101,9 @@ test('A7: list, get and snapshot are isolated per camera for policies and scoped
   const imageOnly = await viewerOf(server, 'image_only', A, ['snapshot.create']);
   expect(ids(await page(server, '', imageOnly))).toEqual([]);
   expect((await error(server, `/api/observations/${onA.observation}`, imageOnly)).status).toBe(404);
+  const imageOnlySnapshot = await snapshot(server, onA.observation, imageOnly);
+  expect(imageOnlySnapshot.status).toBe(200);
+  expect(imageOnlySnapshot.bytes.equals(onA.bytes!)).toBe(true);
 });
 
 test('A7: rename, delete and name reuse never transfer observation access', async ({server}) => {
@@ -207,6 +210,7 @@ test('A8: pending, expired, unavailable, unknown and expired-cursor outcomes are
   // Resuming from oldest_cursor works and never re-serves the pruned gap.
   const resumed = await page(server, `?cursor=${c.body.oldest_cursor}`);
   expect(resumed.items.length).toBeGreaterThan(0);
+  expect(ids(resumed)).toEqual([expired.observation, unavailable.observation, ready.observation]);
 
   const invalid = await error(server, '/api/observations?cursor=not-a-cursor');
   expect(invalid.status).toBe(400);
@@ -240,7 +244,11 @@ test('A5: cursor pages are stable, deduplicated and recover pending -> ready aft
     seen.push(...ids(last));
     cursor = last.next_cursor;
     pages++;
-  } while (last.has_more && pages < 10);
+    if (pages >= 10 && last.has_more) {
+      throw new Error('Pagination did not terminate within 10 pages');
+    }
+  } while (last.has_more);
+  expect(last.has_more).toBe(false);
   expect(seen).toEqual(order);
   expect(last.items.every((item: Json) => item.evidence.state === 'pending')).toBe(true);
   const tail = cursor;
@@ -270,16 +278,35 @@ test('A5: cursor pages are stable, deduplicated and recover pending -> ready aft
   expect(ready.status).toBe(200);
   expect(ready.bytes.equals(bytes)).toBe(true);
 
-  // limit counts observations after dedup: limit 1 returns one observation even though
-  // the page would otherwise have to include its later changes.
-  const one = await page(server, `?cursor=${tail}&limit=1`);
-  expect(ids(one)).toEqual([seeded[1].observation]);
-  expect(one.has_more).toBe(true);
-  const rest = await page(server, `?cursor=${one.next_cursor}&limit=10`);
-  expect(ids(rest)).toEqual([seeded[3], seeded[4]].map(s => s.observation));
+  // limit counts observations after dedup: walk with limit 1 across page boundaries
+  // and ensure each recovered observation appears exactly once.
+  const expectedRecoveredIds = [seeded[1], seeded[3], seeded[4]].map(s => s.observation);
+  const seenRecoveredIds: string[] = [];
+  let recoveryCursor = tail;
+  for (let i = 0; i < expectedRecoveredIds.length; i++) {
+    const p = await page(server, `?cursor=${recoveryCursor}&limit=1`);
+    expect(ids(p).length).toBe(1);
+    seenRecoveredIds.push(ids(p)[0]);
+    recoveryCursor = p.next_cursor;
+    expect(p.has_more).toBe(i < expectedRecoveredIds.length - 1);
+  }
+  expect(seenRecoveredIds).toEqual(expectedRecoveredIds);
+  expect(decodeCursor(recoveryCursor).seq).toBe(meta(server).head);
 
   // Re-reading from the beginning still yields every observation once (current state).
   const replay = await page(server, '?limit=500');
   expect(ids(replay)).toEqual(order);
   expect(replay.items.find((item: Json) => item.id === seeded[1].observation).evidence.state).toBe('ready');
+});
+
+test('A5: filtered cursor advances past a trailing excluded camera change', async ({server}) => {
+  const A = server.cameras.A.camera_uuid, B = server.cameras.B.camera_uuid;
+  const included = seedObservation(server, {camera: A, state: 'pending'});
+  seedObservation(server, {camera: B, state: 'pending'});
+
+  const filtered = await page(server, `?camera_uuid=${A}&limit=10`);
+  expect(ids(filtered)).toEqual([included.observation]);
+  expect(decodeCursor(filtered.next_cursor).seq).toBe(meta(server).head);
+  expect(filtered.has_more).toBe(false);
+  expect(await page(server, `?camera_uuid=${A}&cursor=${filtered.next_cursor}`)).toEqual({items: [], next_cursor: filtered.next_cursor, has_more: false});
 });
