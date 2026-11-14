@@ -438,6 +438,19 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
     <div
       ref={panelRef}
       className="ptz-controls"
+    
+      // Hentikan event pointer agar tidak diterima gesture kamera
+      onPointerDown={(e) => e.stopPropagation()}
+      onPointerMove={(e) => e.stopPropagation()}
+      onPointerUp={(e) => e.stopPropagation()}
+      onPointerCancel={(e) => e.stopPropagation()}
+    
+      // Hentikan click agar tidak memicu fullscreen kamera
+      onClick={(e) => e.stopPropagation()}
+      onDblClick={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.stopPropagation()}
+    
+      // Pertahankan isolasi event mouse dan touch
       onWheel={(e) => handleWheel(e as unknown as WheelEvent)}
       onMouseDown={(e) => e.stopPropagation()}
       onTouchStart={(e) => e.stopPropagation()}
