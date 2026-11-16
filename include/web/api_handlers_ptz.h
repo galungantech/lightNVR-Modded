@@ -56,6 +56,19 @@ void handle_ptz_set_home(const http_request_t *req, http_response_t *res);
 void handle_ptz_get_presets(const http_request_t *req, http_response_t *res);
 
 /**
+ * @brief Handle GET request for default startup PTZ preset
+ * GET /api/streams/{name}/ptz/default-preset
+ */
+void handle_ptz_get_default_preset(const http_request_t *req, http_response_t *res);
+
+/**
+ * @brief Handle POST request to set or clear default startup PTZ preset
+ * POST /api/streams/{name}/ptz/default-preset
+ * Body: { "token": "preset_token" }
+ */
+void handle_ptz_set_default_preset(const http_request_t *req, http_response_t *res);
+
+/**
  * @brief Handle POST request for PTZ go to preset
  * POST /api/streams/{name}/ptz/preset
  * Body: { "token": "preset_token" }
