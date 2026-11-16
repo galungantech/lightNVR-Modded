@@ -9,13 +9,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <math.h>
+#include <pthread.h>
+#include <unistd.h>
 #include <curl/curl.h>
 #include "ezxml.h"
 
 #include "video/onvif_ptz.h"
 #include "video/onvif_soap.h"
 #include "core/logger.h"
+#include "core/config.h"
 #include "core/url_utils.h"
+#include "core/shutdown_coordinator.h"
+#include "database/db_streams.h"
 #include "utils/strings.h"
 
 // Structure to store memory for CURL responses
@@ -53,17 +59,17 @@ static char* send_ptz_soap_request(const char *ptz_url, const char *soap_action,
     char *soap_envelope = NULL;
     char *response = NULL;
     char *security_header = NULL;
-    
+
     chunk.memory = malloc(1);
     chunk.size = 0;
-    
+
     curl = curl_easy_init();
     if (!curl) {
         log_error("Failed to initialize CURL for PTZ request");
         free(chunk.memory);
         return NULL;
     }
-    
+
     if (username && password && strlen(username) > 0 && strlen(password) > 0) {
         security_header = onvif_create_security_header(username, password);
     } else {
@@ -98,14 +104,14 @@ static char* send_ptz_soap_request(const char *ptz_url, const char *soap_action,
         "<s:Body>%s</s:Body>"
         "</s:Envelope>",
         security_header, request_body);
-    
+
     headers = curl_slist_append(headers, "Content-Type: application/soap+xml; charset=utf-8");
     if (soap_action) {
         char soap_action_header[256];
         sprintf(soap_action_header, "SOAPAction: %s", soap_action);
         headers = curl_slist_append(headers, soap_action_header);
     }
-    
+
     curl_easy_setopt(curl, CURLOPT_URL, ptz_url);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, soap_envelope);
@@ -114,7 +120,7 @@ static char* send_ptz_soap_request(const char *ptz_url, const char *soap_action,
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    
+
     res = curl_easy_perform(curl);
     if (res != CURLE_OK) {
         log_error("PTZ CURL request failed: %s", curl_easy_strerror(res));
@@ -348,7 +354,7 @@ static void apply_supported_spaces(ezxml_t spaces, onvif_ptz_capabilities_t *cap
     }
 
     ezxml_t abs_pan_tilt = find_space(spaces, "AbsolutePanTiltPositionSpace",
-                                      "PositionGenericSpace");
+                                     "PositionGenericSpace");
     if (abs_pan_tilt) {
         capabilities->has_pan_tilt = true;
         capabilities->has_absolute_move = true;
@@ -357,7 +363,7 @@ static void apply_supported_spaces(ezxml_t spaces, onvif_ptz_capabilities_t *cap
     }
 
     ezxml_t abs_zoom = find_space(spaces, "AbsoluteZoomPositionSpace",
-                                  "PositionGenericSpace");
+                                "PositionGenericSpace");
     if (abs_zoom) {
         capabilities->has_zoom = true;
         capabilities->has_absolute_move = true;
@@ -444,7 +450,7 @@ static char *parse_service_url(const char *response, const char *namespace_fragm
 }
 
 int onvif_ptz_get_service_url(const char *device_url, const char *username,
-                              const char *password, char *ptz_url, size_t url_size) {
+                            const char *password, char *ptz_url, size_t url_size) {
     if (!device_url || !ptz_url || url_size == 0) {
         return -1;
     }
@@ -480,9 +486,88 @@ int onvif_ptz_get_service_url(const char *device_url, const char *username,
                                        ptz_url, url_size);
 }
 
+int onvif_ptz_get_status(const char *ptz_url, const char *profile_token,
+                       const char *username, const char *password,
+                       onvif_ptz_status_t *status) {
+    if (!ptz_url || !profile_token || !status) {
+        return -1;
+    }
+
+    memset(status, 0, sizeof(*status));
+
+    char escaped_profile[384];
+    if (xml_escape(profile_token, escaped_profile, sizeof(escaped_profile)) != 0) {
+        return -1;
+    }
+
+    char request_body[512];
+    snprintf(request_body, sizeof(request_body),
+        "<tptz:GetStatus>"
+            "<tptz:ProfileToken>%s</tptz:ProfileToken>"
+        "</tptz:GetStatus>",
+        escaped_profile);
+
+    char *response = send_ptz_soap_request(ptz_url,
+        "http://www.onvif.org/ver20/ptz/wsdl/GetStatus",
+        request_body, username, password);
+
+    if (!response) {
+        return -1;
+    }
+
+    if (strstr(response, "Fault") != NULL) {
+        free(response);
+        return -1;
+    }
+
+    int result = -1;
+    ezxml_t xml = ezxml_parse_str(response, strlen(response));
+    if (xml) {
+        ezxml_t status_node = find_descendant_local(xml, "PTZStatus");
+        if (status_node) {
+            status->valid = true;
+            result = 0;
+
+            ezxml_t position = find_child_local(status_node, "Position");
+            if (position) {
+                ezxml_t pan_tilt = find_child_local(position, "PanTilt");
+                ezxml_t zoom = find_child_local(position, "Zoom");
+                if (pan_tilt) {
+                    bool px = parse_float_text(ezxml_attr(pan_tilt, "x"), &status->pan);
+                    bool py = parse_float_text(ezxml_attr(pan_tilt, "y"), &status->tilt);
+                    if (px || py) {
+                        status->has_position = true;
+                    }
+                }
+                if (zoom) {
+                    if (parse_float_text(ezxml_attr(zoom, "x"), &status->zoom)) {
+                        status->has_position = true;
+                    }
+                }
+            }
+
+            ezxml_t move_status = find_child_local(status_node, "MoveStatus");
+            if (move_status) {
+                ezxml_t pt_move = find_child_local(move_status, "PanTilt");
+                ezxml_t z_move = find_child_local(move_status, "Zoom");
+                const char *pt_txt = pt_move ? ezxml_txt(pt_move) : "";
+                const char *z_txt = z_move ? ezxml_txt(z_move) : "";
+                if ((pt_txt && strcasecmp(pt_txt, "MOVING") == 0) ||
+                    (z_txt && strcasecmp(z_txt, "MOVING") == 0)) {
+                    status->is_moving = true;
+                }
+            }
+        }
+        ezxml_free(xml);
+    }
+
+    free(response);
+    return result;
+}
+
 int onvif_ptz_continuous_move(const char *ptz_url, const char *profile_token,
-                              const char *username, const char *password,
-                              float pan_velocity, float tilt_velocity, float zoom_velocity) {
+                            const char *username, const char *password,
+                            float pan_velocity, float tilt_velocity, float zoom_velocity) {
     if (!ptz_url || !profile_token) {
         log_error("PTZ URL and profile token are required");
         return -1;
@@ -595,9 +680,9 @@ int onvif_ptz_absolute_move(const char *ptz_url, const char *profile_token,
 }
 
 int onvif_ptz_absolute_move_axes(const char *ptz_url, const char *profile_token,
-                                 const char *username, const char *password,
-                                 bool has_pan_tilt, float pan, float tilt,
-                                 bool has_zoom, float zoom) {
+                               const char *username, const char *password,
+                               bool has_pan_tilt, float pan, float tilt,
+                               bool has_zoom, float zoom) {
     if (!ptz_url || !profile_token) {
         log_error("PTZ URL and profile token are required");
         return -1;
@@ -666,9 +751,9 @@ int onvif_ptz_relative_move(const char *ptz_url, const char *profile_token,
 }
 
 int onvif_ptz_relative_move_axes(const char *ptz_url, const char *profile_token,
-                                 const char *username, const char *password,
-                                 bool has_pan_tilt, float pan_delta, float tilt_delta,
-                                 bool has_zoom, float zoom_delta) {
+                               const char *username, const char *password,
+                               bool has_pan_tilt, float pan_delta, float tilt_delta,
+                               bool has_zoom, float zoom_delta) {
     if (!ptz_url || !profile_token) {
         log_error("PTZ URL and profile token are required");
         return -1;
@@ -960,9 +1045,9 @@ int onvif_ptz_set_preset(const char *ptz_url, const char *profile_token,
 }
 
 static bool parse_configurations_response(const char *response,
-                                          onvif_ptz_capabilities_t *capabilities,
-                                          char *config_token,
-                                          size_t config_token_size) {
+                                     onvif_ptz_capabilities_t *capabilities,
+                                     char *config_token,
+                                     size_t config_token_size) {
     if (!response || !capabilities) {
         return false;
     }
@@ -1029,7 +1114,7 @@ static bool parse_configurations_response(const char *response,
 }
 
 static bool parse_configuration_options_response(const char *response,
-                                                 onvif_ptz_capabilities_t *capabilities) {
+                                             onvif_ptz_capabilities_t *capabilities) {
     if (!response || !capabilities) {
         return false;
     }
@@ -1061,7 +1146,7 @@ static bool parse_configuration_options_response(const char *response,
 }
 
 static bool parse_nodes_response(const char *response,
-                                 onvif_ptz_capabilities_t *capabilities) {
+                               onvif_ptz_capabilities_t *capabilities) {
     if (!response || !capabilities) {
         return false;
     }
@@ -1135,7 +1220,7 @@ int onvif_ptz_get_capabilities(const char *ptz_url, const char *profile_token,
         "<tptz:GetConfigurations/>", username, password);
     if (response) {
         parse_configurations_response(response, capabilities,
-                                      config_token, sizeof(config_token));
+                                     config_token, sizeof(config_token));
         free(response);
     }
 
@@ -1214,4 +1299,286 @@ int onvif_ptz_remove_preset(const char *ptz_url, const char *profile_token,
 
     free(response);
     return result;
+}
+
+// ============================================================================
+// State-Driven Default PTZ Preset Restoration on Boot / Reconnect
+// ============================================================================
+
+#define PTZ_DEFAULT_WORKER_MAX_SLOTS 32
+#define PTZ_POLL_INTERVAL_SEC        2    // Jeda polling jaringan
+#define PTZ_READY_MAX_POLLS          200  // Maksimal percobaan polling saat booting
+#define PTZ_SETTLE_MAX_POLLS         25   // Maksimal percobaan polling menunggu pergerakan motor
+#define PTZ_VERIFY_MAX_ATTEMPTS      3
+#define PTZ_POSITION_EPSILON         0.02f
+
+static char g_active_ptz_preset_workers[PTZ_DEFAULT_WORKER_MAX_SLOTS][MAX_STREAM_NAME] = {{0}};
+static pthread_mutex_t g_ptz_preset_worker_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static bool claim_ptz_preset_worker_slot(const char *stream_name) {
+    bool claimed = false;
+    pthread_mutex_lock(&g_ptz_preset_worker_mutex);
+    for (int i = 0; i < PTZ_DEFAULT_WORKER_MAX_SLOTS; i++) {
+        if (g_active_ptz_preset_workers[i][0] != '\0' &&
+            strcmp(g_active_ptz_preset_workers[i], stream_name) == 0) {
+            pthread_mutex_unlock(&g_ptz_preset_worker_mutex);
+            return false;
+        }
+    }
+    for (int i = 0; i < PTZ_DEFAULT_WORKER_MAX_SLOTS; i++) {
+        if (g_active_ptz_preset_workers[i][0] == '\0') {
+            safe_strcpy(g_active_ptz_preset_workers[i], stream_name, MAX_STREAM_NAME, 0);
+            claimed = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_ptz_preset_worker_mutex);
+    return claimed;
+}
+
+static void release_ptz_preset_worker_slot(const char *stream_name) {
+    pthread_mutex_lock(&g_ptz_preset_worker_mutex);
+    for (int i = 0; i < PTZ_DEFAULT_WORKER_MAX_SLOTS; i++) {
+        if (g_active_ptz_preset_workers[i][0] != '\0' &&
+            strcmp(g_active_ptz_preset_workers[i], stream_name) == 0) {
+            g_active_ptz_preset_workers[i][0] = '\0';
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_ptz_preset_worker_mutex);
+}
+
+static bool ptz_position_drifted(const onvif_ptz_status_t *a, const onvif_ptz_status_t *b) {
+    if (!a || !b || !a->has_position || !b->has_position) {
+        return false;
+    }
+    return fabsf(a->pan - b->pan) > PTZ_POSITION_EPSILON ||
+           fabsf(a->tilt - b->tilt) > PTZ_POSITION_EPSILON ||
+           fabsf(a->zoom - b->zoom) > PTZ_POSITION_EPSILON;
+}
+
+static void *ptz_default_preset_worker(void *arg) {
+    char *stream_name = (char *)arg;
+    if (!stream_name) {
+        return NULL;
+    }
+
+    log_set_thread_context("PTZDefault", stream_name);
+
+    stream_config_t config;
+    if (get_stream_config_by_name(stream_name, &config) != 0 ||
+        !config.enabled || !config.ptz_enabled || config.ptz_default_preset[0] == '\0') {
+        release_ptz_preset_worker_slot(stream_name);
+        free(stream_name);
+        return NULL;
+    }
+
+    char device_url[MAX_URL_LENGTH];
+    if (url_build_onvif_service_url(config.url, config.onvif_port,
+                                    "/onvif/device_service",
+                                    device_url, sizeof(device_url)) != 0) {
+        log_warn("Default PTZ preset: failed to build device URL for '%s'", stream_name);
+        release_ptz_preset_worker_slot(stream_name);
+        free(stream_name);
+        return NULL;
+    }
+
+    char ptz_url[512] = {0};
+    bool ptz_ready = false;
+    bool status_supported = false;
+    int idle_streak = 0;
+    int unsupported_probes = 0;
+
+    for (int poll = 0; poll < PTZ_READY_MAX_POLLS && !is_shutdown_initiated(); poll++) {
+        if (get_stream_config_by_name(stream_name, &config) != 0 ||
+            !config.enabled || !config.ptz_enabled || config.ptz_default_preset[0] == '\0') {
+            release_ptz_preset_worker_slot(stream_name);
+            free(stream_name);
+            return NULL;
+        }
+
+        const char *profile_token = (config.onvif_profile[0] != '\0') ? config.onvif_profile : "Profile_1";
+
+        if (ptz_url[0] == '\0') {
+            if (onvif_ptz_get_service_url(device_url, config.onvif_username,
+                                         config.onvif_password, ptz_url, sizeof(ptz_url)) != 0) {
+                sleep(PTZ_POLL_INTERVAL_SEC);
+                continue;
+            }
+        }
+
+        onvif_ptz_status_t st;
+        int status_rc = onvif_ptz_get_status(ptz_url, profile_token,
+                                           config.onvif_username, config.onvif_password, &st);
+
+        if (status_rc == 0 && st.valid) {
+            status_supported = true;
+            if (!st.is_moving) {
+                idle_streak++;
+                log_debug("Default PTZ preset: camera '%s' poll %d - motor IDLE streak: %d/3", 
+                          stream_name, poll, idle_streak);
+                if (idle_streak >= 3) {
+                    ptz_ready = true;
+                    log_info("Default PTZ preset: camera '%s' ONVIF ready and fully stable (pan=%.3f, tilt=%.3f)",
+                             stream_name, st.pan, st.tilt);
+                    break;
+                }
+            } else {
+                if (idle_streak > 0) {
+                    log_debug("Default PTZ preset: camera '%s' motor still calibrating (MOVING), resetting streak", stream_name);
+                }
+                idle_streak = 0;
+            }
+        } else {
+            idle_streak = 0;
+            
+            onvif_ptz_preset_t probe_preset;
+            if (onvif_ptz_get_presets(ptz_url, profile_token,
+                                      config.onvif_username, config.onvif_password,
+                                      &probe_preset, 1) >= 0) {
+                unsupported_probes++;
+                if (unsupported_probes >= 3) {
+                    log_info("Default PTZ preset: camera '%s' online (GetStatus unsupported/unstable, using fallback)",
+                             stream_name);
+                    ptz_ready = true;
+                    break;
+                }
+            } else {
+                ptz_url[0] = '\0';
+                unsupported_probes = 0;
+            }
+        }
+
+        sleep(PTZ_POLL_INTERVAL_SEC);
+    }
+
+    if (!ptz_ready || is_shutdown_initiated()) {
+        log_warn("Default PTZ preset: camera '%s' did not become ready in time after restart", stream_name);
+        release_ptz_preset_worker_slot(stream_name);
+        free(stream_name);
+        return NULL;
+    }
+
+    const char *profile_token = (config.onvif_profile[0] != '\0') ? config.onvif_profile : "Profile_1";
+    bool applied = false;
+
+    for (int attempt = 1; attempt <= PTZ_VERIFY_MAX_ATTEMPTS && !is_shutdown_initiated(); attempt++) {
+        if (get_stream_config_by_name(stream_name, &config) != 0 ||
+            !config.enabled || !config.ptz_enabled || config.ptz_default_preset[0] == '\0') {
+            break;
+        }
+        profile_token = (config.onvif_profile[0] != '\0') ? config.onvif_profile : "Profile_1";
+
+        int rc = onvif_ptz_goto_preset(ptz_url, profile_token,
+                                       config.onvif_username, config.onvif_password,
+                                       config.ptz_default_preset);
+        if (rc != 0) {
+            log_warn("Default PTZ preset: GotoPreset '%s' attempt %d/%d failed for '%s' (camera busy/restarting)",
+                     config.ptz_default_preset, attempt, PTZ_VERIFY_MAX_ATTEMPTS, stream_name);
+            sleep(5 * attempt);
+            continue;
+        }
+
+        if (!status_supported) {
+            sleep(15);
+            if (!is_shutdown_initiated() &&
+                get_stream_config_by_name(stream_name, &config) == 0 &&
+                config.enabled && config.ptz_enabled && config.ptz_default_preset[0] != '\0') {
+                onvif_ptz_goto_preset(ptz_url, profile_token,
+                                      config.onvif_username, config.onvif_password,
+                                      config.ptz_default_preset);
+            }
+            log_info("Applied default PTZ preset '%s' for stream '%s' (fallback mode)",
+                     config.ptz_default_preset, stream_name);
+            applied = true;
+            break;
+        }
+
+        onvif_ptz_status_t settled_status = {0};
+        bool movement_detected = false;
+        for (int m = 0; m < PTZ_SETTLE_MAX_POLLS && !is_shutdown_initiated(); m++) {
+            sleep(PTZ_POLL_INTERVAL_SEC);
+            if (onvif_ptz_get_status(ptz_url, profile_token,
+                                     config.onvif_username, config.onvif_password,
+                                     &settled_status) == 0 && settled_status.valid) {
+                if (settled_status.is_moving) {
+                    movement_detected = true;
+                } else if (movement_detected || m >= 3) {
+                    break;
+                }
+            }
+        }
+
+        sleep(5);
+        if (is_shutdown_initiated()) {
+            break;
+        }
+
+        onvif_ptz_status_t verify_status = {0};
+        if (onvif_ptz_get_status(ptz_url, profile_token,
+                                 config.onvif_username, config.onvif_password,
+                                 &verify_status) == 0 && verify_status.valid) {
+            if (!verify_status.is_moving && !ptz_position_drifted(&settled_status, &verify_status)) {
+                log_info("Applied and verified default PTZ preset '%s' for stream '%s' "
+                         "(pan=%.3f, tilt=%.3f, zoom=%.3f)",
+                         config.ptz_default_preset, stream_name,
+                         verify_status.pan, verify_status.tilt, verify_status.zoom);
+                applied = true;
+                break;
+            }
+            log_warn("Default PTZ preset: camera '%s' drifted or moved after GotoPreset "
+                     "(attempt %d/%d), re-applying",
+                     stream_name, attempt, PTZ_VERIFY_MAX_ATTEMPTS);
+        } else {
+            applied = true;
+            break;
+        }
+    }
+
+    if (!applied && !is_shutdown_initiated()) {
+        log_warn("Failed to apply default PTZ preset '%s' for stream '%s' after multiple attempts",
+                 config.ptz_default_preset, stream_name);
+    }
+
+    release_ptz_preset_worker_slot(stream_name);
+    free(stream_name);
+    return NULL;
+}
+
+void onvif_ptz_apply_default_preset_async(const char *stream_name) {
+    if (!stream_name || stream_name[0] == '\0') {
+        return;
+    }
+
+    stream_config_t config;
+    if (get_stream_config_by_name(stream_name, &config) != 0) {
+        return;
+    }
+    if (!config.enabled || !config.ptz_enabled || config.ptz_default_preset[0] == '\0') {
+        return;
+    }
+
+    if (!claim_ptz_preset_worker_slot(stream_name)) {
+        log_debug("Default PTZ preset worker already running for '%s'", stream_name);
+        return;
+    }
+
+    char *name_copy = strdup(stream_name);
+    if (!name_copy) {
+        release_ptz_preset_worker_slot(stream_name);
+        return;
+    }
+
+    pthread_t tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
+    if (pthread_create(&tid, &attr, ptz_default_preset_worker, name_copy) != 0) {
+        log_warn("Failed to spawn default PTZ preset thread for '%s'", stream_name);
+        release_ptz_preset_worker_slot(stream_name);
+        free(name_copy);
+    }
+
+    pthread_attr_destroy(&attr);
 }
