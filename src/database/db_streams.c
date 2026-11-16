@@ -197,7 +197,7 @@ uint64_t add_stream_config(const stream_config_t *stream) {
                                 "protocol = ?, is_onvif = ?, record_audio = ?, "
                                 "backchannel_enabled = ?, retention_days = ?, detection_retention_days = ?, max_storage_mb = ?, "
                                 "tier_critical_multiplier = ?, tier_important_multiplier = ?, tier_ephemeral_multiplier = ?, storage_priority = ?, "
-                                "ptz_enabled = ?, ptz_max_x = ?, ptz_max_y = ?, ptz_max_z = ?, ptz_has_home = ?, "
+                                "ptz_enabled = ?, ptz_max_x = ?, ptz_max_y = ?, ptz_max_z = ?, ptz_has_home = ?, ptz_default_preset = ?, "
                                 "onvif_username = ?, onvif_password = ?, onvif_profile = ?, onvif_port = ?, "
                                 "record_on_schedule = ?, recording_schedule = ?, tags = ?, admin_url = ?, "
                                 "privacy_mode = ?, motion_trigger_source = ?, go2rtc_source_override = ?, "
@@ -270,44 +270,45 @@ uint64_t add_stream_config(const stream_config_t *stream) {
         sqlite3_bind_int(stmt, 33, stream->ptz_max_y);
         sqlite3_bind_int(stmt, 34, stream->ptz_max_z);
         sqlite3_bind_int(stmt, 35, stream->ptz_has_home ? 1 : 0);
+        sqlite3_bind_text(stmt, 36, stream->ptz_default_preset, -1, SQLITE_STATIC);
 
         // Bind ONVIF credentials
-        sqlite3_bind_text(stmt, 36, stream->onvif_username, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 37, stream->onvif_password, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 38, stream->onvif_profile, -1, SQLITE_STATIC);
-        sqlite3_bind_int(stmt, 39, stream->onvif_port);
+        sqlite3_bind_text(stmt, 37, stream->onvif_username, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 38, stream->onvif_password, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 39, stream->onvif_profile, -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 40, stream->onvif_port);
 
         // Bind recording schedule parameters
-        sqlite3_bind_int(stmt, 40, stream->record_on_schedule ? 1 : 0);
+        sqlite3_bind_int(stmt, 41, stream->record_on_schedule ? 1 : 0);
         char schedule_buf[RECORDING_SCHEDULE_TEXT_SIZE];
         serialize_recording_schedule(stream->recording_schedule, schedule_buf, sizeof(schedule_buf));
-        sqlite3_bind_text(stmt, 41, schedule_buf, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 42, schedule_buf, -1, SQLITE_TRANSIENT);
 
         // Bind tags, admin URL, privacy_mode and motion_trigger_source parameters
-        sqlite3_bind_text(stmt, 42, stream->tags, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 43, stream->admin_url, -1, SQLITE_STATIC);
-        sqlite3_bind_int(stmt, 44, stream->privacy_mode ? 1 : 0);
-        sqlite3_bind_text(stmt, 45, stream->motion_trigger_source, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 46,
+        sqlite3_bind_text(stmt, 43, stream->tags, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 44, stream->admin_url, -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 45, stream->privacy_mode ? 1 : 0);
+        sqlite3_bind_text(stmt, 46, stream->motion_trigger_source, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 47,
                           normalized_go2rtc_source_override(stream->go2rtc_source_override),
                           -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 47, stream->sub_stream_url, -1, SQLITE_STATIC);
-        sqlite3_bind_int(stmt, 48, stream->audio_voice_enhancement ? 1 : 0);
-        sqlite3_bind_text(stmt, 49, stream->detection_url, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 50, stream->publish_url, -1, SQLITE_STATIC);
-        sqlite3_bind_int(stmt, 51, stream->detection_record_on_schedule ? 1 : 0);
+        sqlite3_bind_text(stmt, 48, stream->sub_stream_url, -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 49, stream->audio_voice_enhancement ? 1 : 0);
+        sqlite3_bind_text(stmt, 50, stream->detection_url, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 51, stream->publish_url, -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 52, stream->detection_record_on_schedule ? 1 : 0);
         char detection_schedule_buf[RECORDING_SCHEDULE_TEXT_SIZE];
         serialize_recording_schedule(stream->detection_recording_schedule,
                                      detection_schedule_buf, sizeof(detection_schedule_buf));
-        sqlite3_bind_text(stmt, 52, detection_schedule_buf, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 53,
+        sqlite3_bind_text(stmt, 53, detection_schedule_buf, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 54,
                           normalized_playback_transport(stream->playback_transport),
                           -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 54, stream->eptz_config, -1, SQLITE_STATIC);
-        bind_observation_settings(stmt, 55, stream);
+        sqlite3_bind_text(stmt, 55, stream->eptz_config, -1, SQLITE_STATIC);
+        bind_observation_settings(stmt, 56, stream);
 
         // Bind ID parameter
-        sqlite3_bind_int64(stmt, 59, (sqlite3_int64)existing_id);
+        sqlite3_bind_int64(stmt, 60, (sqlite3_int64)existing_id);
 
         bool owns_transaction = false;
         if (!stream_transaction_begin(db, &owns_transaction)) {
@@ -378,14 +379,14 @@ uint64_t add_stream_config(const stream_config_t *stream) {
           "protocol, is_onvif, record_audio, backchannel_enabled, "
           "retention_days, detection_retention_days, max_storage_mb, "
           "tier_critical_multiplier, tier_important_multiplier, tier_ephemeral_multiplier, storage_priority, "
-          "ptz_enabled, ptz_max_x, ptz_max_y, ptz_max_z, ptz_has_home, "
+          "ptz_enabled, ptz_max_x, ptz_max_y, ptz_max_z, ptz_has_home, ptz_default_preset, "
           "onvif_username, onvif_password, onvif_profile, onvif_port, "
           "record_on_schedule, recording_schedule, tags, admin_url, privacy_mode, motion_trigger_source, "
           "go2rtc_source_override, sub_stream_url, audio_voice_enhancement, detection_url, publish_url, "
           "detection_record_on_schedule, detection_recording_schedule, playback_transport, eptz_config, "
           "observation_evidence_enabled, observation_labels, observation_max_age_days, observation_max_bytes, "
           "camera_uuid, location_uuid) "
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
           "?, ?, ?, ?, "
           "lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || "
           "substr(hex(randomblob(2)), 2) || '-' || "
@@ -455,41 +456,42 @@ uint64_t add_stream_config(const stream_config_t *stream) {
     sqlite3_bind_int(stmt, 34, stream->ptz_max_y);
     sqlite3_bind_int(stmt, 35, stream->ptz_max_z);
     sqlite3_bind_int(stmt, 36, stream->ptz_has_home ? 1 : 0);
+    sqlite3_bind_text(stmt, 37, stream->ptz_default_preset, -1, SQLITE_STATIC);
 
     // Bind ONVIF credentials
-    sqlite3_bind_text(stmt, 37, stream->onvif_username, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 38, stream->onvif_password, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 39, stream->onvif_profile, -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 40, stream->onvif_port);
+    sqlite3_bind_text(stmt, 38, stream->onvif_username, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 39, stream->onvif_password, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 40, stream->onvif_profile, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 41, stream->onvif_port);
 
     // Bind recording schedule parameters
-    sqlite3_bind_int(stmt, 41, stream->record_on_schedule ? 1 : 0);
+    sqlite3_bind_int(stmt, 42, stream->record_on_schedule ? 1 : 0);
     char insert_schedule_buf[RECORDING_SCHEDULE_TEXT_SIZE];
     serialize_recording_schedule(stream->recording_schedule, insert_schedule_buf, sizeof(insert_schedule_buf));
-    sqlite3_bind_text(stmt, 42, insert_schedule_buf, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 43, insert_schedule_buf, -1, SQLITE_TRANSIENT);
 
     // Bind tags, admin URL, privacy_mode, motion_trigger_source, go2rtc override, and sub-stream parameters
-    sqlite3_bind_text(stmt, 43, stream->tags, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 44, stream->admin_url, -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 45, stream->privacy_mode ? 1 : 0);
-    sqlite3_bind_text(stmt, 46, stream->motion_trigger_source, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 47,
+    sqlite3_bind_text(stmt, 44, stream->tags, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 45, stream->admin_url, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 46, stream->privacy_mode ? 1 : 0);
+    sqlite3_bind_text(stmt, 47, stream->motion_trigger_source, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 48,
                       normalized_go2rtc_source_override(stream->go2rtc_source_override),
                       -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 48, stream->sub_stream_url, -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 49, stream->audio_voice_enhancement ? 1 : 0);
-    sqlite3_bind_text(stmt, 50, stream->detection_url, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 51, stream->publish_url, -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 52, stream->detection_record_on_schedule ? 1 : 0);
+    sqlite3_bind_text(stmt, 49, stream->sub_stream_url, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 50, stream->audio_voice_enhancement ? 1 : 0);
+    sqlite3_bind_text(stmt, 51, stream->detection_url, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 52, stream->publish_url, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 53, stream->detection_record_on_schedule ? 1 : 0);
     char insert_detection_schedule_buf[RECORDING_SCHEDULE_TEXT_SIZE];
     serialize_recording_schedule(stream->detection_recording_schedule,
                                  insert_detection_schedule_buf, sizeof(insert_detection_schedule_buf));
-    sqlite3_bind_text(stmt, 53, insert_detection_schedule_buf, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 54,
+    sqlite3_bind_text(stmt, 54, insert_detection_schedule_buf, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 55,
                       normalized_playback_transport(stream->playback_transport),
                       -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 55, stream->eptz_config, -1, SQLITE_STATIC);
-    bind_observation_settings(stmt, 56, stream);
+    sqlite3_bind_text(stmt, 56, stream->eptz_config, -1, SQLITE_STATIC);
+    bind_observation_settings(stmt, 57, stream);
 
     bool owns_transaction = false;
     if (!stream_transaction_begin(db, &owns_transaction)) {
@@ -572,9 +574,44 @@ int set_stream_privacy_mode(const char *name, bool privacy_mode) {
 }
 
 /**
+ * Set or clear a stream's default startup PTZ preset token.
+ * Preserved by update_stream_config().
+ *
+ * @return 0 on success, -1 on error or if the stream does not exist
+ */
+int update_stream_ptz_default_preset(const char *name, const char *preset_token) {
+    sqlite3 *db = get_db_handle();
+    pthread_mutex_t *db_mutex = get_db_mutex();
+
+    if (!db || !name) {
+        return -1;
+    }
+
+    pthread_mutex_lock(db_mutex);
+    sqlite3_stmt *stmt = NULL;
+    int result = -1;
+    if (sqlite3_prepare_v2(db, "UPDATE streams SET ptz_default_preset = ? WHERE name = ?;",
+                           -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, preset_token ? preset_token : "", -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, name, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_DONE) {
+            result = sqlite3_changes(db) > 0 ? 0 : -1;
+        } else {
+            log_error("Failed to set PTZ default preset for stream %s: %s", name, sqlite3_errmsg(db));
+        }
+    } else {
+        log_error("Failed to prepare PTZ default preset update: %s", sqlite3_errmsg(db));
+    }
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(db_mutex);
+    return result;
+}
+
+/**
  * Update a stream configuration in the database
  *
- * Note: does not write privacy_mode; use set_stream_privacy_mode().
+ * Note: does not write privacy_mode or ptz_default_preset; use
+ * set_stream_privacy_mode() / update_stream_ptz_default_preset().
  *
  * @param name Stream name to update
  * @param stream Updated stream configuration
@@ -608,6 +645,8 @@ int update_stream_config(const char *name, const stream_config_t *stream) {
     // configs whose privacy_mode can be stale, and writing it back would
     // silently turn privacy mode off. Parameter 45 is bound to NULL so the
     // COALESCE keeps the stored value (and the parameter numbering is unchanged).
+    // Likewise, ptz_default_preset is owned by update_stream_ptz_default_preset()
+    // and preserved when general stream settings are updated.
     const char *sql = "UPDATE streams SET "
                       "name = ?, url = ?, enabled = ?, streaming_enabled = ?, width = ?, height = ?, "
                       "fps = ?, codec = ?, priority = ?, record = ?, segment_duration = ?, "
@@ -1027,7 +1066,8 @@ int get_stream_config_by_name(const char *name, stream_config_t *stream) {
         "record_on_schedule, recording_schedule, tags, admin_url, privacy_mode, motion_trigger_source, "
         "go2rtc_source_override, sub_stream_url, audio_voice_enhancement, detection_url, publish_url, "
         "detection_record_on_schedule, detection_recording_schedule, camera_uuid, location_uuid, playback_transport, eptz_config, "
-        "observation_evidence_enabled, observation_labels, observation_max_age_days, observation_max_bytes "
+        "observation_evidence_enabled, observation_labels, observation_max_age_days, observation_max_bytes, "
+        "ptz_default_preset "
         "FROM streams WHERE name = ?;";
 
     // Column index constants for readability
@@ -1047,7 +1087,9 @@ int get_stream_config_by_name(const char *name, stream_config_t *stream) {
         COL_AUDIO_VOICE_ENHANCEMENT, COL_DETECTION_URL, COL_PUBLISH_URL,
         COL_DETECTION_RECORD_ON_SCHEDULE, COL_DETECTION_RECORDING_SCHEDULE,
         COL_CAMERA_UUID, COL_LOCATION_UUID, COL_PLAYBACK_TRANSPORT, COL_EPTZ_CONFIG,
-        COL_OBSERVATION_EVIDENCE_ENABLED
+        COL_OBSERVATION_EVIDENCE_ENABLED, COL_OBSERVATION_LABELS,
+        COL_OBSERVATION_MAX_AGE_DAYS, COL_OBSERVATION_MAX_BYTES,
+        COL_PTZ_DEFAULT_PRESET
     };
 
     rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
@@ -1170,6 +1212,11 @@ int get_stream_config_by_name(const char *name, stream_config_t *stream) {
         stream->ptz_max_z = (sqlite3_column_type(stmt, COL_PTZ_MAX_Z) != SQLITE_NULL)
             ? sqlite3_column_int(stmt, COL_PTZ_MAX_Z) : 0;
         stream->ptz_has_home = sqlite3_column_int(stmt, COL_PTZ_HAS_HOME) != 0;
+
+        const char *ptz_default_preset = (const char *)sqlite3_column_text(stmt, COL_PTZ_DEFAULT_PRESET);
+        if (ptz_default_preset) {
+            safe_strcpy(stream->ptz_default_preset, ptz_default_preset, sizeof(stream->ptz_default_preset), 0);
+        }
 
         // ONVIF credentials
         const char *onvif_username = (const char *)sqlite3_column_text(stmt, COL_ONVIF_USERNAME);
@@ -1372,7 +1419,8 @@ static int get_all_stream_configs_on_connection(sqlite3 *db,
         "record_on_schedule, recording_schedule, tags, admin_url, privacy_mode, motion_trigger_source, "
         "go2rtc_source_override, sub_stream_url, audio_voice_enhancement, detection_url, publish_url, "
         "detection_record_on_schedule, detection_recording_schedule, camera_uuid, location_uuid, playback_transport, eptz_config, "
-        "observation_evidence_enabled, observation_labels, observation_max_age_days, observation_max_bytes "
+        "observation_evidence_enabled, observation_labels, observation_max_age_days, observation_max_bytes, "
+        "ptz_default_preset "
         "FROM streams ORDER BY name;";
 
     // Column index constants (same as get_stream_config_by_name)
@@ -1392,7 +1440,9 @@ static int get_all_stream_configs_on_connection(sqlite3 *db,
         COL_AUDIO_VOICE_ENHANCEMENT, COL_DETECTION_URL, COL_PUBLISH_URL,
         COL_DETECTION_RECORD_ON_SCHEDULE, COL_DETECTION_RECORDING_SCHEDULE,
         COL_CAMERA_UUID, COL_LOCATION_UUID, COL_PLAYBACK_TRANSPORT, COL_EPTZ_CONFIG,
-        COL_OBSERVATION_EVIDENCE_ENABLED
+        COL_OBSERVATION_EVIDENCE_ENABLED, COL_OBSERVATION_LABELS,
+        COL_OBSERVATION_MAX_AGE_DAYS, COL_OBSERVATION_MAX_BYTES,
+        COL_PTZ_DEFAULT_PRESET
     };
 
     rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
@@ -1513,6 +1563,11 @@ static int get_all_stream_configs_on_connection(sqlite3 *db,
         s->ptz_max_z = (sqlite3_column_type(stmt, COL_PTZ_MAX_Z) != SQLITE_NULL)
             ? sqlite3_column_int(stmt, COL_PTZ_MAX_Z) : 0;
         s->ptz_has_home = sqlite3_column_int(stmt, COL_PTZ_HAS_HOME) != 0;
+
+        const char *ptz_default_preset = (const char *)sqlite3_column_text(stmt, COL_PTZ_DEFAULT_PRESET);
+        if (ptz_default_preset) {
+            safe_strcpy(s->ptz_default_preset, ptz_default_preset, sizeof(s->ptz_default_preset), 0);
+        }
 
         // ONVIF credentials and settings
         const char *onvif_username = (const char *)sqlite3_column_text(stmt, COL_ONVIF_USERNAME);
