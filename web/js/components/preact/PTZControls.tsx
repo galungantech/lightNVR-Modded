@@ -10,6 +10,8 @@ import { showSuccessToast, showErrorToast } from './ToastContainer.tsx';
 import {
   getPtzCapabilities,
   getPtzPresets,
+  getPtzDefaultPreset,
+  setPtzDefaultPreset,
   savePtzPreset,
   setPtzHome,
   ptzMove,
@@ -144,6 +146,7 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
   const [speed, setSpeed] = useState<number>(0.5);
   const [presets, setPresets] = useState<PtzPreset[]>([]);
   const [selectedPreset, setSelectedPreset] = useState<string>('');
+  const [defaultPreset, setDefaultPreset] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [capabilities, setCapabilities] = useState<PtzCapabilities | null>(null);
   const [canManage, setCanManage] = useState<boolean>(true);
@@ -307,7 +310,7 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
     };
   }, [clampPosition]);
 
-  // Load capabilities and presets
+  // Load capabilities, presets, and default preset
   useEffect(() => {
     if (!stream?.name || !stream?.ptz_enabled) return;
 
@@ -316,6 +319,7 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
     setCanManage(true);
     setPresets([]);
     setSelectedPreset('');
+    setDefaultPreset('');
     setPresetName('');
     setShowPresetForm(false);
     setConfirmSetHome(false);
@@ -324,8 +328,19 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
       .then(data => { if (active) setCapabilities(data); })
       .catch(err => console.error('Failed to get PTZ capabilities:', err));
 
-    getPtzPresets(stream.name)
-      .then(data => { if (active) setPresets(data.presets || []); })
+    Promise.all([
+      getPtzPresets(stream.name),
+      getPtzDefaultPreset(stream.name).catch(() => '')
+    ])
+      .then(([data, defToken]) => {
+        if (!active) return;
+        const loadedPresets = data.presets || [];
+        setPresets(loadedPresets);
+        if (defToken && loadedPresets.some(p => p.token === defToken)) {
+          setDefaultPreset(defToken);
+          setSelectedPreset(defToken);
+        }
+      })
       .catch(err => console.error('Failed to get PTZ presets:', err));
 
     return () => { active = false; };
@@ -359,11 +374,34 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
     }
   }, [stream?.name, presetName, saving, t, handleActionFailure]);
 
+  const handleToggleDefaultPreset = useCallback(async () => {
+    if (!stream?.name || !selectedPreset || saving) return;
+    setSaving(true);
+    const nextDefault = defaultPreset === selectedPreset ? '' : selectedPreset;
+    try {
+      await setPtzDefaultPreset(stream.name, nextDefault);
+      setDefaultPreset(nextDefault);
+      showSuccessToast(
+        nextDefault
+          ? (t('live.ptzDefaultPresetSet') || 'Default preset saved')
+          : (t('live.ptzDefaultPresetCleared') || 'Default preset cleared')
+      );
+    } catch (err) {
+      handleActionFailure(err as PtzError, t('live.ptzDefaultPresetFailed') || 'Failed to set default preset');
+    } finally {
+      setSaving(false);
+    }
+  }, [stream?.name, selectedPreset, defaultPreset, saving, t, handleActionFailure]);
+
   const handleDeletePreset = useCallback(async () => {
     if (!stream?.name || !selectedPreset || saving) return;
     setSaving(true);
     try {
       await deletePtzPreset(stream.name, selectedPreset);
+      if (defaultPreset === selectedPreset) {
+        await setPtzDefaultPreset(stream.name, '').catch(() => {});
+        setDefaultPreset('');
+      }
       setPresets(prev => prev.filter(p => p.token !== selectedPreset));
       setSelectedPreset('');
       showSuccessToast(t('live.ptzPresetDeleted') || 'Preset deleted');
@@ -372,7 +410,7 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
     } finally {
       setSaving(false);
     }
-  }, [stream?.name, selectedPreset, saving, t, handleActionFailure]);
+  }, [stream?.name, selectedPreset, defaultPreset, saving, t, handleActionFailure]);
 
   const handleSetHome = useCallback(async () => {
     if (!stream?.name || saving) return;
@@ -438,19 +476,6 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
     <div
       ref={panelRef}
       className="ptz-controls"
-    
-      // Hentikan event pointer agar tidak diterima gesture kamera
-      onPointerDown={(e) => e.stopPropagation()}
-      onPointerMove={(e) => e.stopPropagation()}
-      onPointerUp={(e) => e.stopPropagation()}
-      onPointerCancel={(e) => e.stopPropagation()}
-    
-      // Hentikan click agar tidak memicu fullscreen kamera
-      onClick={(e) => e.stopPropagation()}
-      onDblClick={(e) => e.stopPropagation()}
-      onContextMenu={(e) => e.stopPropagation()}
-    
-      // Pertahankan isolasi event mouse dan touch
       onWheel={(e) => handleWheel(e as unknown as WheelEvent)}
       onMouseDown={(e) => e.stopPropagation()}
       onTouchStart={(e) => e.stopPropagation()}
@@ -725,10 +750,60 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
                 value={preset.token}
                 style={{ backgroundColor: '#0f172a', color: 'white' }}
               >
-                {preset.name || t('live.presetNumber', { token: preset.token })}
+                {preset.token === defaultPreset
+                  ? `★ ${preset.name || t('live.presetNumber', { token: preset.token })}`
+                  : (preset.name || t('live.presetNumber', { token: preset.token }))}
               </option>
             ))}
           </select>
+
+          {canManage && selectedPreset && (
+            <button
+              type="button"
+              onClick={handleToggleDefaultPreset}
+              disabled={saving}
+              title={
+                defaultPreset === selectedPreset
+                  ? (t('live.ptzClearDefaultPreset') || 'Unset Default Preset')
+                  : (t('live.ptzSetDefaultPreset') || 'Set as Default Preset')
+              }
+              style={{
+                width: '32px',
+                minWidth: '32px',
+                alignSelf: 'stretch',
+                borderRadius: '8px',
+                border: defaultPreset === selectedPreset
+                  ? '1px solid rgba(250, 204, 21, 0.75)'
+                  : '1px solid rgba(255, 255, 255, 0.25)',
+                backgroundColor: defaultPreset === selectedPreset
+                  ? 'rgba(202, 138, 4, 0.8)'
+                  : 'rgba(15, 23, 42, 0.85)',
+                color: defaultPreset === selectedPreset ? '#fef08a' : 'rgba(255, 255, 255, 0.8)',
+                cursor: saving ? 'not-allowed' : 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                flexShrink: 0,
+                padding: '0',
+                boxSizing: 'border-box',
+                opacity: saving ? 0.5 : 1
+              }}
+            >
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill={defaultPreset === selectedPreset ? 'currentColor' : 'none'}
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M12 17v5" />
+                <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+              </svg>
+            </button>
+          )}
         
           {canManage && selectedPreset && (
             <button
@@ -847,13 +922,13 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
             style={{ 
               width: '100%', 
               fontSize: '10px', 
-              fontWeight: '500',
+              fontWeight: '500', 
               padding: '6px 10px', 
               borderRadius: '8px', 
               border: '1px solid rgba(255, 255, 255, 0.2)', 
               backgroundColor: 'rgba(15, 23, 42, 0.75)', 
               color: 'white', 
-              cursor: 'pointer',
+              cursor: 'pointer', 
               marginTop: '2px',
               display: 'flex',
               alignItems: 'center',
@@ -893,13 +968,13 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
             style={{ 
               width: '100%', 
               fontSize: '10px', 
-              fontWeight: '500',
+              fontWeight: '500', 
               padding: '6px 10px', 
               borderRadius: '8px', 
               border: '1px solid rgba(255, 255, 255, 0.2)', 
               backgroundColor: 'rgba(15, 23, 42, 0.75)', 
               color: 'white', 
-              cursor: 'pointer',
+              cursor: 'pointer', 
               marginTop: '2px',
               display: 'flex',
               alignItems: 'center',
