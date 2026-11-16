@@ -20,6 +20,7 @@
 #include "video/detection.h"
 #include "video/stream_reader.h"
 #include "video/stream_state.h"
+#include "video/onvif_ptz.h"
 #include "database/db_streams.h"
 #include "video/unified_detection_thread.h"
 #include "video/mp4_recording.h"
@@ -45,10 +46,10 @@ typedef struct {
  * Recording mode enum - determines how recording and detection interact
  */
 typedef enum {
-    RECORD_MODE_NONE,                    // No recording, no detection
-    RECORD_MODE_CONTINUOUS,              // Continuous recording only (mp4_recording_core)
-    RECORD_MODE_DETECTION_ONLY,          // Detection-triggered recording only (unified_detection_thread)
-    RECORD_MODE_CONTINUOUS_WITH_ANNOTATION  // Continuous recording + detection annotations
+    RECORD_MODE_NONE,                        // No recording, no detection
+    RECORD_MODE_CONTINUOUS,                  // Continuous recording only (mp4_recording_core)
+    RECORD_MODE_DETECTION_ONLY,              // Detection-triggered recording only (unified_detection_thread)
+    RECORD_MODE_CONTINUOUS_WITH_ANNOTATION   // Continuous recording + detection annotations
 } recording_mode_t;
 
 /**
@@ -168,8 +169,7 @@ static void *schedule_monitor_func(void *arg) {
 
         for (int i = 0; i < count; i++) {
             /* Skip streams that cannot need schedule management. */
-            if (db_streams[i].name[0] == '\0' ||
-                !db_streams[i].enabled) {
+            if (db_streams[i].name[0] == '\0' || !db_streams[i].enabled) {
                 continue;
             }
 
@@ -185,8 +185,7 @@ static void *schedule_monitor_func(void *arg) {
                 bool should_record = is_recording_scheduled(&db_streams[i]);
                 recording_runtime_info_t runtime_info = {0};
                 bool is_recording =
-                    get_mp4_recording_runtime_info(db_streams[i].name,
-                                                   &runtime_info) == 0;
+                    get_mp4_recording_runtime_info(db_streams[i].name, &runtime_info) == 0;
 
                 if (should_record && !is_recording) {
                     log_info("Schedule: starting recording for stream '%s'", db_streams[i].name);
@@ -209,10 +208,8 @@ static void *schedule_monitor_func(void *arg) {
 
             if (db_streams[i].detection_based_recording &&
                 db_streams[i].detection_record_on_schedule) {
-                bool should_detect =
-                    is_detection_recording_scheduled(&db_streams[i]);
-                bool is_detecting =
-                    is_unified_detection_running(db_streams[i].name);
+                bool should_detect = is_detection_recording_scheduled(&db_streams[i]);
+                bool is_detecting = is_unified_detection_running(db_streams[i].name);
                 if (should_detect && !is_detecting) {
                     bool annotation_only = db_streams[i].record;
                     log_info("Detection schedule: starting detection for stream '%s'",
@@ -247,7 +244,7 @@ int init_stream_manager(int max_streams) {
     }
 
     // Clamp to a sane range
-    if (max_streams < 1)           max_streams = 1;
+    if (max_streams < 1)            max_streams = 1;
     if (max_streams > MAX_STREAMS) max_streams = MAX_STREAMS;
 
     // Allocate the stream array dynamically
@@ -293,7 +290,8 @@ int init_stream_manager(int max_streams) {
 
     initialized = true;
 
-    // Create stream state managers for all existing streams and register with go2rtc
+    // Create stream state managers for all existing streams, register with go2rtc,
+    // and apply configured default PTZ preset on LightNVR startup
     for (int i = 0; i < streams_capacity; i++) {
         if (streams[i].config.name[0] != '\0') {
             const stream_state_manager_t *state = get_stream_state_by_name(streams[i].config.name);
@@ -310,6 +308,12 @@ int init_stream_manager(int max_streams) {
             #ifdef USE_GO2RTC
             go2rtc_integration_register_stream(streams[i].config.name);
             #endif
+
+            if (streams[i].config.enabled &&
+                streams[i].config.ptz_enabled &&
+                streams[i].config.ptz_default_preset[0] != '\0') {
+                onvif_ptz_apply_default_preset_async(streams[i].config.name);
+            }
         }
     }
 
@@ -406,7 +410,6 @@ stream_handle_t get_stream_by_name(const char *name) {
                 streams[i].status = STREAM_STATUS_STOPPED;
                 streams[i].recording_enabled = db_config.record;
                 streams[i].detection_recording_enabled = db_config.detection_based_recording;
-
                 return (stream_handle_t)&streams[i];
             }
         }
@@ -449,7 +452,7 @@ int get_stream_config(stream_handle_t stream, stream_config_t *config) {
  */
 stream_status_t get_stream_status(stream_handle_t stream) {
     if (!stream) {
-        return STREAM_STATUS_UNKNOWN; // Now we can return UNKNOWN
+        return STREAM_STATUS_UNKNOWN;
     }
 
     stream_t *s = (stream_t *)stream;
@@ -469,7 +472,7 @@ stream_status_t get_stream_status(stream_handle_t stream) {
             case STREAM_STATE_ACTIVE:
                 return STREAM_STATUS_RUNNING;
             case STREAM_STATE_STOPPING:
-                return STREAM_STATUS_STOPPING; // New status
+                return STREAM_STATUS_STOPPING;
             case STREAM_STATE_ERROR:
                 return STREAM_STATUS_ERROR;
             case STREAM_STATE_RECONNECTING:
@@ -555,11 +558,11 @@ int set_stream_detection_recording(stream_handle_t stream, bool enabled, const c
 
         // Start unified detection thread
         if (start_unified_detection_thread(stream_name,
-                                          config_copy.detection_model,
-                                          config_copy.detection_threshold,
-                                          config_copy.pre_detection_buffer,
-                                          config_copy.post_detection_buffer,
-                                          annotation_only) != 0) {
+                                           config_copy.detection_model,
+                                           config_copy.detection_threshold,
+                                           config_copy.pre_detection_buffer,
+                                           config_copy.post_detection_buffer,
+                                           annotation_only) != 0) {
             log_warn("Failed to start unified detection thread for stream %s", stream_name);
         } else {
             log_info("Successfully started unified detection thread for stream %s", stream_name);
@@ -720,17 +723,8 @@ int remove_stream(stream_handle_t handle) {
     char stream_name[MAX_STREAM_NAME];
     safe_strcpy(stream_name, s->config.name, MAX_STREAM_NAME, 0);
 
-    // Note: Database deletion and go2rtc unregistration are handled by the caller
-    // (handle_delete_stream), which persists deletion before clearing this slot
-    // and calls go2rtc_integration_unregister_stream() afterwards.
-
     // Clear the stream slot
     pthread_mutex_lock(&s->mutex);
-
-    // Save stream name for timestamp tracker cleanup
-    char stream_name_for_cleanup[MAX_STREAM_NAME];
-    safe_strcpy(stream_name_for_cleanup, s->config.name, MAX_STREAM_NAME, 0);
-
     memset(&s->config, 0, sizeof(stream_config_t));
     s->status = STREAM_STATUS_STOPPED;
     memset(&s->stats, 0, sizeof(stream_stats_t));
@@ -770,6 +764,9 @@ int start_stream(stream_handle_t handle) {
             pthread_mutex_lock(&s->mutex);
             s->status = STREAM_STATUS_RUNNING;
             pthread_mutex_unlock(&s->mutex);
+
+            // Apply configured default PTZ preset on stream start / reconnect
+            onvif_ptz_apply_default_preset_async(stream_name);
         } else {
             pthread_mutex_lock(&s->mutex);
             s->status = STREAM_STATUS_ERROR;
@@ -812,21 +809,13 @@ int start_stream(stream_handle_t handle) {
     bool any_component_started = false;
 
     // Start HLS stream if streaming is enabled OR if detection is enabled
-    // When detection is enabled, HLS keeps the go2rtc stream alive so detection
-    // snapshots work reliably even when no WebRTC viewers are connected.
     bool need_hls = streaming_enabled || detection_enabled;
     if (need_hls) {
         int hls_result = stream_start_hls(stream_name);
         if (hls_result != 0) {
             log_error("Failed to start HLS stream '%s'", stream_name);
         } else {
-            if (streaming_enabled && detection_enabled) {
-                log_info("Started HLS streaming for '%s' (streaming + detection keepalive)", stream_name);
-            } else if (detection_enabled) {
-                log_info("Started HLS for '%s' as go2rtc keepalive for detection", stream_name);
-            } else {
-                log_info("Started HLS streaming for '%s'", stream_name);
-            }
+            log_info("Started HLS streaming for '%s'", stream_name);
             any_component_started = true;
         }
     } else {
@@ -835,7 +824,6 @@ int start_stream(stream_handle_t handle) {
 
     // Start recording if enabled - completely independent of streaming status
     if (recording_enabled) {
-        // Route through go2rtc integration when available
         int mp4_result;
         #ifdef USE_GO2RTC
         mp4_result = go2rtc_integration_start_recording(stream_name);
@@ -855,13 +843,16 @@ int start_stream(stream_handle_t handle) {
     if (any_component_started) {
         s->status = STREAM_STATUS_RUNNING;
         log_info("Stream '%s' is now running", stream_name);
+        pthread_mutex_unlock(&s->mutex);
+
+        // Apply configured default PTZ preset on stream start
+        onvif_ptz_apply_default_preset_async(stream_name);
     } else {
         s->status = STREAM_STATUS_ERROR;
         log_error("Failed to start any components for stream '%s'", stream_name);
         pthread_mutex_unlock(&s->mutex);
         return -1;
     }
-    pthread_mutex_unlock(&s->mutex);
 
     return 0;
 }
@@ -929,7 +920,6 @@ int stop_stream(stream_handle_t handle) {
         int result = stream_stop_hls(stream_name);
         if (result != 0) {
             log_warn("Failed to stop HLS stream '%s'", stream_name);
-            // Continue anyway
         } else {
             log_info("Stopped HLS streaming for '%s'", stream_name);
         }
@@ -937,16 +927,13 @@ int stop_stream(stream_handle_t handle) {
 
     // Stop recording if it was started
     if (recording_enabled) {
-        // First stop the MP4 recording directly
         int mp4_result = stop_mp4_recording(stream_name);
         if (mp4_result != 0) {
             log_warn("Failed to stop MP4 recording for '%s'", stream_name);
-            // Continue anyway
         } else {
             log_info("Stopped MP4 recording for '%s'", stream_name);
         }
 
-        // Then stop the recording in the database
         stop_recording(stream_name);
         log_info("Stopped recording metadata for '%s'", stream_name);
     }
@@ -967,7 +954,6 @@ stream_handle_t get_stream_by_index(int index) {
     if (index < 0 || index >= streams_capacity || !initialized) {
         return NULL;
     }
-
 
     if (streams[index].config.name[0] == '\0') {
         return NULL;
@@ -1056,18 +1042,15 @@ int set_stream_priority(stream_handle_t handle, int priority) {
     pthread_mutex_lock(&s->mutex);
     s->config.priority = priority;
 
-    // Get a copy of the config for database update
     stream_config_t config_copy;
     memcpy(&config_copy, &s->config, sizeof(stream_config_t));
 
     pthread_mutex_unlock(&s->mutex);
 
-    // Persist to the database; log a warning if unavailable but keep the in-memory update
     if (update_stream_config(config_copy.name, &config_copy) != 0) {
         log_warn("Failed to update stream configuration in database for stream %s (in-memory updated)", config_copy.name);
     }
 
-    // Also update the stream state manager if it exists
     stream_state_manager_t *state = get_stream_state_by_name(config_copy.name);
     if (state) {
         update_stream_state_config(state, &config_copy);
@@ -1088,13 +1071,11 @@ int set_stream_recording(stream_handle_t handle, bool enable) {
 
     stream_t *s = (stream_t *)handle;
 
-    // Get stream name for logging
     char stream_name[MAX_STREAM_NAME];
     pthread_mutex_lock(&s->mutex);
     safe_strcpy(stream_name, s->config.name, MAX_STREAM_NAME, 0);
     pthread_mutex_unlock(&s->mutex);
 
-    // First try to use the new state management system
     stream_state_manager_t *state = get_stream_state_by_name(stream_name);
     if (state) {
         log_info("Using new state management system to set recording for stream '%s' to %s",
@@ -1102,40 +1083,32 @@ int set_stream_recording(stream_handle_t handle, bool enable) {
 
         int result = set_stream_feature(state, "recording", enable);
 
-        // Update the local config
         if (result == 0) {
             pthread_mutex_lock(&s->mutex);
             s->config.record = enable;
             s->recording_enabled = enable;
             pthread_mutex_unlock(&s->mutex);
-
-            // Note: Database update is handled by the caller (e.g., put_stream_worker)
-            // to avoid duplicate updates and race conditions
         }
 
         return result;
     }
 
-    // Fall back to the old system if the state manager is not available
     log_warn("Falling back to legacy system to set recording for stream '%s'", stream_name);
 
     pthread_mutex_lock(&s->mutex);
     s->config.record = enable;
     s->recording_enabled = enable;
 
-    // Get a copy of the config for database update
     stream_config_t config_copy;
     memcpy(&config_copy, &s->config, sizeof(stream_config_t));
 
     pthread_mutex_unlock(&s->mutex);
 
-    // Update the database directly
     if (update_stream_config(config_copy.name, &config_copy) != 0) {
         log_error("Failed to update stream configuration in database for stream %s", config_copy.name);
         return -1;
     }
 
-    // Also update the stream state manager if it exists
     state = get_stream_state_by_name(config_copy.name);
     if (state) {
         update_stream_state_config(state, &config_copy);
@@ -1157,8 +1130,6 @@ int set_stream_last_detection_time(stream_handle_t handle, time_t time) {
     stream_t *s = (stream_t *)handle;
 
     pthread_mutex_lock(&s->mutex);
-    // Assuming there's a last_detection_time field in the stream structure
-    // If not, you might need to add it to the stream_t structure
     s->last_detection_time = time;
     pthread_mutex_unlock(&s->mutex);
 
@@ -1176,13 +1147,11 @@ int set_stream_streaming_enabled(stream_handle_t handle, bool enabled) {
 
     stream_t *s = (stream_t *)handle;
 
-    // Get stream name for logging
     char stream_name[MAX_STREAM_NAME];
     pthread_mutex_lock(&s->mutex);
     safe_strcpy(stream_name, s->config.name, MAX_STREAM_NAME, 0);
     pthread_mutex_unlock(&s->mutex);
 
-    // First try to use the new state management system
     stream_state_manager_t *state = get_stream_state_by_name(stream_name);
     if (state) {
         log_info("Using new state management system to set streaming for stream '%s' to %s",
@@ -1190,38 +1159,30 @@ int set_stream_streaming_enabled(stream_handle_t handle, bool enabled) {
 
         int result = set_stream_feature(state, "streaming", enabled);
 
-        // Update the local config
         if (result == 0) {
             pthread_mutex_lock(&s->mutex);
             s->config.streaming_enabled = enabled;
             pthread_mutex_unlock(&s->mutex);
-
-            // Note: Database update is handled by the caller (e.g., put_stream_worker)
-            // to avoid duplicate updates and race conditions
         }
 
         return result;
     }
 
-    // Fall back to the old system if the state manager is not available
     log_warn("Falling back to legacy system to set streaming for stream '%s'", stream_name);
 
     pthread_mutex_lock(&s->mutex);
     s->config.streaming_enabled = enabled;
 
-    // Get a copy of the config for database update
     stream_config_t config_copy;
     memcpy(&config_copy, &s->config, sizeof(stream_config_t));
 
     pthread_mutex_unlock(&s->mutex);
 
-    // Update the database directly
     if (update_stream_config(config_copy.name, &config_copy) != 0) {
         log_error("Failed to update stream configuration in database for stream %s", config_copy.name);
         return -1;
     }
 
-    // Also update the stream state manager if it exists
     state = get_stream_state_by_name(config_copy.name);
     if (state) {
         update_stream_state_config(state, &config_copy);
@@ -1242,7 +1203,6 @@ int set_stream_onvif_flag(stream_handle_t handle, bool is_onvif) {
 
     stream_t *s = (stream_t *)handle;
 
-    // Get stream name for logging
     char stream_name[MAX_STREAM_NAME];
     pthread_mutex_lock(&s->mutex);
     safe_strcpy(stream_name, s->config.name, MAX_STREAM_NAME, 0);
@@ -1252,7 +1212,6 @@ int set_stream_onvif_flag(stream_handle_t handle, bool is_onvif) {
 
     pthread_mutex_lock(&s->mutex);
 
-    // Check if the flag is already set to the desired value
     if (s->config.is_onvif == is_onvif) {
         pthread_mutex_unlock(&s->mutex);
         log_info("ONVIF flag for stream '%s' is already set to %s",
@@ -1260,22 +1219,18 @@ int set_stream_onvif_flag(stream_handle_t handle, bool is_onvif) {
         return 0;
     }
 
-    // Update the flag
     s->config.is_onvif = is_onvif;
 
-    // Get a copy of the config for database update
     stream_config_t config_copy;
     memcpy(&config_copy, &s->config, sizeof(stream_config_t));
 
     pthread_mutex_unlock(&s->mutex);
 
-    // Update the database directly
     if (update_stream_config(config_copy.name, &config_copy) != 0) {
         log_error("Failed to update stream configuration in database for stream %s", config_copy.name);
         return -1;
     }
 
-    // Also update the stream state manager if it exists
     stream_state_manager_t *state = get_stream_state_by_name(config_copy.name);
     if (state) {
         update_stream_state_config(state, &config_copy);
