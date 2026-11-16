@@ -248,6 +248,8 @@ int register_all_libuv_handlers(http_server_handle_t server) {
     http_server_register_handler(server, "/api/streams/#/ptz/goto-preset", "POST", handle_ptz_goto_preset);
     http_server_register_handler(server, "/api/streams/#/ptz/preset", "PUT", handle_ptz_set_preset);
     http_server_register_handler(server, "/api/streams/#/ptz/delete-preset", "POST", handle_ptz_remove_preset);
+    http_server_register_handler(server, "/api/streams/#/ptz/default-preset", "GET", handle_ptz_get_default_preset);
+    http_server_register_handler(server, "/api/streams/#/ptz/default-preset", "POST", handle_ptz_set_default_preset);
 
     // ONVIF Imaging API
     http_server_register_handler(server, "/api/streams/#/imaging/settings", "GET", handle_imaging_get_settings);
