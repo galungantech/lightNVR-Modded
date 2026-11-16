@@ -16,6 +16,8 @@
 #include "video/stream_state.h"
 #include "core/logger.h"
 #include "core/config.h"
+#include "core/url_utils.h"
+#include "database/db_streams.h"
 #include "utils/strings.h"
 #include "video/stream_reader.h"
 #include "video/hls_streaming.h"
@@ -23,30 +25,55 @@
 #include "video/detection.h"
 #include "video/stream_transcoding.h"
 #include "video/streams.h"
+#include "video/onvif_ptz.h"
 #ifdef USE_GO2RTC
 #include "video/go2rtc/go2rtc_integration.h"
 #endif
 #include "telemetry/stream_metrics.h"
-
-/**
- * BUGFIX: Modified stop_stream_with_state to always stop HLS streaming and MP4 recording
- * regardless of the current streaming_enabled and recording_enabled flags.
- * This ensures that any running streams or recordings are properly cleaned up when
- * the stream is stopped, even if the flags were changed before stopping.
- */
 
 // Global dynamically-allocated array of stream state manager pointers
 static stream_state_manager_t **stream_states = NULL;
 static int states_capacity = 0;  // allocated slot count
 static pthread_mutex_t states_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool initialized = false;
-/* Protected by states_mutex. Teardown retains registry ownership while
- * releasing the lock for stop callbacks that need to look up their state. */
 static bool states_shutting_down = false;
 
-/* Final disposal only: both mutexes were initialized, registry ownership is
- * exclusive, and producers/callbacks have already quiesced. This does not
- * change the lifetime contract of pointers borrowed from registry lookups. */
+// Deduplication guard so concurrent triggers for the same stream don't spawn duplicate workers
+static pthread_mutex_t ptz_worker_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char active_ptz_streams[MAX_STREAMS][MAX_STREAM_NAME];
+
+static bool try_acquire_ptz_worker_slot(const char *stream_name) {
+    pthread_mutex_lock(&ptz_worker_mutex);
+    for (int i = 0; i < MAX_STREAMS; i++) {
+        if (active_ptz_streams[i][0] != '\0' &&
+            strcmp(active_ptz_streams[i], stream_name) == 0) {
+            pthread_mutex_unlock(&ptz_worker_mutex);
+            return false; // Already running for this stream
+        }
+    }
+    for (int i = 0; i < MAX_STREAMS; i++) {
+        if (active_ptz_streams[i][0] == '\0') {
+            safe_strcpy(active_ptz_streams[i], stream_name, MAX_STREAM_NAME, 0);
+            pthread_mutex_unlock(&ptz_worker_mutex);
+            return true;
+        }
+    }
+    pthread_mutex_unlock(&ptz_worker_mutex);
+    return false;
+}
+
+static void release_ptz_worker_slot(const char *stream_name) {
+    pthread_mutex_lock(&ptz_worker_mutex);
+    for (int i = 0; i < MAX_STREAMS; i++) {
+        if (active_ptz_streams[i][0] != '\0' &&
+            strcmp(active_ptz_streams[i], stream_name) == 0) {
+            active_ptz_streams[i][0] = '\0';
+            break;
+        }
+    }
+    pthread_mutex_unlock(&ptz_worker_mutex);
+}
+
 static void dispose_stream_state(stream_state_manager_t *state) {
     pthread_mutex_destroy(&state->mutex);
     pthread_mutex_destroy(&state->state_mutex);
@@ -93,19 +120,12 @@ void shutdown_stream_state_manager(void) {
     }
     states_shutting_down = true;
 
-    /* The caller must quiesce request/stream producers and outstanding users
-     * of borrowed state pointers before final teardown. This guard excludes
-     * registry mutations; it does not make borrowed-pointer use concurrent
-     * with disposal safe or guarantee worker termination after a stop timeout.
-     * Keep each entry discoverable during its synchronous stop callback. */
     for (int i = 0; i < states_capacity; i++) {
         if (stream_states[i]) {
             stream_state_manager_t *state = stream_states[i];
-            // Make a local copy of the stream name for logging
             char stream_name[MAX_STREAM_NAME];
             safe_strcpy(stream_name, state->name, MAX_STREAM_NAME, 0);
 
-            // Stop/wait for stream operations before disposal, including transitional states
             if (state->state == STREAM_STATE_ACTIVE ||
                 state->state == STREAM_STATE_STARTING ||
                 state->state == STREAM_STATE_RECONNECTING ||
@@ -148,7 +168,6 @@ stream_state_manager_t *create_stream_state(const stream_config_t *config) {
         return NULL;
     }
 
-    // Find an empty slot
     int slot = -1;
     for (int i = 0; i < states_capacity; i++) {
         if (!stream_states[i]) {
@@ -163,7 +182,6 @@ stream_state_manager_t *create_stream_state(const stream_config_t *config) {
         return NULL;
     }
 
-    // Check if stream with same name already exists
     for (int i = 0; i < states_capacity; i++) {
         if (i != slot && stream_states[i] &&
             strcmp(stream_states[i]->name, config->name) == 0) {
@@ -173,7 +191,6 @@ stream_state_manager_t *create_stream_state(const stream_config_t *config) {
         }
     }
 
-    // Allocate and initialize the state manager
     stream_state_manager_t *state = calloc(1, sizeof(stream_state_manager_t));
     if (!state) {
         log_error("Failed to allocate memory for stream state");
@@ -181,7 +198,6 @@ stream_state_manager_t *create_stream_state(const stream_config_t *config) {
         return NULL;
     }
 
-    // Initialize mutex
     if (pthread_mutex_init(&state->mutex, NULL) != 0) {
         log_error("Failed to initialize stream state mutex");
         free(state);
@@ -189,7 +205,6 @@ stream_state_manager_t *create_stream_state(const stream_config_t *config) {
         return NULL;
     }
 
-    // Initialize state mutex
     if (pthread_mutex_init(&state->state_mutex, NULL) != 0) {
         log_error("Failed to initialize stream state transition mutex");
         pthread_mutex_destroy(&state->mutex);
@@ -198,54 +213,40 @@ stream_state_manager_t *create_stream_state(const stream_config_t *config) {
         return NULL;
     }
 
-    // Copy configuration
     memcpy(&state->config, config, sizeof(stream_config_t));
-
-    // Initialize name
     safe_strcpy(state->name, config->name, MAX_STREAM_NAME, 0);
-
-    // Initialize state
     state->state = STREAM_STATE_INACTIVE;
 
-    // Initialize features
     state->features.streaming_enabled = config->streaming_enabled;
     state->features.recording_enabled = config->record;
     state->features.detection_enabled = config->detection_based_recording;
-    state->features.motion_detection_enabled = false; // Not in config yet
+    state->features.motion_detection_enabled = false;
 
-    // Initialize protocol state
     state->protocol_state.protocol = config->protocol;
-    state->protocol_state.is_multicast = false; // Will be determined when connecting
+    state->protocol_state.is_multicast = false;
     state->protocol_state.reconnect_attempts = 0;
     state->protocol_state.last_reconnect_time = 0;
-    state->protocol_state.buffer_size = 0; // Will be set based on protocol
-    state->protocol_state.timeout_ms = 0; // Will be set based on protocol
+    state->protocol_state.buffer_size = 0;
+    state->protocol_state.timeout_ms = 0;
 
-    // Initialize timestamp state
     state->timestamp_state.last_pts = AV_NOPTS_VALUE;
     state->timestamp_state.last_dts = AV_NOPTS_VALUE;
     state->timestamp_state.expected_next_pts = AV_NOPTS_VALUE;
     state->timestamp_state.pts_discontinuity_count = 0;
     state->timestamp_state.timestamps_initialized = false;
 
-    // Initialize stats
     memset(&state->stats, 0, sizeof(stream_stats_t));
 
-    // Initialize reference counting
-    state->ref_count = 1; // Initial reference for the creator
+    state->ref_count = 1;
     memset(state->component_refs, 0, sizeof(state->component_refs));
-    state->component_refs[STREAM_COMPONENT_API] = 1; // Initial reference is from API
-
-    // Initialize callback management
+    state->component_refs[STREAM_COMPONENT_API] = 1;
     state->callbacks_enabled = true;
 
-    // Initialize context pointers
     state->reader_ctx = NULL;
     state->hls_ctx = NULL;
     state->mp4_ctx = NULL;
     state->detection_ctx = NULL;
 
-    // Store in global array
     stream_states[slot] = state;
 
     log_info("Created stream state for '%s' in slot %d with initial reference count 1",
@@ -287,16 +288,12 @@ int update_stream_state_config(stream_state_manager_t *state, const stream_confi
 
     pthread_mutex_lock(&state->mutex);
 
-    // Check if protocol is changing
     bool protocol_changing = (state->config.protocol != config->protocol);
-
-    // Check if features are changing
     bool streaming_changing = (state->config.streaming_enabled != config->streaming_enabled);
     bool recording_changing = (state->config.record != config->record);
     bool detection_changing = (state->config.detection_based_recording != config->detection_based_recording);
     bool onvif_changing = (state->config.is_onvif != config->is_onvif);
 
-    // Log ONVIF flag change
     if (onvif_changing) {
         log_info("ONVIF flag changed for stream '%s': %s -> %s",
                 state->name,
@@ -304,31 +301,26 @@ int update_stream_state_config(stream_state_manager_t *state, const stream_confi
                 config->is_onvif ? "true" : "false");
     }
 
-    // Save old state for comparison
     stream_state_t old_state = state->state;
     stream_protocol_t old_protocol = state->config.protocol;
 
-    // Update configuration
     memcpy(&state->config, config, sizeof(stream_config_t));
 
-    // Update features
     state->features.streaming_enabled = config->streaming_enabled;
     state->features.recording_enabled = config->record;
     state->features.detection_enabled = config->detection_based_recording;
 
-    // If protocol is changing, update protocol state
     if (protocol_changing) {
         state->protocol_state.protocol = config->protocol;
         state->protocol_state.reconnect_attempts = 0;
         state->protocol_state.last_reconnect_time = 0;
 
-        // Set protocol-specific settings
         if (config->protocol == STREAM_PROTOCOL_UDP) {
-            state->protocol_state.buffer_size = 16777216; // 16MB for UDP
-            state->protocol_state.timeout_ms = 10000; // 10 seconds for UDP
+            state->protocol_state.buffer_size = 16777216;
+            state->protocol_state.timeout_ms = 10000;
         } else {
-            state->protocol_state.buffer_size = 8388608; // 8MB for TCP
-            state->protocol_state.timeout_ms = 5000; // 5 seconds for TCP
+            state->protocol_state.buffer_size = 8388608;
+            state->protocol_state.timeout_ms = 5000;
         }
 
         log_info("Protocol changed for stream '%s': %s -> %s",
@@ -339,12 +331,10 @@ int update_stream_state_config(stream_state_manager_t *state, const stream_confi
 
     pthread_mutex_unlock(&state->mutex);
 
-    // If stream is active and protocol or features changed, restart it
     if (old_state == STREAM_STATE_ACTIVE &&
         (protocol_changing || streaming_changing || recording_changing || detection_changing || onvif_changing)) {
         log_info("Restarting stream '%s' due to configuration changes", state->name);
 
-        // Stop and restart the stream
         stop_stream_with_state(state, false);
         start_stream_with_state(state);
     }
@@ -363,7 +353,6 @@ int update_stream_protocol(stream_state_manager_t *state, stream_protocol_t prot
 
     pthread_mutex_lock(&state->mutex);
 
-    // Check if protocol is changing
     if (state->config.protocol == protocol) {
         pthread_mutex_unlock(&state->mutex);
         log_info("Protocol for stream '%s' already set to %s",
@@ -371,24 +360,19 @@ int update_stream_protocol(stream_state_manager_t *state, stream_protocol_t prot
         return 0;
     }
 
-    // Update protocol in config
     state->config.protocol = protocol;
-
-    // Update protocol state
     state->protocol_state.protocol = protocol;
     state->protocol_state.reconnect_attempts = 0;
     state->protocol_state.last_reconnect_time = 0;
 
-    // Set protocol-specific settings
     if (protocol == STREAM_PROTOCOL_UDP) {
-        state->protocol_state.buffer_size = 16777216; // 16MB for UDP
-        state->protocol_state.timeout_ms = 10000; // 10 seconds for UDP
+        state->protocol_state.buffer_size = 16777216;
+        state->protocol_state.timeout_ms = 10000;
     } else {
-        state->protocol_state.buffer_size = 8388608; // 8MB for TCP
-        state->protocol_state.timeout_ms = 5000; // 5 seconds for TCP
+        state->protocol_state.buffer_size = 8388608;
+        state->protocol_state.timeout_ms = 5000;
     }
 
-    // Save current state
     stream_state_t current_state = state->state;
 
     pthread_mutex_unlock(&state->mutex);
@@ -396,11 +380,9 @@ int update_stream_protocol(stream_state_manager_t *state, stream_protocol_t prot
     log_info("Protocol updated for stream '%s' to %s",
             state->name, protocol == STREAM_PROTOCOL_UDP ? "UDP" : "TCP");
 
-    // If stream is active, restart it
     if (current_state == STREAM_STATE_ACTIVE) {
         log_info("Restarting stream '%s' due to protocol change", state->name);
 
-        // Stop and restart the stream
         stop_stream_with_state(state, false);
         start_stream_with_state(state);
     }
@@ -421,7 +403,6 @@ int set_stream_feature(stream_state_manager_t *state, const char *feature, bool 
 
     bool changed = false;
 
-    // Update the appropriate feature
     if (strcmp(feature, "streaming") == 0) {
         if (state->features.streaming_enabled != enabled) {
             state->features.streaming_enabled = enabled;
@@ -451,28 +432,13 @@ int set_stream_feature(stream_state_manager_t *state, const char *feature, bool 
         return -1;
     }
 
-    // Save current state
     stream_state_t current_state = state->state;
 
     pthread_mutex_unlock(&state->mutex);
 
-    // Recording start/stop is driven by the ACTUAL recording-thread state, not by
-    // the cached feature-flag delta (`changed`). Earlier in the PUT stream-update
-    // worker, update_stream_state_config() (via set_stream_detection_params /
-    // set_stream_detection_recording) can pre-sync features.recording_enabled to the
-    // requested value before we reach here. That made the `changed` guard below
-    // evaluate false and silently skip stop_mp4_recording() — the root cause of
-    // "set to No Recording but the stream kept recording" (#460). Handling recording
-    // idempotently and independently of `changed` (start only if not already
-    // recording, stop only if actually recording) fixes that and is safe to run on
-    // every update. The MP4 recording thread is separate from the stream state
-    // machine, so the stop must happen even when the stream is not ACTIVE.
     if (strcmp(feature, "recording") == 0) {
         int actively_recording = get_recording_state(state->name);
         if (enabled) {
-            // Only start a new recording thread when the stream is ACTIVE and not
-            // already recording; otherwise start_stream_with_state() will begin
-            // recording on the next successful connection.
             if (current_state == STREAM_STATE_ACTIVE && actively_recording != 1) {
                 log_info("Starting recording for stream '%s'", state->name);
                 #ifdef USE_GO2RTC
@@ -485,7 +451,6 @@ int set_stream_feature(stream_state_manager_t *state, const char *feature, bool 
                         state->name, current_state);
             }
         } else if (actively_recording == 1) {
-            // Always stop an in-progress recording regardless of stream state.
             log_info("Stopping recording for stream '%s' (state=%d)", state->name, current_state);
             stop_mp4_recording(state->name);
         }
@@ -498,11 +463,8 @@ int set_stream_feature(stream_state_manager_t *state, const char *feature, bool 
         log_info("Stream '%s' current_state=%d (ACTIVE=%d), applying feature change",
                 state->name, current_state, STREAM_STATE_ACTIVE);
 
-        // Recording is handled above, independently of `changed`.
         if (strcmp(feature, "recording") != 0) {
             if (current_state == STREAM_STATE_ACTIVE) {
-                // All other feature changes (streaming, detection) are only applied
-                // when the stream is ACTIVE — they rely on live data flow.
                 if (strcmp(feature, "streaming") == 0) {
                     if (enabled) {
                         stream_start_hls(state->name);
@@ -510,7 +472,6 @@ int set_stream_feature(stream_state_manager_t *state, const char *feature, bool 
                         stream_stop_hls(state->name);
                     }
                 } else if (strcmp(feature, "detection") == 0 || strcmp(feature, "motion_detection") == 0) {
-                    // For detection features, we need to restart the stream
                     log_info("Restarting stream '%s' to apply detection settings", state->name);
                     stop_stream_with_state(state, false);
                     start_stream_with_state(state);
@@ -525,6 +486,184 @@ int set_stream_feature(stream_state_manager_t *state, const char *feature, bool 
     return 0;
 }
 
+typedef struct {
+    char stream_name[MAX_STREAM_NAME];
+} ptz_default_preset_task_t;
+
+static void *ptz_default_preset_worker(void *arg) {
+    ptz_default_preset_task_t *task = (ptz_default_preset_task_t *)arg;
+    if (!task) {
+        return NULL;
+    }
+
+    char stream_name[MAX_STREAM_NAME];
+    safe_strcpy(stream_name, task->stream_name, sizeof(stream_name), 0);
+    free(task);
+
+    log_set_thread_context("PTZDefault", stream_name);
+    log_info("PTZ default preset worker started for '%s'", stream_name);
+
+    stream_config_t config;
+    if (get_stream_config_by_name(stream_name, &config) != 0 ||
+        !config.enabled || !config.ptz_enabled || config.ptz_default_preset[0] == '\0') {
+        release_ptz_worker_slot(stream_name);
+        return NULL;
+    }
+
+    char device_url[MAX_URL_LENGTH];
+    if (url_build_onvif_service_url(config.url, config.onvif_port,
+                                    "/onvif/device_service",
+                                    device_url, sizeof(device_url)) != 0) {
+        log_warn("Default PTZ preset: failed to build device URL for '%s'", stream_name);
+        release_ptz_worker_slot(stream_name);
+        return NULL;
+    }
+
+    char ptz_url[512] = {0};
+    bool ptz_ready = false;
+    bool status_supported = false;
+    int idle_streak = 0;
+    int unsupported_probes = 0;
+
+    // Fase 1: Tunggu hingga kamera online & motor IDLE (tanpa batas waktu mati/timeout kaku)
+    while (!states_shutting_down && initialized) {
+        if (get_stream_config_by_name(stream_name, &config) != 0 ||
+            !config.enabled || !config.ptz_enabled || config.ptz_default_preset[0] == '\0') {
+            release_ptz_worker_slot(stream_name);
+            return NULL;
+        }
+
+        const char *profile_token = (config.onvif_profile[0] != '\0') ? config.onvif_profile : "Profile_1";
+
+        if (ptz_url[0] == '\0') {
+            if (onvif_ptz_get_service_url(device_url, config.onvif_username,
+                                          config.onvif_password, ptz_url, sizeof(ptz_url)) != 0) {
+                sleep(2);
+                continue;
+            }
+        }
+
+        onvif_ptz_status_t st;
+        if (onvif_ptz_get_status(ptz_url, profile_token,
+                                 config.onvif_username, config.onvif_password, &st) == 0 && st.valid) {
+            status_supported = true;
+            if (!st.is_moving) {
+                idle_streak++;
+                if (idle_streak >= 2) {
+                    ptz_ready = true;
+                    break;
+                }
+            } else {
+                idle_streak = 0;
+            }
+        } else {
+            onvif_ptz_preset_t probe_preset;
+            if (onvif_ptz_get_presets(ptz_url, profile_token,
+                                      config.onvif_username, config.onvif_password,
+                                      &probe_preset, 1) >= 0) {
+                unsupported_probes++;
+                if (unsupported_probes >= 2) {
+                    ptz_ready = true;
+                    break;
+                }
+            } else {
+                ptz_url[0] = '\0';
+                unsupported_probes = 0;
+            }
+        }
+
+        sleep(2);
+    }
+
+    if (!ptz_ready || states_shutting_down || !initialized) {
+        release_ptz_worker_slot(stream_name);
+        return NULL;
+    }
+
+    // Fase 2: Eksekusi GotoPreset dan verifikasi kestabilan posisi motor
+    const char *profile_token = (config.onvif_profile[0] != '\0') ? config.onvif_profile : "Profile_1";
+    for (int attempt = 1; attempt <= 3 && !states_shutting_down; attempt++) {
+        if (onvif_ptz_goto_preset(ptz_url, profile_token,
+                                  config.onvif_username, config.onvif_password,
+                                  config.ptz_default_preset) != 0) {
+            sleep(2);
+            continue;
+        }
+
+        if (!status_supported) {
+            sleep(2);
+            log_info("Applied default PTZ preset '%s' for stream '%s' (fallback mode)",
+                     config.ptz_default_preset, stream_name);
+            break;
+        }
+
+        // Tunggu hingga motor selesai bergerak (IDLE 2x beruntun)
+        int check_idle = 0;
+        while (!states_shutting_down) {
+            sleep(2);
+            onvif_ptz_status_t cur = {0};
+            if (onvif_ptz_get_status(ptz_url, profile_token,
+                                     config.onvif_username, config.onvif_password, &cur) != 0 || !cur.valid) {
+                break;
+            }
+            if (!cur.is_moving) {
+                check_idle++;
+                if (check_idle >= 2) {
+                    log_info("Applied and verified default PTZ preset '%s' for stream '%s'",
+                             config.ptz_default_preset, stream_name);
+                    release_ptz_worker_slot(stream_name);
+                    return NULL;
+                }
+            } else {
+                check_idle = 0;
+            }
+        }
+    }
+
+    release_ptz_worker_slot(stream_name);
+    return NULL;
+}
+
+void trigger_ptz_default_preset(const char *stream_name) {
+    if (!stream_name || stream_name[0] == '\0' || states_shutting_down) {
+        return;
+    }
+
+    stream_config_t config;
+    if (get_stream_config_by_name(stream_name, &config) != 0) {
+        return;
+    }
+
+    if (!config.enabled || !config.ptz_enabled || config.ptz_default_preset[0] == '\0') {
+        return;
+    }
+
+    if (!try_acquire_ptz_worker_slot(stream_name)) {
+        log_debug("PTZ default preset worker already active for '%s', skipping duplicate trigger", stream_name);
+        return;
+    }
+
+    ptz_default_preset_task_t *task = calloc(1, sizeof(ptz_default_preset_task_t));
+    if (!task) {
+        log_warn("Failed to allocate PTZ default preset task for '%s'", stream_name);
+        release_ptz_worker_slot(stream_name);
+        return;
+    }
+    safe_strcpy(task->stream_name, stream_name, sizeof(task->stream_name), 0);
+
+    pthread_t tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
+    if (pthread_create(&tid, &attr, ptz_default_preset_worker, task) != 0) {
+        log_warn("Failed to spawn PTZ default preset thread for '%s'", stream_name);
+        release_ptz_worker_slot(stream_name);
+        free(task);
+    }
+
+    pthread_attr_destroy(&attr);
+}
 
 /**
  * Start stream with state
@@ -537,22 +676,17 @@ int start_stream_with_state(stream_state_manager_t *state) {
 
     pthread_mutex_lock(&state->mutex);
 
-    // Check if already running
     if (state->state == STREAM_STATE_ACTIVE) {
         pthread_mutex_unlock(&state->mutex);
         log_info("Stream '%s' is already running", state->name);
         return 0;
     }
 
-    // Update state to starting
     state->state = STREAM_STATE_STARTING;
 
-    // Get feature flags
     bool streaming_enabled = state->features.streaming_enabled;
     bool recording_enabled = state->features.recording_enabled;
     bool detection_enabled = state->features.detection_enabled;
-
-    // Get protocol
     stream_protocol_t protocol = state->protocol_state.protocol;
 
     pthread_mutex_unlock(&state->mutex);
@@ -564,10 +698,8 @@ int start_stream_with_state(stream_state_manager_t *state) {
             recording_enabled ? "enabled" : "disabled",
             detection_enabled ? "enabled" : "disabled");
 
-    // Track if any component started successfully
     bool any_component_started = false;
 
-    // Start HLS streaming if enabled
     if (streaming_enabled) {
         int hls_result = stream_start_hls(state->name);
         if (hls_result != 0) {
@@ -578,13 +710,11 @@ int start_stream_with_state(stream_state_manager_t *state) {
         }
     }
 
-    // Start recording if enabled and within the scheduled window (if configured)
     if (recording_enabled) {
         bool schedule_ok = is_recording_scheduled(&state->config);
         if (!schedule_ok) {
             log_info("Stream '%s': recording deferred — outside scheduled window", state->name);
-            // The schedule monitor will start recording when the window opens
-            any_component_started = true; // Stream itself is still considered started
+            any_component_started = true;
         } else {
             #ifdef USE_GO2RTC
             int mp4_result = go2rtc_integration_start_recording(state->name);
@@ -600,13 +730,11 @@ int start_stream_with_state(stream_state_manager_t *state) {
         }
     }
 
-    // Update state based on results
     pthread_mutex_lock(&state->mutex);
     if (any_component_started) {
         state->state = STREAM_STATE_ACTIVE;
         log_info("Stream '%s' is now running", state->name);
 
-        // Initialize telemetry slot with configured FPS
         if (state->config.fps > 0) {
             metrics_set_configured_fps(state->name, (double)state->config.fps);
         }
@@ -617,6 +745,10 @@ int start_stream_with_state(stream_state_manager_t *state) {
         return -1;
     }
     pthread_mutex_unlock(&state->mutex);
+
+    if (any_component_started) {
+        trigger_ptz_default_preset(state->name);
+    }
 
     return 0;
 }
@@ -630,10 +762,8 @@ int stop_stream_with_state(stream_state_manager_t *state, bool wait_for_completi
         return -1;
     }
 
-    // Use the state mutex for state transitions
     pthread_mutex_lock(&state->state_mutex);
 
-    // Check if already stopped or stopping
     if (state->state == STREAM_STATE_INACTIVE) {
         pthread_mutex_unlock(&state->state_mutex);
         log_info("Stream '%s' is already stopped", state->name);
@@ -644,28 +774,21 @@ int stop_stream_with_state(stream_state_manager_t *state, bool wait_for_completi
         pthread_mutex_unlock(&state->state_mutex);
         log_info("Stream '%s' is already in the process of stopping", state->name);
 
-        // If we need to wait for completion, wait for it to become inactive
         if (wait_for_completion) {
-            return wait_for_stream_stop(state, 10000); // 10 second timeout
+            return wait_for_stream_stop(state, 10000);
         }
         return 0;
     }
 
-    // Update state to stopping
     stream_state_t old_state = state->state;
     state->state = STREAM_STATE_STOPPING;
 
-    // Get feature flags and stream name while holding the mutex
     bool streaming_enabled = state->features.streaming_enabled;
 
-    // Get stream name for logging
     char stream_name[MAX_STREAM_NAME];
     safe_strcpy(stream_name, state->name, MAX_STREAM_NAME, 0);
 
-    // Only disable callbacks if we're stopping the entire stream
-    // If we're just disabling recording, we still want to keep callbacks enabled for HLS streaming
     if (!streaming_enabled) {
-        // Disable callbacks to prevent further processing
         state->callbacks_enabled = false;
     }
 
@@ -674,36 +797,25 @@ int stop_stream_with_state(stream_state_manager_t *state, bool wait_for_completi
     log_info("Stream '%s' transitioning from %d to STOPPING state",
              stream_name, old_state);
 
-    // Always attempt to stop HLS stream regardless of streaming_enabled flag
-    // This ensures we clean up any HLS streams that might be running
     int result = stream_stop_hls(stream_name);
     if (result != 0) {
         log_warn("Failed to stop HLS stream '%s'", stream_name);
-        // Continue anyway
     } else {
         log_info("Stopped HLS streaming for '%s'", stream_name);
     }
 
-    // Always attempt to stop MP4 recording regardless of recording_enabled flag
-    // This ensures we clean up any recordings that might be running
     int mp4_result = stop_mp4_recording(stream_name);
     if (mp4_result != 0) {
         log_warn("Failed to stop MP4 recording for '%s'", stream_name);
-        // Continue anyway
     } else {
         log_info("Stopped MP4 recording for '%s'", stream_name);
     }
 
-    // Reset timestamp tracker
     reset_timestamp_tracker(stream_name);
 
-    // Update state to inactive
     pthread_mutex_lock(&state->state_mutex);
     state->state = STREAM_STATE_INACTIVE;
-
-    // Re-enable callbacks for future use
     state->callbacks_enabled = true;
-
     pthread_mutex_unlock(&state->state_mutex);
 
     log_info("Stopped stream '%s'", stream_name);
@@ -750,13 +862,9 @@ int handle_stream_error(stream_state_manager_t *state, int error_code, const cha
 
     pthread_mutex_lock(&state->mutex);
 
-    // Update error statistics
     state->stats.errors++;
-
-    // Log the error
     log_error("Stream '%s' error: %s (code: %d)", state->name, error_message, error_code);
 
-    // Persist the human-readable cause for the streams API / UI tooltip.
     if (error_message) {
         snprintf(state->last_error_message, sizeof state->last_error_message,
                  "%s", error_message);
@@ -764,7 +872,6 @@ int handle_stream_error(stream_state_manager_t *state, int error_code, const cha
         state->last_error_message[0] = '\0';
     }
 
-    // Record error in telemetry metrics (classify by error code)
     {
         const char *error_type = "io";
         if (error_code == -ETIMEDOUT) {
@@ -779,46 +886,26 @@ int handle_stream_error(stream_state_manager_t *state, int error_code, const cha
         metrics_record_error(state->name, error_type);
     }
 
-    // Permanent application-level errors that should NOT trigger reconnect:
-    // they will keep failing on every retry until the operator fixes config.
     bool permanent_error = (error_code == STREAM_ERR_MODEL_LOAD);
-
-    // Check if we should attempt reconnection
     bool should_reconnect = false;
 
-    // Only attempt reconnection if the stream was active AND the error is
-    // transport-level (not a permanent config-level failure).
     if (state->state == STREAM_STATE_ACTIVE && !permanent_error) {
         should_reconnect = true;
-
-        // Update state to reconnecting
         state->state = STREAM_STATE_RECONNECTING;
-
-        // Update reconnection statistics
         state->protocol_state.reconnect_attempts++;
         state->protocol_state.last_reconnect_time = time(NULL);
         state->stats.reconnects++;
-
-        // Record reconnect in telemetry
         metrics_record_reconnect(state->name);
     } else {
-        // If not active, or a permanent error, just set to error state.
         state->state = STREAM_STATE_ERROR;
     }
 
     pthread_mutex_unlock(&state->mutex);
 
-    // If we should reconnect, stop and restart the stream
     if (should_reconnect) {
         log_info("Attempting to reconnect stream '%s'", state->name);
-
-        // Stop the stream
         stop_stream_with_state(state, false);
-
-        // Wait a bit before reconnecting
         sleep(1);
-
-        // Restart the stream
         start_stream_with_state(state);
     }
 
@@ -835,27 +922,19 @@ int update_stream_timestamps(stream_state_manager_t *state, int64_t pts, int64_t
 
     pthread_mutex_lock(&state->mutex);
 
-    // Update timestamp state
     state->timestamp_state.last_pts = pts;
     state->timestamp_state.last_dts = dts;
 
-    // If timestamps weren't initialized, initialize them now
     if (!state->timestamp_state.timestamps_initialized) {
         state->timestamp_state.timestamps_initialized = true;
         state->timestamp_state.expected_next_pts = pts;
     } else {
-        // Calculate expected next PTS based on framerate
         int64_t frame_duration = 0;
-
-        // Try to get framerate from config
         if (state->config.fps > 0) {
-            // Assume timebase of 1/90000 (common for MPEG)
             frame_duration = 90000 / state->config.fps;
         } else {
-            // Default to 30fps
             frame_duration = 3000;
         }
-
         state->timestamp_state.expected_next_pts = pts + frame_duration;
     }
 
@@ -915,7 +994,6 @@ int remove_stream_state(stream_state_manager_t *state) {
         return -1;
     }
 
-    // Find the state in the array
     int slot = -1;
     for (int i = 0; i < states_capacity; i++) {
         if (stream_states[i] == state) {
@@ -930,11 +1008,9 @@ int remove_stream_state(stream_state_manager_t *state) {
         return -1;
     }
 
-    // Save stream name for logging
     char stream_name[MAX_STREAM_NAME];
     safe_strcpy(stream_name, state->name, MAX_STREAM_NAME, 0);
 
-    // Check reference count
     pthread_mutex_lock(&state->mutex);
     int ref_count = state->ref_count;
     pthread_mutex_unlock(&state->mutex);
@@ -946,22 +1022,17 @@ int remove_stream_state(stream_state_manager_t *state) {
         return -1;
     }
 
-    /* Claim exclusive removal ownership before dropping registry lock.
-     * This prevents concurrent remove_stream_state() calls from finding
-     * the same state while stop_stream_with_state() runs unlocked. */
     stream_states[slot] = NULL;
 
-    // Stop the stream if it's active
     if (state->state == STREAM_STATE_ACTIVE ||
         state->state == STREAM_STATE_STARTING ||
         state->state == STREAM_STATE_RECONNECTING ||
         state->state == STREAM_STATE_STOPPING) {
         pthread_mutex_unlock(&states_mutex);
-        stop_stream_with_state(state, true); // Wait for completion
+        stop_stream_with_state(state, true);
         pthread_mutex_lock(&states_mutex);
     }
 
-    // Remove timestamp tracker
     remove_timestamp_tracker(stream_name);
 
     dispose_stream_state(state);
@@ -986,15 +1057,9 @@ int stream_state_add_ref(stream_state_manager_t *state, stream_component_t compo
     }
 
     pthread_mutex_lock(&state->mutex);
-
-    // Increment component-specific reference count
     state->component_refs[component]++;
-
-    // Increment total reference count
     state->ref_count++;
-
     int new_ref_count = state->ref_count;
-
     pthread_mutex_unlock(&state->mutex);
 
     log_debug("Added reference to stream '%s' for component %d, new ref count: %d",
@@ -1018,7 +1083,6 @@ int stream_state_release_ref(stream_state_manager_t *state, stream_component_t c
 
     pthread_mutex_lock(&state->mutex);
 
-    // Check if component has any references
     if (state->component_refs[component] <= 0) {
         log_warn("Component %d has no references to release for stream '%s'",
                 component, state->name);
@@ -1026,12 +1090,8 @@ int stream_state_release_ref(stream_state_manager_t *state, stream_component_t c
         return state->ref_count;
     }
 
-    // Decrement component-specific reference count
     state->component_refs[component]--;
-
-    // Decrement total reference count
     state->ref_count--;
-
     int new_ref_count = state->ref_count;
 
     pthread_mutex_unlock(&state->mutex);
@@ -1080,11 +1140,9 @@ int wait_for_stream_stop(stream_state_manager_t *state, int timeout_ms) {
         return -2;
     }
 
-    // Calculate end time
     struct timeval end_time;
     gettimeofday(&end_time, NULL);
 
-    // Add timeout to end time
     end_time.tv_sec += timeout_ms / 1000;
     end_time.tv_usec += (long)(timeout_ms % 1000) * 1000;
     if (end_time.tv_usec >= 1000000) {
@@ -1092,27 +1150,24 @@ int wait_for_stream_stop(stream_state_manager_t *state, int timeout_ms) {
         end_time.tv_usec -= 1000000;
     }
 
-    // Poll until the stream is inactive or timeout
     while (1) {
         pthread_mutex_lock(&state->state_mutex);
         bool is_inactive = (state->state == STREAM_STATE_INACTIVE);
         pthread_mutex_unlock(&state->state_mutex);
 
         if (is_inactive) {
-            return 0;  // Success
+            return 0;
         }
 
-        // Check if we've timed out
         struct timeval current_time;
         gettimeofday(&current_time, NULL);
         if (current_time.tv_sec > end_time.tv_sec ||
             (current_time.tv_sec == end_time.tv_sec &&
              current_time.tv_usec >= end_time.tv_usec)) {
-            return -1;  // Timeout
+            return -1;
         }
 
-        // Sleep for a short time before checking again
-        usleep(10000);  // 10ms
+        usleep(10000);
     }
 }
 
