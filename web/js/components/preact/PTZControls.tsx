@@ -721,8 +721,9 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
             onChange={(e) => {
               const token = (e.target as HTMLSelectElement).value;
               if (token) {
-                setSelectedPreset(token);
                 handlePreset(token);
+                // Berikan jeda singkat atau langsung reset state agar bisa dipilih ulang secara instan
+                setSelectedPreset(token);
               }
             }}
             style={{
@@ -750,13 +751,9 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
               <option
                 key={preset.token}
                 value={preset.token}
-                // Trik agar saat diklik meskipun nilainya sama, state dipaksa 'tick' ulang agar onChange terpanggil
-                onClick={() => {
+                onMouseDown={() => {
                   if (selectedPreset === preset.token) {
-                    handlePreset(preset.token);
-                  } else {
-                    setSelectedPreset(preset.token);
-                    handlePreset(preset.token);
+                    setSelectedPreset('');
                   }
                 }}
                 style={{ backgroundColor: '#0f172a', color: 'white' }}
