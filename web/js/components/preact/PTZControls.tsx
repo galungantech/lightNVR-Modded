@@ -1,6 +1,6 @@
 /**
- * PTZ Controls Component
- * Pan-Tilt-Zoom controls for PTZ-enabled cameras
+ * - PTZ Controls Component
+ * - Pan-Tilt-Zoom controls for PTZ-enabled cameras
  */
 
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
@@ -45,7 +45,7 @@ interface Position {
 const DEFAULT_POSITION: Position = { x: 10, y: 10 };
 
 /**
- * Direction button component matching original upstream event bindings
+ * - Direction button component matching original upstream event bindings
  */
 function DirectionButton({
   direction,
@@ -138,7 +138,7 @@ function DirectionButton({
 }
 
 /**
- * PTZ Controls Component
+ * - PTZ Controls Component
  */
 export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsProps) {
   const { t } = useI18n();
@@ -704,154 +704,128 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
         </span>
       </div>
 
-      {/* Presets */}
+      {/* Presets (Button List) */}
       {presets.length > 0 && (
         <div
           style={{
             display: 'flex',
-            alignItems: 'stretch',
+            flexDirection: 'column',
             gap: '4px',
             marginTop: '2px',
             width: '100%'
           }}
         >
-          <select
-            aria-label={t('live.goToPreset')}
-            value={selectedPreset}
-            onChange={(e) => {
-              const token = (e.target as HTMLSelectElement).value;
-              if (token) {
-                handlePreset(token);
-                // Berikan jeda singkat atau langsung reset state agar bisa dipilih ulang secara instan
-                setSelectedPreset(token);
-              }
-            }}
+          <span style={{ color: '#ffffff', fontSize: '10px', fontWeight: '600', textShadow: '0 1px 3px rgba(0,0,0,0.9)' }}>
+            {t('live.goToPreset')}
+          </span>
+
+          <div
             style={{
-              flex: 1,
-              minWidth: 0,
-              padding: '5px 8px',
-              borderRadius: '8px',
-              border: '1px solid rgba(255, 255, 255, 0.25)',
-              backgroundColor: 'rgba(15, 23, 42, 0.85)',
-              color: 'white',
-              fontSize: '10px',
-              cursor: 'pointer',
-              outline: 'none',
-              boxSizing: 'border-box'
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '4px',
+              maxHeight: '90px',
+              overflowY: 'auto',
+              paddingRight: '2px'
             }}
           >
-            <option
-              value=""
-              style={{ backgroundColor: '#0f172a', color: 'white' }}
-            >
-              {t('live.goToPreset')}
-            </option>
-        
-            {presets.map(preset => (
-              <option
-                key={preset.token}
-                value={preset.token}
-                onMouseDown={() => {
-                  if (selectedPreset === preset.token) {
-                    setSelectedPreset('');
-                  }
-                }}
-                style={{ backgroundColor: '#0f172a', color: 'white' }}
-              >
-                {preset.token === defaultPreset
-                  ? `★ ${preset.name || t('live.presetNumber', { token: preset.token })}`
-                  : (preset.name || t('live.presetNumber', { token: preset.token }))}
-              </option>
-            ))}
-          </select>
+            {presets.map(preset => {
+              const isDefault = preset.token === defaultPreset;
+              const isSelected = selectedPreset === preset.token;
+
+              return (
+                <button
+                  key={preset.token}
+                  type="button"
+                  onClick={() => {
+                    setSelectedPreset(preset.token);
+                    handlePreset(preset.token);
+                  }}
+                  disabled={saving}
+                  title={preset.name || t('live.presetNumber', { token: preset.token })}
+                  style={{
+                    flex: '1 1 auto',
+                    minWidth: '45px',
+                    padding: '5px 8px',
+                    borderRadius: '6px',
+                    border: isDefault
+                      ? '1px solid rgba(250, 204, 21, 0.8)'
+                      : isSelected
+                      ? '1px solid rgba(59, 130, 246, 0.8)'
+                      : '1px solid rgba(255, 255, 255, 0.25)',
+                    backgroundColor: isDefault
+                      ? 'rgba(202, 138, 4, 0.8)'
+                      : isSelected
+                      ? 'rgba(37, 99, 235, 0.8)'
+                      : 'rgba(15, 23, 42, 0.85)',
+                    color: isDefault ? '#fef08a' : '#ffffff',
+                    fontSize: '10px',
+                    fontWeight: isDefault || isSelected ? '700' : '500',
+                    cursor: saving ? 'not-allowed' : 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '3px',
+                    boxSizing: 'border-box',
+                    opacity: saving ? 0.5 : 1,
+                    transition: 'all 0.15s ease'
+                  }}
+                >
+                  {isDefault && <span>★</span>}
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {preset.name || `${preset.token}`}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
 
           {canManage && selectedPreset && (
-            <button
-              type="button"
-              onClick={handleToggleDefaultPreset}
-              disabled={saving}
-              title={
-                defaultPreset === selectedPreset
-                  ? (t('live.ptzClearDefaultPreset') || 'Unset Default Preset')
-                  : (t('live.ptzSetDefaultPreset') || 'Set as Default Preset')
-              }
-              style={{
-                width: '32px',
-                minWidth: '32px',
-                alignSelf: 'stretch',
-                borderRadius: '8px',
-                border: defaultPreset === selectedPreset
-                  ? '1px solid rgba(250, 204, 21, 0.75)'
-                  : '1px solid rgba(255, 255, 255, 0.25)',
-                backgroundColor: defaultPreset === selectedPreset
-                  ? 'rgba(202, 138, 4, 0.8)'
-                  : 'rgba(15, 23, 42, 0.85)',
-                color: defaultPreset === selectedPreset ? '#fef08a' : 'rgba(255, 255, 255, 0.8)',
-                cursor: saving ? 'not-allowed' : 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                flexShrink: 0,
-                padding: '0',
-                boxSizing: 'border-box',
-                opacity: saving ? 0.5 : 1
-              }}
-            >
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill={defaultPreset === selectedPreset ? 'currentColor' : 'none'}
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
+            <div style={{ display: 'flex', gap: '4px', marginTop: '4px' }}>
+              <button
+                type="button"
+                onClick={handleToggleDefaultPreset}
+                disabled={saving}
+                style={{
+                  flex: 1,
+                  padding: '4px 6px',
+                  borderRadius: '6px',
+                  border: defaultPreset === selectedPreset
+                    ? '1px solid rgba(250, 204, 21, 0.75)'
+                    : '1px solid rgba(255, 255, 255, 0.2)',
+                  backgroundColor: defaultPreset === selectedPreset
+                    ? 'rgba(202, 138, 4, 0.8)'
+                    : 'rgba(15, 23, 42, 0.85)',
+                  color: defaultPreset === selectedPreset ? '#fef08a' : 'rgba(255, 255, 255, 0.9)',
+                  fontSize: '9px',
+                  fontWeight: '600',
+                  cursor: saving ? 'not-allowed' : 'pointer',
+                  opacity: saving ? 0.5 : 1
+                }}
               >
-                <path d="M12 17v5" />
-                <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
-              </svg>
-            </button>
-          )}
-        
-          {canManage && selectedPreset && (
-            <button
-              type="button"
-              onClick={handleDeletePreset}
-              disabled={saving}
-              title={t('common.delete') || 'Delete Preset'}
-              style={{
-                width: '32px',
-                minWidth: '32px',
-                alignSelf: 'stretch',
-                borderRadius: '8px',
-                border: '1px solid rgba(239, 68, 68, 0.5)',
-                backgroundColor: 'rgba(239, 68, 68, 0.7)',
-                color: 'white',
-                cursor: saving ? 'not-allowed' : 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                flexShrink: 0,
-                padding: '0',
-                boxSizing: 'border-box',
-                opacity: saving ? 0.5 : 1
-              }}
-            >
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
+                {defaultPreset === selectedPreset ? t('live.ptzClearDefaultPreset') || 'Unset Default' : t('live.ptzSetDefaultPreset') || 'Set Default'}
+              </button>
+
+              <button
+                type="button"
+                onClick={handleDeletePreset}
+                disabled={saving}
+                style={{
+                  flex: 1,
+                  padding: '4px 6px',
+                  borderRadius: '6px',
+                  border: '1px solid rgba(239, 68, 68, 0.5)',
+                  backgroundColor: 'rgba(239, 68, 68, 0.7)',
+                  color: 'white',
+                  fontSize: '9px',
+                  fontWeight: '600',
+                  cursor: saving ? 'not-allowed' : 'pointer',
+                  opacity: saving ? 0.5 : 1
+                }}
               >
-                <path d="M3 6h18" />
-                <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
-                <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-              </svg>
-            </button>
+                {t('common.delete') || 'Delete'}
+              </button>
+            </div>
           )}
         </div>
       )}
