@@ -440,9 +440,11 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
     if (!stream?.name) return;
     setError(null);
   
-    // Reset dropdown selection after manual camera movement.
-    // Keep defaultPreset unchanged.
-    setSelectedPreset('');
+    // Reset preset selection only for pan/tilt movement.
+    // Keep selection when using zoom in/out.
+    if (pan !== 0 || tilt !== 0) {
+      setSelectedPreset('');
+    }
   
     ptzMove(stream.name, pan * speed, tilt * speed, zoom * speed)
       .catch(err => {
