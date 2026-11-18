@@ -720,8 +720,10 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
             value={selectedPreset}
             onChange={(e) => {
               const token = (e.target as HTMLSelectElement).value;
-              setSelectedPreset(token);
-              if (token) handlePreset(token);
+              if (token) {
+                setSelectedPreset(token);
+                handlePreset(token);
+              }
             }}
             style={{
               flex: 1,
@@ -748,6 +750,15 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
               <option
                 key={preset.token}
                 value={preset.token}
+                // Trik agar saat diklik meskipun nilainya sama, state dipaksa 'tick' ulang agar onChange terpanggil
+                onClick={() => {
+                  if (selectedPreset === preset.token) {
+                    handlePreset(preset.token);
+                  } else {
+                    setSelectedPreset(preset.token);
+                    handlePreset(preset.token);
+                  }
+                }}
                 style={{ backgroundColor: '#0f172a', color: 'white' }}
               >
                 {preset.token === defaultPreset
