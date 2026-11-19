@@ -21,6 +21,7 @@
 
 #include "video/go2rtc/go2rtc_api.h"
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
@@ -32,6 +33,7 @@
 
 #include "web/go2rtc_proxy_thread.h"
 #include "web/go2rtc_websocket.h"
+#include "web/go2rtc_media_policy.h"
 #include "web/api_handlers_go2rtc_proxy.h"
 #include "web/httpd_utils.h"
 #include "web/libuv_connection.h"
@@ -44,6 +46,7 @@
 
 // Maximum concurrent proxy threads (independent of UV_THREADPOOL_SIZE)
 #define MAX_CONCURRENT_PROXY_THREADS 32
+#define PROXY_MAX_RESPONSE_BYTES ((size_t)16 * 1024 * 1024)
 
 // ============================================================================
 // Internal types
@@ -62,6 +65,7 @@ typedef struct proxy_thread_ctx {
     char url[2048];
     char media_lease[37];
     bool media_policy_ack;
+    bool incompatible_media_policy;
     char method[16];
     char *body;                 // malloc'd copy, NULL if no body
     size_t body_len;
@@ -110,8 +114,19 @@ static struct {
 // ============================================================================
 
 static size_t proxy_write_cb(void *contents, size_t size, size_t nmemb, void *userp) {
-    size_t total = size * nmemb;
     proxy_thread_ctx_t *ctx = (proxy_thread_ctx_t *)userp;
+    if (size && nmemb > SIZE_MAX / size) {
+        ctx->error = true;
+        return 0;
+    }
+    size_t total = size * nmemb;
+    if (!total) return 0;
+    if (ctx->response_size > PROXY_MAX_RESPONSE_BYTES ||
+        total > PROXY_MAX_RESPONSE_BYTES - ctx->response_size) {
+        log_warn("go2rtc proxy thread: upstream response exceeds buffer limit");
+        ctx->error = true;
+        return 0;
+    }
 
     char *new_buf = realloc(ctx->response_buffer, ctx->response_size + total);
     if (!new_buf) {
@@ -304,9 +319,15 @@ static void *proxy_worker_thread(void *arg) {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &ctx->http_code);
         if (headers) curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
-        if (cres != CURLE_OK || ctx->error ||
-            (ctx->media_lease[0] && ctx->http_code < 300 && !ctx->media_policy_ack)) {
+        if (cres != CURLE_OK) {
             log_warn("go2rtc proxy thread: curl failed: %s", curl_easy_strerror(cres));
+            ctx->error = true;
+        } else if (ctx->error) {
+            log_warn("go2rtc proxy thread: response buffering failed");
+        } else if (ctx->media_lease[0] && ctx->http_code >= 200 &&
+                   ctx->http_code < 300 && !ctx->media_policy_ack) {
+            log_warn("%s (HTTP %ld)", GO2RTC_MEDIA_POLICY_ERROR, ctx->http_code);
+            ctx->incompatible_media_policy = true;
             ctx->error = true;
         } else {
             if (ctx->capture_hls_session && ctx->http_code == 200) {
@@ -363,7 +384,8 @@ static void proxy_async_cb(uv_async_t *handle) {
             ctx->auth_response.body_allocated = false;
         } else if (ctx->error || ctx->http_code == 0) {
             http_response_set_json_error(&conn->response, 502,
-                                         "Proxy error: go2rtc is not responding");
+                ctx->incompatible_media_policy ? GO2RTC_MEDIA_POLICY_ERROR :
+                "Proxy error: go2rtc is not responding");
         } else {
             conn->response.status_code = (int)ctx->http_code;
             if (ctx->response_content_type[0] != '\0') {

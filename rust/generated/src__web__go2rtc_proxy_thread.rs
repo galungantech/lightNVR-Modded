@@ -265,6 +265,10 @@ pub union pthread_rwlock_t {
     pub __size: [::core::ffi::c_char; 56],
     pub __align: ::core::ffi::c_long,
 }
+pub type uint8_t = u8;
+pub type uint16_t = u16;
+pub type uint64_t = u64;
+pub type uintptr_t = usize;
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct C2Rust_Unnamed_0(pub ::core::ffi::c_uint);
@@ -272,10 +276,6 @@ impl C2Rust_Unnamed_0 {
     pub const PTHREAD_CREATE_JOINABLE: Self = Self(0);
     pub const PTHREAD_CREATE_DETACHED: Self = Self(1);
 }
-pub type uint8_t = u8;
-pub type uint16_t = u16;
-pub type uint64_t = u64;
-pub type uintptr_t = usize;
 pub type atomic_bool = bool;
 pub type atomic_int = ::core::ffi::c_int;
 pub type curl_off_t = ::core::ffi::c_long;
@@ -1335,6 +1335,7 @@ pub struct proxy_thread_ctx {
     pub url: [::core::ffi::c_char; 2048],
     pub media_lease: [::core::ffi::c_char; 37],
     pub media_policy_ack: bool,
+    pub incompatible_media_policy: bool,
     pub method: [::core::ffi::c_char; 16],
     pub body: *mut ::core::ffi::c_char,
     pub body_len: size_t,
@@ -1354,10 +1355,14 @@ pub struct proxy_thread_ctx {
     pub auth_response: http_response_t,
     pub next: *mut proxy_thread_ctx,
 }
+pub const SIZE_MAX: ::core::ffi::c_ulong = 18446744073709551615 as ::core::ffi::c_ulong;
 pub const CLOCK_MONOTONIC: ::core::ffi::c_int = 1 as ::core::ffi::c_int;
 pub const LOG_COMPONENT: [::core::ffi::c_char; 12] =
     unsafe { ::core::mem::transmute::<[u8; 12], [::core::ffi::c_char; 12]>(*b"go2rtcProxy\0") };
 pub const MAX_CONCURRENT_PROXY_THREADS: ::core::ffi::c_int = 32 as ::core::ffi::c_int;
+pub const PROXY_MAX_RESPONSE_BYTES: size_t = (16 as ::core::ffi::c_int as size_t)
+    .wrapping_mul(1024 as size_t)
+    .wrapping_mul(1024 as size_t);
 static mut g_proxy_state: C2Rust_Unnamed_12 = C2Rust_Unnamed_12 {
     r#loop: ::core::ptr::null_mut::<uv_loop_t>(),
     async_handle: uv_async_t {
@@ -1419,8 +1424,28 @@ unsafe extern "C" fn proxy_write_cb(
     mut nmemb: size_t,
     mut userp: *mut ::core::ffi::c_void,
 ) -> size_t {
-    let mut total: size_t = size.wrapping_mul(nmemb);
     let mut ctx: *mut proxy_thread_ctx_t = userp as *mut proxy_thread_ctx_t;
+    if size != 0 && nmemb > (SIZE_MAX as size_t).wrapping_div(size) {
+        (*ctx).error = r#true != 0;
+        return 0 as size_t;
+    }
+    let mut total: size_t = size.wrapping_mul(nmemb);
+    if total == 0 {
+        return 0 as size_t;
+    }
+    if (*ctx).response_size > PROXY_MAX_RESPONSE_BYTES
+        || total > PROXY_MAX_RESPONSE_BYTES.wrapping_sub((*ctx).response_size)
+    {
+        _log_message_ctx(
+            log_level_t::LOG_LEVEL_WARN,
+            LOG_COMPONENT.as_ptr(),
+            _log_stream_name,
+            b"go2rtc proxy thread: upstream response exceeds buffer limit\0".as_ptr()
+                as *const ::core::ffi::c_char,
+        );
+        (*ctx).error = r#true != 0;
+        return 0 as size_t;
+    }
     let mut new_buf: *mut ::core::ffi::c_char = realloc(
         (*ctx).response_buffer as *mut ::core::ffi::c_void,
         (*ctx).response_size.wrapping_add(total),
@@ -1815,12 +1840,7 @@ unsafe extern "C" fn proxy_worker_thread(
                     curl_slist_free_all(headers);
                 }
                 curl_easy_cleanup(curl);
-                if cres.0 != CURLcode::CURLE_OK.0
-                    || (*ctx).error as ::core::ffi::c_int != 0
-                    || (*ctx).media_lease[0usize] as ::core::ffi::c_int != 0
-                        && (*ctx).http_code < 300 as ::core::ffi::c_long
-                        && !(*ctx).media_policy_ack
-                {
+                if cres.0 != CURLcode::CURLE_OK.0 {
                     _log_message_ctx(
                         log_level_t::LOG_LEVEL_WARN,
                         LOG_COMPONENT.as_ptr(),
@@ -1829,6 +1849,30 @@ unsafe extern "C" fn proxy_worker_thread(
                             as *const ::core::ffi::c_char,
                         curl_easy_strerror(cres),
                     );
+                    (*ctx).error = r#true != 0;
+                } else if (*ctx).error {
+                    _log_message_ctx(
+                        log_level_t::LOG_LEVEL_WARN,
+                        LOG_COMPONENT.as_ptr(),
+                        _log_stream_name,
+                        b"go2rtc proxy thread: response buffering failed\0".as_ptr()
+                            as *const ::core::ffi::c_char,
+                    );
+                } else if (*ctx).media_lease[0usize] as ::core::ffi::c_int != 0
+                    && (*ctx).http_code >= 200 as ::core::ffi::c_long
+                    && (*ctx).http_code < 300 as ::core::ffi::c_long
+                    && !(*ctx).media_policy_ack
+                {
+                    _log_message_ctx(
+                        log_level_t::LOG_LEVEL_WARN,
+                        LOG_COMPONENT.as_ptr(),
+                        _log_stream_name,
+                        b"%s (HTTP %ld)\0".as_ptr() as *const ::core::ffi::c_char,
+                        b"go2rtc did not acknowledge LightNVR media policy; use the compatible OpenSensor go2rtc fork\0"
+                            .as_ptr() as *const ::core::ffi::c_char,
+                        (*ctx).http_code,
+                    );
+                    (*ctx).incompatible_media_policy = r#true != 0;
                     (*ctx).error = r#true != 0;
                 } else if (*ctx).capture_hls_session as ::core::ffi::c_int != 0
                     && (*ctx).http_code == 200 as ::core::ffi::c_long
@@ -1883,8 +1927,12 @@ unsafe extern "C" fn proxy_async_cb(mut handle: *mut uv_async_t) {
                 http_response_set_json_error(
                     &raw mut (*conn).response,
                     502 as ::core::ffi::c_int,
-                    b"Proxy error: go2rtc is not responding\0".as_ptr()
-                        as *const ::core::ffi::c_char,
+                    if (*ctx).incompatible_media_policy as ::core::ffi::c_int != 0 {
+                        GO2RTC_MEDIA_POLICY_ERROR.as_ptr()
+                    } else {
+                        b"Proxy error: go2rtc is not responding\0".as_ptr()
+                            as *const ::core::ffi::c_char
+                    },
                 );
             } else {
                 (*conn).response.status_code = (*ctx).http_code as ::core::ffi::c_int;
@@ -2214,4 +2262,12 @@ pub const _log_stream_name: *const ::core::ffi::c_char = NULL as *const ::core::
 pub const NULL: *mut ::core::ffi::c_void = ::core::ptr::null_mut::<::core::ffi::c_void>();
 pub const r#true: ::core::ffi::c_int = 1 as ::core::ffi::c_int;
 pub const r#false: ::core::ffi::c_int = 0 as ::core::ffi::c_int;
+pub const GO2RTC_MEDIA_POLICY_ERROR: [::core::ffi::c_char; 92] = unsafe {
+    ::core::mem::transmute::<
+        [u8; 92],
+        [::core::ffi::c_char; 92],
+    >(
+        *b"go2rtc did not acknowledge LightNVR media policy; use the compatible OpenSensor go2rtc fork\0",
+    )
+};
 pub const __ATOMIC_SEQ_CST: ::core::ffi::c_int = 5 as ::core::ffi::c_int;

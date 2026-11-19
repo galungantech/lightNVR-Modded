@@ -91,7 +91,7 @@ set(GO2RTC_API_PORT 1984 CACHE STRING "Port for go2rtc HTTP API")
 
 # llhttp download configuration. Avoid the LLHTTP_VERSION name because
 # pkg_check_modules(LLHTTP ...) owns that variable when libllhttp is probed.
-set(LLHTTP_DOWNLOAD_REF "release/v9.4.3" CACHE STRING "llhttp tag/ref to download from GitHub")
+set(LLHTTP_DOWNLOAD_REF "release/v9.4.4" CACHE STRING "llhttp tag/ref to download from GitHub")
 
 # HTTPS in the built-in web server (mbedTLS, already required for ONVIF/auth)
 option(ENABLE_SSL "Build HTTPS/TLS support into the built-in web server (mbedTLS)" OFF)
@@ -370,10 +370,9 @@ if(ENABLE_LITERT)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/video/detection/litert_engine.cc"
     )
     # TFLite public headers (and the Abseil/FlatBuffers they pull in) require
-    # C++17, but the project default is C++14. Linking the tensorflow-lite
-    # target propagates cxx_std_17, yet make the requirement explicit on our
-    # own engine source so it compiles correctly regardless of propagation.
-    set_source_files_properties(${LITERT_ENGINE_SOURCES} PROPERTIES CXX_STANDARD 17)
+    # C++17, but the project default is C++14. Require C++17 on our library
+    # target explicitly when LiteRT is enabled so this does not depend solely
+    # on transitive propagation from tensorflow-lite.
     message(STATUS "LiteRT engine enabled (XNNPACK=${LITERT_WITH_XNNPACK}, GPU=${LITERT_WITH_GPU})")
 else()
     message(STATUS "LiteRT engine disabled (set -DENABLE_LITERT=ON to enable)")
@@ -403,15 +402,15 @@ if(NOT LLHTTP_FOUND)
     # LLHTTP_REQUIRED_FILES.  Update both together when bumping llhttp.
     # If LLHTTP_DOWNLOAD_REF is overridden to a different ref, the hashes
     # cannot be known here, so downloads proceed unverified with a warning.
-    set(LLHTTP_PINNED_REF "release/v9.4.3")
+    set(LLHTTP_PINNED_REF "release/v9.4.4")
     set(LLHTTP_DOWNLOAD_REF_TYPE "tag" CACHE STRING "Type of LLHTTP_DOWNLOAD_REF: tag, branch, or commit")
     set_property(CACHE LLHTTP_DOWNLOAD_REF_TYPE PROPERTY STRINGS tag branch commit)
     string(TOLOWER "${LLHTTP_DOWNLOAD_REF_TYPE}" LLHTTP_DOWNLOAD_REF_TYPE)
     set(LLHTTP_REQUIRED_HASHES
-        "391e7c99912abf3b1c9dd8a9c85fdeaac2663e9fa55b6f3871154d16fef8b892"
+        "f3ef756529b7444630717fa5540d4a1c9a1256874bda823c49c5a99c37f89429"
         "0f8590206fe2f264db2825401b5fb856b979ee1363dc88b06f36dc9577afb941"
         "a1f2b23168f8e9b5bfa464c89027d3ca259fc649ae3d7e72bfff997d1aeb5d72"
-        "5bc82fa51b19aa8bee7d921038393fbfc74e8cc9bae0844c2d82c102fb8cfd68"
+        "52a7011f979b31f761403c1a333bf7fc26dc70f5745d8488eed1609c92097100"
     )
     if(LLHTTP_DOWNLOAD_REF_TYPE STREQUAL "tag" AND
        LLHTTP_DOWNLOAD_REF STREQUAL LLHTTP_PINNED_REF)
@@ -533,7 +532,8 @@ add_library(inih_lib STATIC ${INIH_SOURCES})
 target_include_directories(inih_lib INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/external/inih")
 
 # Set up vendored FAAC library (libfaac encoder only, HE-AAC v1/SBR, no PS).
-# Mirrors upstream meson: encoder-sbr=true, encoder-ps=false, max-channels=8.
+# Mirrors upstream meson: encoder-sbr=true, encoder-ps=false,
+# encoder-drc=true, max-channels=8.
 set(FAAC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/faac")
 set(FAAC_SOURCES
     "${FAAC_DIR}/common/fft.c"
@@ -543,6 +543,8 @@ set(FAAC_SOURCES
     "${FAAC_DIR}/libfaac/blockswitch.c"
     "${FAAC_DIR}/libfaac/channels.c"
     "${FAAC_DIR}/libfaac/cpu_compute.c"
+    "${FAAC_DIR}/libfaac/drc.c"
+    "${FAAC_DIR}/libfaac/drc_analyzer.c"
     "${FAAC_DIR}/libfaac/faac.c"
     "${FAAC_DIR}/libfaac/filtbank.c"
     "${FAAC_DIR}/libfaac/frame.c"
@@ -566,6 +568,7 @@ set(FAAC_DEFINITIONS
     FAAC_SBR_DECIMATION=1
     FAAC_ENCODER_SBR=1
     FAAC_ENCODER_PS=0
+    FAAC_ENCODER_DRC=1
     COMMON_PREFIX=faac_
 )
 include(CheckIncludeFile)
@@ -675,7 +678,7 @@ message(STATUS "Excluding main.c and tools from ROOT_SOURCES")
 
 # Collect video sources from src/video, then exclude motion_detection_optimized.c,
 # detection_thread_pool.c, and the original hls_writer_thread.c (since we're using our split version).
-file(GLOB VIDEO_SOURCES "src/video/*.c")
+file(GLOB VIDEO_SOURCES CONFIGURE_DEPENDS "src/video/*.c")
 
 list(FILTER VIDEO_SOURCES EXCLUDE REGEX ".*motion_detection_optimized\\.c$")
 list(FILTER VIDEO_SOURCES EXCLUDE REGEX ".*detection_thread_pool\\.c$")
@@ -686,9 +689,9 @@ file(GLOB HLS_SOURCES CONFIGURE_DEPENDS "src/video/hls/*.c")
 # hls_unified_thread.c is added explicitly via HLS_UNIFIED_THREAD_SOURCES below.
 # Exclude it here to avoid duplicate source listing.
 list(FILTER HLS_SOURCES EXCLUDE REGEX ".*hls_unified_thread\\.c$")
-file(GLOB TELEMETRY_SOURCES "src/telemetry/*.c")
-file(GLOB HEALTH_COLLECTOR_SOURCES "src/telemetry/collectors/*.c")
-file(GLOB HEALTH_PROVIDER_SOURCES "src/telemetry/providers/*.c")
+file(GLOB TELEMETRY_SOURCES CONFIGURE_DEPENDS "src/telemetry/*.c")
+file(GLOB HEALTH_COLLECTOR_SOURCES CONFIGURE_DEPENDS "src/telemetry/collectors/*.c")
+file(GLOB HEALTH_PROVIDER_SOURCES CONFIGURE_DEPENDS "src/telemetry/providers/*.c")
 
 # Add unified HLS thread sources explicitly to ensure they're included
 set(HLS_UNIFIED_THREAD_SOURCES
@@ -735,6 +738,9 @@ list(APPEND SOURCES ${LIBUV_SERVER_SOURCES})
 
 # Define the shared library
 add_library(lightnvr_lib STATIC ${SOURCES})
+if(ENABLE_LITERT)
+    target_compile_features(lightnvr_lib PRIVATE cxx_std_17)
+endif()
 target_include_directories(lightnvr_lib PUBLIC ${LIGHTNVR_INCLUDE_DIRS})
 target_include_directories(lightnvr_lib PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/external/inih"
@@ -772,7 +778,7 @@ if(ENABLE_SENTRY)
     set(SENTRY_BUILD_TESTS OFF CACHE BOOL "No SDK tests" FORCE)
     FetchContent_Declare(sentry_native
         GIT_REPOSITORY https://github.com/getsentry/sentry-native.git
-        GIT_TAG af9e9367913edf07f54e4f2f9655ce96af0c1681 # 0.17.5
+        GIT_TAG 7afc37457d7fcc37fb0bace9c8045d3fa687717f # 0.17.6
         GIT_SUBMODULES "")
     if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.14")
         FetchContent_MakeAvailable(sentry_native)
