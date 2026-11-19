@@ -29,9 +29,24 @@ import {
   validatePtzPresets
 } from '../../generated/api/validators.js';
 
+export interface PtzDefaultPresetResponse {
+  success?: boolean;
+  token?: string;
+}
+
+const validatePtzDefaultPresetResponse: ContractValidator<unknown> = (value: unknown): value is PtzDefaultPresetResponse =>
+  typeof value === 'object' && value !== null && !Array.isArray(value) &&
+  ('token' in value ? typeof (value as PtzDefaultPresetResponse).token === 'string' : true);
+
+const validatePtzDefaultPresetRequest: ContractValidator<unknown> = (value: unknown): value is { token: string } =>
+  typeof value === 'object' && value !== null && !Array.isArray(value) &&
+  typeof (value as { token?: unknown }).token === 'string';
+
 export interface DeviceResults {
   getPtzCapabilities: components['schemas']['PtzCapabilities'];
   getPtzPresets: components['schemas']['PtzPresets'];
+  getPtzDefaultPreset: PtzDefaultPresetResponse;
+  setPtzDefaultPreset: components['schemas']['DeviceCommandResult'];
   movePtz: components['schemas']['DeviceCommandResult'];
   absolutePtz: components['schemas']['DeviceCommandResult'];
   relativePtz: components['schemas']['DeviceCommandResult'];
@@ -69,6 +84,8 @@ interface Route {
 const routes: Record<DeviceOperation, Route> = {
   getPtzCapabilities: { path: "/api/streams/{name}/ptz/capabilities", method: 'GET', response: 'PtzCapabilities', guard: validatePtzCapabilities },
   getPtzPresets: { path: "/api/streams/{name}/ptz/presets", method: 'GET', response: 'PtzPresets', guard: validatePtzPresets },
+  getPtzDefaultPreset: { path: "/api/streams/{name}/ptz/default-preset", method: 'GET', response: 'PtzDefaultPresetResponse', guard: validatePtzDefaultPresetResponse },
+  setPtzDefaultPreset: { path: "/api/streams/{name}/ptz/default-preset", method: 'POST', response: 'DeviceCommandResult', guard: validateDeviceCommandResult, request: 'PtzDefaultPresetRequest', requestGuard: validatePtzDefaultPresetRequest },
   movePtz: { path: "/api/streams/{name}/ptz/move", method: 'POST', response: 'DeviceCommandResult', guard: validateDeviceCommandResult, request: 'PtzAxesRequest', requestGuard: validatePtzAxesRequest },
   absolutePtz: { path: "/api/streams/{name}/ptz/absolute", method: 'POST', response: 'DeviceCommandResult', guard: validateDeviceCommandResult, request: 'PtzAxesRequest', requestGuard: validatePtzAxesRequest },
   relativePtz: { path: "/api/streams/{name}/ptz/relative", method: 'POST', response: 'DeviceCommandResult', guard: validateDeviceCommandResult, request: 'PtzAxesRequest', requestGuard: validatePtzAxesRequest },

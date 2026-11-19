@@ -48,6 +48,16 @@ int update_stream_config(const char *name, const stream_config_t *stream);
 int set_stream_privacy_mode(const char *name, bool privacy_mode);
 
 /**
+ * Set or clear a stream's default startup PTZ preset token (preserved by
+ * update_stream_config()). Pass an empty string "" to clear.
+ *
+ * @param name Stream name to update
+ * @param preset_token Preset token string (or "" to clear)
+ * @return 0 on success, non-zero on failure
+ */
+int update_stream_ptz_default_preset(const char *name, const char *preset_token);
+
+/**
  * Delete a stream configuration from the database (soft delete by disabling)
  *
  * @param name Stream name to delete

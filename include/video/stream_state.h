@@ -327,4 +327,14 @@ int set_stream_callbacks_enabled(stream_state_manager_t *state, bool enabled);
  */
 bool are_stream_callbacks_enabled(stream_state_manager_t *state);
 
+/**
+ * @brief Asynchronously move a PTZ-enabled stream to its configured default preset
+ *
+ * Spawns a lightweight detached worker that retries ONVIF GotoPreset with backoff
+ * so camera boot-up / calibration delays after power loss do not block stream startup.
+ *
+ * @param stream_name Name of the stream
+ */
+void trigger_ptz_default_preset(const char *stream_name);
+
 #endif // LIGHTNVR_STREAM_STATE_H

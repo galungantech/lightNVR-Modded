@@ -135,6 +135,7 @@ typedef struct {
     int ptz_max_y;                   // Maximum Y (tilt) position (0 = no limit)
     int ptz_max_z;                   // Maximum Z (zoom) position (0 = no limit)
     bool ptz_has_home;               // Whether the camera supports home position
+    char ptz_default_preset[64];     // Default preset token restored on LightNVR/camera restart
 
     // Recording schedule configuration
     bool record_on_schedule;         // When true, only record during scheduled hours
@@ -303,7 +304,7 @@ typedef struct {
     int auth_absolute_timeout_hours; // Absolute session lifetime in hours (default: 168)
     int trusted_device_days; // Remember-device lifetime in days (default: 30, 0 disables)
     char trusted_proxy_cidrs[WEB_TRUSTED_PROXY_CIDRS_MAX]; // Trusted reverse-proxy CIDRs for X-Forwarded-For handling
-    bool demo_mode;         // Demo mode: allows unauthenticated viewer access while still allowing login
+    bool demo_mode;          // Demo mode: allows unauthenticated viewer access while still allowing login
 
     // Security settings
     bool force_mfa_on_login;          // When true, TOTP code is required alongside password (single-step MFA)

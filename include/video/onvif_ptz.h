@@ -44,6 +44,18 @@ typedef struct {
 } onvif_ptz_capabilities_t;
 
 /**
+ * PTZ current status (from ONVIF GetStatus)
+ */
+typedef struct {
+    bool valid;
+    bool has_position;
+    bool is_moving;      // true if PanTilt or Zoom MoveStatus is "MOVING"
+    float pan;           // Current pan position (-1.0 to 1.0)
+    float tilt;          // Current tilt position (-1.0 to 1.0)
+    float zoom;          // Current zoom position (0.0 to 1.0)
+} onvif_ptz_status_t;
+
+/**
  * Get PTZ service URL from device
  * 
  * @param device_url Device service URL
@@ -54,7 +66,7 @@ typedef struct {
  * @return 0 on success, non-zero on failure
  */
 int onvif_ptz_get_service_url(const char *device_url, const char *username,
-                              const char *password, char *ptz_url, size_t url_size);
+                            const char *password, char *ptz_url, size_t url_size);
 
 /**
  * Get PTZ capabilities for a profile
@@ -69,6 +81,20 @@ int onvif_ptz_get_service_url(const char *device_url, const char *username,
 int onvif_ptz_get_capabilities(const char *ptz_url, const char *profile_token,
                                const char *username, const char *password,
                                onvif_ptz_capabilities_t *capabilities);
+
+/**
+ * Get current PTZ status (position and movement state)
+ * 
+ * @param ptz_url PTZ service URL
+ * @param profile_token Profile token
+ * @param username Username for authentication (can be NULL)
+ * @param password Password for authentication (can be NULL)
+ * @param status Buffer to fill with status info
+ * @return 0 on success, non-zero on failure
+ */
+int onvif_ptz_get_status(const char *ptz_url, const char *profile_token,
+                       const char *username, const char *password,
+                       onvif_ptz_status_t *status);
 
 /**
  * Continuous move (pan/tilt/zoom at specified velocity)
@@ -114,16 +140,16 @@ int onvif_ptz_stop(const char *ptz_url, const char *profile_token,
  * @return 0 on success, non-zero on failure
  */
 int onvif_ptz_absolute_move(const char *ptz_url, const char *profile_token,
-                            const char *username, const char *password,
-                            float pan, float tilt, float zoom);
+                          const char *username, const char *password,
+                          float pan, float tilt, float zoom);
 
 /**
  * Absolute move with explicit axis selection.
  */
 int onvif_ptz_absolute_move_axes(const char *ptz_url, const char *profile_token,
-                                 const char *username, const char *password,
-                                 bool has_pan_tilt, float pan, float tilt,
-                                 bool has_zoom, float zoom);
+                               const char *username, const char *password,
+                               bool has_pan_tilt, float pan, float tilt,
+                               bool has_zoom, float zoom);
 
 /**
  * Relative move by specified amount
@@ -138,16 +164,16 @@ int onvif_ptz_absolute_move_axes(const char *ptz_url, const char *profile_token,
  * @return 0 on success, non-zero on failure
  */
 int onvif_ptz_relative_move(const char *ptz_url, const char *profile_token,
-                            const char *username, const char *password,
-                            float pan_delta, float tilt_delta, float zoom_delta);
+                          const char *username, const char *password,
+                          float pan_delta, float tilt_delta, float zoom_delta);
 
 /**
  * Relative move with explicit axis selection.
  */
 int onvif_ptz_relative_move_axes(const char *ptz_url, const char *profile_token,
-                                 const char *username, const char *password,
-                                 bool has_pan_tilt, float pan_delta, float tilt_delta,
-                                 bool has_zoom, float zoom_delta);
+                               const char *username, const char *password,
+                               bool has_pan_tilt, float pan_delta, float tilt_delta,
+                               bool has_zoom, float zoom_delta);
 
 /**
  * Go to home position
@@ -177,8 +203,8 @@ int onvif_ptz_set_home(const char *ptz_url, const char *profile_token,
  * Get PTZ presets
  */
 int onvif_ptz_get_presets(const char *ptz_url, const char *profile_token,
-                          const char *username, const char *password,
-                          onvif_ptz_preset_t *presets, int max_presets);
+                        const char *username, const char *password,
+                        onvif_ptz_preset_t *presets, int max_presets);
 
 /**
  * Go to preset
@@ -198,7 +224,14 @@ int onvif_ptz_set_preset(const char *ptz_url, const char *profile_token,
  * Preset remove
  */
 int onvif_ptz_remove_preset(const char *ptz_url, const char *profile_token,
-                           const char *username, const char *password,
-                           const char *preset_token);
+                            const char *username, const char *password,
+                            const char *preset_token);
+
+/**
+ * Asynchronously move a stream's PTZ camera to its configured ptz_default_preset.
+ * Spawns a deduplicated background worker that waits until the camera finishes
+ * booting and motor calibration (via ONVIF GetStatus) before moving to preset.
+ */
+void onvif_ptz_apply_default_preset_async(const char *stream_name);
 
 #endif /* ONVIF_PTZ_H */
