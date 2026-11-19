@@ -29,8 +29,6 @@ import {
   validatePtzPresets
 } from '../../generated/api/validators.js';
 
-<<<<<<< upstream
-=======
 export interface PtzDefaultPresetResponse {
   success?: boolean;
   token?: string;
@@ -44,7 +42,6 @@ const validatePtzDefaultPresetRequest: ContractValidator<unknown> = (value: unkn
   typeof value === 'object' && value !== null && !Array.isArray(value) &&
   typeof (value as { token?: unknown }).token === 'string';
 
->>>>>>> main
 export interface DeviceResults {
   getPtzCapabilities: components['schemas']['PtzCapabilities'];
   getPtzPresets: components['schemas']['PtzPresets'];
