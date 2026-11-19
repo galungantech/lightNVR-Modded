@@ -16,6 +16,8 @@
 #include "video/stream_state.h"
 #include "core/logger.h"
 #include "core/config.h"
+#include "core/url_utils.h"
+#include "database/db_streams.h"
 #include "utils/strings.h"
 #include "video/stream_reader.h"
 #include "video/hls_streaming.h"
@@ -23,6 +25,7 @@
 #include "video/detection.h"
 #include "video/stream_transcoding.h"
 #include "video/streams.h"
+#include "video/onvif_ptz.h"
 #ifdef USE_GO2RTC
 #include "video/go2rtc/go2rtc_integration.h"
 #endif
@@ -44,6 +47,42 @@ static bool initialized = false;
  * releasing the lock for stop callbacks that need to look up their state. */
 static bool states_shutting_down = false;
 
+// Deduplication guard so concurrent triggers for the same stream don't spawn duplicate workers
+static pthread_mutex_t ptz_worker_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char active_ptz_streams[MAX_STREAMS][MAX_STREAM_NAME];
+
+static bool try_acquire_ptz_worker_slot(const char *stream_name) {
+    pthread_mutex_lock(&ptz_worker_mutex);
+    for (int i = 0; i < MAX_STREAMS; i++) {
+        if (active_ptz_streams[i][0] != '\0' &&
+            strcmp(active_ptz_streams[i], stream_name) == 0) {
+            pthread_mutex_unlock(&ptz_worker_mutex);
+            return false; // Already running for this stream
+        }
+    }
+    for (int i = 0; i < MAX_STREAMS; i++) {
+        if (active_ptz_streams[i][0] == '\0') {
+            safe_strcpy(active_ptz_streams[i], stream_name, MAX_STREAM_NAME, 0);
+            pthread_mutex_unlock(&ptz_worker_mutex);
+            return true;
+        }
+    }
+    pthread_mutex_unlock(&ptz_worker_mutex);
+    return false;
+}
+
+static void release_ptz_worker_slot(const char *stream_name) {
+    pthread_mutex_lock(&ptz_worker_mutex);
+    for (int i = 0; i < MAX_STREAMS; i++) {
+        if (active_ptz_streams[i][0] != '\0' &&
+            strcmp(active_ptz_streams[i], stream_name) == 0) {
+            active_ptz_streams[i][0] = '\0';
+            break;
+        }
+    }
+    pthread_mutex_unlock(&ptz_worker_mutex);
+}
+
 /* Final disposal only: both mutexes were initialized, registry ownership is
  * exclusive, and producers/callbacks have already quiesced. This does not
  * change the lifetime contract of pointers borrowed from registry lookups. */
@@ -57,7 +96,7 @@ static void dispose_stream_state(stream_state_manager_t *state) {
  * Initialize the stream state management system
  */
 int init_stream_state_manager(int max_streams) {
-    if (max_streams < 1)           max_streams = 1;
+    if (max_streams < 1)            max_streams = 1;
     if (max_streams > MAX_STREAMS) max_streams = MAX_STREAMS;
 
     pthread_mutex_lock(&states_mutex);
@@ -525,6 +564,184 @@ int set_stream_feature(stream_state_manager_t *state, const char *feature, bool 
     return 0;
 }
 
+typedef struct {
+    char stream_name[MAX_STREAM_NAME];
+} ptz_default_preset_task_t;
+
+static void *ptz_default_preset_worker(void *arg) {
+    ptz_default_preset_task_t *task = (ptz_default_preset_task_t *)arg;
+    if (!task) {
+        return NULL;
+    }
+
+    char stream_name[MAX_STREAM_NAME];
+    safe_strcpy(stream_name, task->stream_name, sizeof(stream_name), 0);
+    free(task);
+
+    log_set_thread_context("PTZDefault", stream_name);
+    log_info("PTZ default preset worker started for '%s'", stream_name);
+
+    stream_config_t config;
+    if (get_stream_config_by_name(stream_name, &config) != 0 ||
+        !config.enabled || !config.ptz_enabled || config.ptz_default_preset[0] == '\0') {
+        release_ptz_worker_slot(stream_name);
+        return NULL;
+    }
+
+    char device_url[MAX_URL_LENGTH];
+    if (url_build_onvif_service_url(config.url, config.onvif_port,
+                                    "/onvif/device_service",
+                                    device_url, sizeof(device_url)) != 0) {
+        log_warn("Default PTZ preset: failed to build device URL for '%s'", stream_name);
+        release_ptz_worker_slot(stream_name);
+        return NULL;
+    }
+
+    char ptz_url[512] = {0};
+    bool ptz_ready = false;
+    bool status_supported = false;
+    int idle_streak = 0;
+    int unsupported_probes = 0;
+
+    // Fase 1: Tunggu hingga kamera online & motor IDLE (tanpa batas waktu mati/timeout kaku)
+    while (!states_shutting_down && initialized) {
+        if (get_stream_config_by_name(stream_name, &config) != 0 ||
+            !config.enabled || !config.ptz_enabled || config.ptz_default_preset[0] == '\0') {
+            release_ptz_worker_slot(stream_name);
+            return NULL;
+        }
+
+        const char *profile_token = (config.onvif_profile[0] != '\0') ? config.onvif_profile : "Profile_1";
+
+        if (ptz_url[0] == '\0') {
+            if (onvif_ptz_get_service_url(device_url, config.onvif_username,
+                                          config.onvif_password, ptz_url, sizeof(ptz_url)) != 0) {
+                sleep(2);
+                continue;
+            }
+        }
+
+        onvif_ptz_status_t st;
+        if (onvif_ptz_get_status(ptz_url, profile_token,
+                                 config.onvif_username, config.onvif_password, &st) == 0 && st.valid) {
+            status_supported = true;
+            if (!st.is_moving) {
+                idle_streak++;
+                if (idle_streak >= 2) {
+                    ptz_ready = true;
+                    break;
+                }
+            } else {
+                idle_streak = 0;
+            }
+        } else {
+            onvif_ptz_preset_t probe_preset;
+            if (onvif_ptz_get_presets(ptz_url, profile_token,
+                                     config.onvif_username, config.onvif_password,
+                                     &probe_preset, 1) >= 0) {
+                unsupported_probes++;
+                if (unsupported_probes >= 2) {
+                    ptz_ready = true;
+                    break;
+                }
+            } else {
+                ptz_url[0] = '\0';
+                unsupported_probes = 0;
+            }
+        }
+
+        sleep(2);
+    }
+
+    if (!ptz_ready || states_shutting_down || !initialized) {
+        release_ptz_worker_slot(stream_name);
+        return NULL;
+    }
+
+    // Fase 2: Eksekusi GotoPreset dan verifikasi kestabilan posisi motor
+    const char *profile_token = (config.onvif_profile[0] != '\0') ? config.onvif_profile : "Profile_1";
+    for (int attempt = 1; attempt <= 3 && !states_shutting_down; attempt++) {
+        if (onvif_ptz_goto_preset(ptz_url, profile_token,
+                                  config.onvif_username, config.onvif_password,
+                                  config.ptz_default_preset) != 0) {
+            sleep(2);
+            continue;
+        }
+
+        if (!status_supported) {
+            sleep(2);
+            log_info("Applied default PTZ preset '%s' for stream '%s' (fallback mode)",
+                     config.ptz_default_preset, stream_name);
+            break;
+        }
+
+        // Tunggu hingga motor selesai bergerak (IDLE 2x beruntun)
+        int check_idle = 0;
+        while (!states_shutting_down) {
+            sleep(2);
+            onvif_ptz_status_t cur = {0};
+            if (onvif_ptz_get_status(ptz_url, profile_token,
+                                     config.onvif_username, config.onvif_password, &cur) != 0 || !cur.valid) {
+                break;
+            }
+            if (!cur.is_moving) {
+                check_idle++;
+                if (check_idle >= 2) {
+                    log_info("Applied and verified default PTZ preset '%s' for stream '%s'",
+                             config.ptz_default_preset, stream_name);
+                    release_ptz_worker_slot(stream_name);
+                    return NULL;
+                }
+            } else {
+                check_idle = 0;
+            }
+        }
+    }
+
+    release_ptz_worker_slot(stream_name);
+    return NULL;
+}
+
+void trigger_ptz_default_preset(const char *stream_name) {
+    if (!stream_name || stream_name[0] == '\0' || states_shutting_down) {
+        return;
+    }
+
+    stream_config_t config;
+    if (get_stream_config_by_name(stream_name, &config) != 0) {
+        return;
+    }
+
+    if (!config.enabled || !config.ptz_enabled || config.ptz_default_preset[0] == '\0') {
+        return;
+    }
+
+    if (!try_acquire_ptz_worker_slot(stream_name)) {
+        log_debug("PTZ default preset worker already active for '%s', skipping duplicate trigger", stream_name);
+        return;
+    }
+
+    ptz_default_preset_task_t *task = calloc(1, sizeof(ptz_default_preset_task_t));
+    if (!task) {
+        log_warn("Failed to allocate PTZ default preset task for '%s'", stream_name);
+        release_ptz_worker_slot(stream_name);
+        return;
+    }
+    safe_strcpy(task->stream_name, stream_name, sizeof(task->stream_name), 0);
+
+    pthread_t tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
+    if (pthread_create(&tid, &attr, ptz_default_preset_worker, task) != 0) {
+        log_warn("Failed to spawn PTZ default preset thread for '%s'", stream_name);
+        release_ptz_worker_slot(stream_name);
+        free(task);
+    }
+
+    pthread_attr_destroy(&attr);
+}
 
 /**
  * Start stream with state
@@ -617,6 +834,10 @@ int start_stream_with_state(stream_state_manager_t *state) {
         return -1;
     }
     pthread_mutex_unlock(&state->mutex);
+
+    if (any_component_started) {
+        trigger_ptz_default_preset(state->name);
+    }
 
     return 0;
 }

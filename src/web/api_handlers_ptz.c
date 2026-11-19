@@ -34,17 +34,17 @@ static int get_ptz_stream_config(const char *stream_name, stream_config_t *confi
     if (!stream_name || !config) {
         return -1;
     }
-    
+
     if (get_stream_config_by_name(stream_name, config) != 0) {
         log_error("Stream not found: %s", stream_name);
         return -1;
     }
-    
+
     if (!config->ptz_enabled) {
         log_error("PTZ not enabled for stream: %s", stream_name);
         return -2;
     }
-    
+
     return 0;
 }
 
@@ -139,6 +139,8 @@ static bool valid_ptz_body(const cJSON *body, const char *action) {
     static const char *name[] = {"name"};
     if (!strcmp(action, "goto-preset"))
         return device_keys(body, token, 1) && device_string(cJSON_GetObjectItemCaseSensitive(body, "token"), 63, false);
+    if (!strcmp(action, "default-preset"))
+        return device_keys(body, token, 1) && device_string(cJSON_GetObjectItemCaseSensitive(body, "token"), 63, true);
     if (!strcmp(action, "preset")) {
         const cJSON *field = cJSON_GetObjectItemCaseSensitive(body, "name");
         return device_keys(body, name, 1) && (!field || device_string(field, 63, true));
@@ -187,18 +189,18 @@ void handle_ptz_move(const http_request_t *req, http_response_t *res) {
         http_response_set_json_error(res, 400, "Invalid JSON body");
         return;
     }
-    
+
     float pan = 0.0f, tilt = 0.0f, zoom = 0.0f;
     cJSON *pan_json = cJSON_GetObjectItem(body, "pan");
     cJSON *tilt_json = cJSON_GetObjectItem(body, "tilt");
     cJSON *zoom_json = cJSON_GetObjectItem(body, "zoom");
-    
+
     if (pan_json && cJSON_IsNumber(pan_json)) pan = (float)pan_json->valuedouble;
     if (tilt_json && cJSON_IsNumber(tilt_json)) tilt = (float)tilt_json->valuedouble;
     if (zoom_json && cJSON_IsNumber(zoom_json)) zoom = (float)zoom_json->valuedouble;
-    
+
     cJSON_Delete(body);
-    
+
     // Build PTZ URL and execute move
     char ptz_url[512];
     if (build_ptz_url(&config, ptz_url, sizeof(ptz_url)) != 0) {
@@ -207,12 +209,12 @@ void handle_ptz_move(const http_request_t *req, http_response_t *res) {
         http_response_set_json_error(res, 500, "Failed to build PTZ URL");
         return;
     }
-    
+
     const char *profile_token = get_profile_token(&config);
-    rc = onvif_ptz_continuous_move(ptz_url, profile_token, 
+    rc = onvif_ptz_continuous_move(ptz_url, profile_token,
                                    config.onvif_username, config.onvif_password,
                                    pan, tilt, zoom);
-    
+
     if (rc != 0) {
         audit_ptz_operation(req, &auth, "continuous_move", "failure",
                             "device_operation_failed");
@@ -222,7 +224,7 @@ void handle_ptz_move(const http_request_t *req, http_response_t *res) {
 
     audit_ptz_operation(req, &auth, "continuous_move", "success",
                         "completed");
-    
+
     cJSON *response = cJSON_CreateObject();
     cJSON_AddBoolToObject(response, "success", true);
     cJSON_AddStringToObject(response, "message", "PTZ move started");
@@ -692,6 +694,111 @@ void handle_ptz_get_presets(const http_request_t *req, http_response_t *res) {
     free(json_str);
 }
 
+void handle_ptz_get_default_preset(const http_request_t *req, http_response_t *res) {
+    char stream_name[MAX_STREAM_NAME];
+    if (extract_ptz_stream_name(req, stream_name, sizeof(stream_name)) != 0) {
+        http_response_set_json_error(res, 400, "Invalid stream name");
+        return;
+    }
+
+    log_info("Handling GET /api/streams/%s/ptz/default-preset", stream_name);
+
+    stream_config_t config;
+    int rc = get_ptz_stream_config(stream_name, &config);
+    if (rc == -1) {
+        http_response_set_json_error(res, 404, "Stream not found");
+        return;
+    } else if (rc == -2) {
+        http_response_set_json_error(res, 400, "PTZ not enabled for this stream");
+        return;
+    }
+
+    ptz_authorization_context_t auth;
+    if (!authorize_ptz_stream(req, res, stream_name, AUTHZ_LIVE_VIEW, &auth)) {
+        return;
+    }
+
+    cJSON *response = cJSON_CreateObject();
+    cJSON_AddStringToObject(response, "token", config.ptz_default_preset);
+
+    char *json_str = cJSON_PrintUnformatted(response);
+    cJSON_Delete(response);
+
+    http_response_set_json(res, 200, json_str);
+    free(json_str);
+}
+
+void handle_ptz_set_default_preset(const http_request_t *req, http_response_t *res) {
+    char stream_name[MAX_STREAM_NAME];
+    if (extract_ptz_stream_name(req, stream_name, sizeof(stream_name)) != 0) {
+        http_response_set_json_error(res, 400, "Invalid stream name");
+        return;
+    }
+
+    log_info("Handling POST /api/streams/%s/ptz/default-preset", stream_name);
+
+    ptz_authorization_context_t auth;
+    if (!authorize_ptz_stream(req, res, stream_name, AUTHZ_PTZ_CONTROL, &auth)) {
+        return;
+    }
+
+    stream_config_t config;
+    int rc = get_ptz_stream_config(stream_name, &config);
+    if (rc == -1) {
+        audit_ptz_operation(req, &auth, "set_default_preset", "error",
+                            "stream_configuration_unavailable");
+        http_response_set_json_error(res, 404, "Stream not found");
+        return;
+    } else if (rc == -2) {
+        audit_ptz_operation(req, &auth, "set_default_preset", "failure",
+                            "ptz_disabled");
+        http_response_set_json_error(res, 400, "PTZ not enabled for this stream");
+        return;
+    }
+
+    cJSON *body = device_json_body(req);
+    if (!valid_ptz_body(body, "default-preset")) {
+        cJSON_Delete(body);
+        audit_ptz_operation(req, &auth, "set_default_preset", "failure",
+                            "invalid_request");
+        http_response_set_json_error(res, 400, "Invalid JSON body");
+        return;
+    }
+
+    cJSON *token_json = cJSON_GetObjectItem(body, "token");
+    if (!token_json || !cJSON_IsString(token_json)) {
+        cJSON_Delete(body);
+        audit_ptz_operation(req, &auth, "set_default_preset", "failure",
+                            "missing_preset_token");
+        http_response_set_json_error(res, 400, "Missing preset token");
+        return;
+    }
+
+    char preset_token[64];
+    safe_strcpy(preset_token, token_json->valuestring, sizeof(preset_token), 0);
+    cJSON_Delete(body);
+
+    if (update_stream_ptz_default_preset(stream_name, preset_token) != 0) {
+        audit_ptz_operation(req, &auth, "set_default_preset", "error",
+                            "database_update_failed");
+        http_response_set_json_error(res, 500, "Failed to save default PTZ preset");
+        return;
+    }
+
+    audit_ptz_operation(req, &auth, "set_default_preset", "success", "completed");
+
+    cJSON *response = cJSON_CreateObject();
+    cJSON_AddBoolToObject(response, "success", true);
+    cJSON_AddStringToObject(response, "message",
+                            preset_token[0] != '\0' ? "Default PTZ preset saved" : "Default PTZ preset cleared");
+
+    char *json_str = cJSON_PrintUnformatted(response);
+    cJSON_Delete(response);
+
+    http_response_set_json(res, 200, json_str);
+    free(json_str);
+}
+
 void handle_ptz_goto_preset(const http_request_t *req, http_response_t *res) {
     char stream_name[MAX_STREAM_NAME];
     if (extract_ptz_stream_name(req, stream_name, sizeof(stream_name)) != 0) {
@@ -699,7 +806,7 @@ void handle_ptz_goto_preset(const http_request_t *req, http_response_t *res) {
         return;
     }
 
-    log_info("Handling POST /api/streams/%s/ptz/preset", stream_name);
+    log_info("Handling POST /api/streams/%s/ptz/goto-preset", stream_name);
 
     ptz_authorization_context_t auth;
     if (!authorize_ptz_stream(req, res, stream_name, AUTHZ_PTZ_CONTROL,
@@ -969,8 +1076,7 @@ void handle_ptz_remove_preset(const http_request_t *req, http_response_t *res) {
     }
 
     cJSON *token_json = cJSON_GetObjectItem(body, "token");
-    if (!token_json || !cJSON_IsString(token_json) || !token_json->valuestring ||
-        token_json->valuestring[0] == '\0' || strlen(token_json->valuestring) >= 64) {
+    if (!token_json || !cJSON_IsString(token_json)) {
         cJSON_Delete(body);
         audit_ptz_operation(req, &auth, "remove_preset", "failure", "missing_preset_token");
         http_response_set_json_error(res, 400, "Missing preset token");
@@ -995,6 +1101,15 @@ void handle_ptz_remove_preset(const http_request_t *req, http_response_t *res) {
         audit_ptz_operation(req, &auth, "remove_preset", "failure", "device_operation_failed");
         http_response_set_json_error(res, 500, "PTZ remove preset failed");
         return;
+    }
+
+    // If the deleted preset was configured as the default startup preset, clear it
+    if (config.ptz_default_preset[0] != '\0' &&
+        strcmp(config.ptz_default_preset, preset_token) == 0) {
+        if (update_stream_ptz_default_preset(stream_name, "") != 0) {
+            log_warn("Preset %s removed on camera %s, but failed to clear default preset in DB",
+                     preset_token, stream_name);
+        }
     }
 
     audit_ptz_operation(req, &auth, "remove_preset", "success", "completed");
