@@ -158,6 +158,11 @@ unsafe extern "C" {
         __c: ::core::ffi::c_int,
         __n: size_t,
     ) -> *mut ::core::ffi::c_void;
+    unsafe fn memchr(
+        __s: *const ::core::ffi::c_void,
+        __c: ::core::ffi::c_int,
+        __n: size_t,
+    ) -> *mut ::core::ffi::c_void;
     unsafe fn strcmp(
         __s1: *const ::core::ffi::c_char,
         __s2: *const ::core::ffi::c_char,
@@ -173,10 +178,6 @@ unsafe extern "C" {
         __n: size_t,
     ) -> *mut ::core::ffi::c_char;
     unsafe fn strchr(
-        __s: *const ::core::ffi::c_char,
-        __c: ::core::ffi::c_int,
-    ) -> *mut ::core::ffi::c_char;
-    unsafe fn strrchr(
         __s: *const ::core::ffi::c_char,
         __c: ::core::ffi::c_int,
     ) -> *mut ::core::ffi::c_char;
@@ -200,6 +201,7 @@ unsafe extern "C" {
         __base: ::core::ffi::c_int,
     ) -> ::core::ffi::c_long;
     unsafe fn malloc(__size: size_t) -> *mut ::core::ffi::c_void;
+    unsafe fn calloc(__nmemb: size_t, __size: size_t) -> *mut ::core::ffi::c_void;
     unsafe fn realloc(__ptr: *mut ::core::ffi::c_void, __size: size_t) -> *mut ::core::ffi::c_void;
     unsafe fn free(__ptr: *mut ::core::ffi::c_void);
     unsafe fn getenv(__name: *const ::core::ffi::c_char) -> *mut ::core::ffi::c_char;
@@ -984,6 +986,7 @@ pub struct detection_result_t {
 pub struct onvif_subscription_t {
     pub camera_url: [::core::ffi::c_char; 512],
     pub subscription_address: [::core::ffi::c_char; 512],
+    pub service_url: [::core::ffi::c_char; 512],
     pub username: [::core::ffi::c_char; 64],
     pub password: [::core::ffi::c_char; 64],
     pub creation_time: time_t,
@@ -992,6 +995,7 @@ pub struct onvif_subscription_t {
     pub first_pull_failure_time: time_t,
     pub consecutive_pull_failures: ::core::ffi::c_int,
     pub active: bool,
+    pub reserved: bool,
     pub curl: *mut ::core::ffi::c_void,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1093,6 +1097,12 @@ pub struct lpr_read_input_t {
     pub bbox_bottom: ::core::ffi::c_float,
     pub recording_id: uint64_t,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct C2Rust_Unnamed_1(pub ::core::ffi::c_uint);
+impl C2Rust_Unnamed_1 {
+    pub const MAX_LPR_EVENTS_PER_PULL: Self = Self(100);
+}
 pub const CURLU_DEFAULT_PORT: ::core::ffi::c_int =
     (1 as ::core::ffi::c_int) << 0 as ::core::ffi::c_int;
 pub const PTHREAD_ONCE_INIT: ::core::ffi::c_int = 0 as ::core::ffi::c_int;
@@ -1126,6 +1136,37 @@ unsafe extern "C" fn onvif_operation_action(
     } else {
         ::core::ptr::null::<::core::ffi::c_char>()
     };
+}
+unsafe extern "C" fn has_uri_scheme_prefix(mut reference: *const ::core::ffi::c_char) -> bool {
+    if reference.is_null()
+        || *(*__ctype_b_loc()).offset(
+            *reference.offset(0isize) as ::core::ffi::c_uchar as ::core::ffi::c_int as isize
+        ) as ::core::ffi::c_int
+            & C2Rust_Unnamed::_ISalpha.0 as ::core::ffi::c_int as ::core::ffi::c_ushort
+                as ::core::ffi::c_int
+            == 0
+    {
+        return r#false != 0;
+    }
+    let mut i: size_t = 1 as size_t;
+    while *reference.offset(i as isize) as ::core::ffi::c_int != '\0' as ::core::ffi::c_int {
+        let mut ch: ::core::ffi::c_uchar = *reference.offset(i as isize) as ::core::ffi::c_uchar;
+        if ch as ::core::ffi::c_int == ':' as ::core::ffi::c_int {
+            return r#true != 0;
+        }
+        if !(*(*__ctype_b_loc()).offset(ch as ::core::ffi::c_int as isize) as ::core::ffi::c_int
+            & C2Rust_Unnamed::_ISalnum.0 as ::core::ffi::c_int as ::core::ffi::c_ushort
+                as ::core::ffi::c_int
+            != 0
+            || ch as ::core::ffi::c_int == '+' as ::core::ffi::c_int
+            || ch as ::core::ffi::c_int == '-' as ::core::ffi::c_int
+            || ch as ::core::ffi::c_int == '.' as ::core::ffi::c_int)
+        {
+            return r#false != 0;
+        }
+        i = i.wrapping_add(1);
+    }
+    return r#false != 0;
 }
 pub const ONVIF_SUBSCRIPTION_LEASE_SECONDS: ::core::ffi::c_int = 600 as ::core::ffi::c_int;
 pub const ONVIF_RENEW_NUMERATOR: ::core::ffi::c_int = 4 as ::core::ffi::c_int;
@@ -1168,6 +1209,7 @@ pub const MAX_SUBSCRIPTIONS: ::core::ffi::c_int = 100 as ::core::ffi::c_int;
 static mut subscriptions: [onvif_subscription_t; 100] = [onvif_subscription_t {
     camera_url: [0; 512],
     subscription_address: [0; 512],
+    service_url: [0; 512],
     username: [0; 64],
     password: [0; 64],
     creation_time: 0,
@@ -1176,6 +1218,7 @@ static mut subscriptions: [onvif_subscription_t; 100] = [onvif_subscription_t {
     first_pull_failure_time: 0,
     consecutive_pull_failures: 0,
     active: false,
+    reserved: false,
     curl: ::core::ptr::null_mut::<::core::ffi::c_void>(),
 }; 100];
 static mut subscription_count: ::core::ffi::c_int = 0 as ::core::ffi::c_int;
@@ -1195,6 +1238,56 @@ static mut subscription_mutex: pthread_mutex_t = pthread_mutex_t {
     },
 };
 static mut subscriptions_shutting_down: bool = r#false != 0;
+static mut camera_locks: [pthread_mutex_t; 64] = [pthread_mutex_t {
+    __data: __pthread_mutex_s {
+        __lock: 0,
+        __count: 0,
+        __owner: 0,
+        __nusers: 0,
+        __kind: 0,
+        __spins: 0,
+        __glibc_reserved: 0,
+        __list: __pthread_list_t {
+            __prev: ::core::ptr::null_mut::<__pthread_internal_list>(),
+            __next: ::core::ptr::null_mut::<__pthread_internal_list>(),
+        },
+    },
+}; 64];
+static mut camera_locks_once: pthread_once_t = PTHREAD_ONCE_INIT;
+unsafe extern "C" fn init_camera_locks() {
+    let mut i: size_t = 0 as size_t;
+    while i < ::core::mem::size_of::<[pthread_mutex_t; 64]>()
+        .wrapping_div(::core::mem::size_of::<pthread_mutex_t>())
+    {
+        pthread_mutex_init(
+            (&raw mut camera_locks as *mut pthread_mutex_t).offset(i as isize),
+            ::core::ptr::null::<pthread_mutexattr_t>(),
+        );
+        i = i.wrapping_add(1);
+    }
+}
+unsafe extern "C" fn camera_lock_for_url(
+    mut url: *const ::core::ffi::c_char,
+) -> *mut pthread_mutex_t {
+    let mut hash: ::core::ffi::c_ulong = 5381 as ::core::ffi::c_ulong;
+    let mut p: *const ::core::ffi::c_uchar = url as *const ::core::ffi::c_uchar;
+    while *p != 0 {
+        hash = hash
+            .wrapping_mul(33 as ::core::ffi::c_ulong)
+            .wrapping_add(*p as ::core::ffi::c_ulong);
+        p = p.offset(1);
+    }
+    pthread_once(
+        &raw mut camera_locks_once,
+        Some(init_camera_locks as unsafe extern "C" fn() -> ()),
+    );
+    return (&raw mut camera_locks as *mut pthread_mutex_t).offset(
+        (hash as usize).wrapping_rem(
+            ::core::mem::size_of::<[pthread_mutex_t; 64]>()
+                .wrapping_div(::core::mem::size_of::<pthread_mutex_t>()),
+        ) as isize,
+    );
+}
 static mut subscription_locks: [pthread_mutex_t; 100] = [pthread_mutex_t {
     __data: __pthread_mutex_s {
         __lock: 0,
@@ -2073,10 +2166,12 @@ unsafe extern "C" fn is_transport_drop(mut status: *const onvif_request_status_t
         || (*status).curl_code.0 == CURLcode::CURLE_RECV_ERROR.0
         || (*status).curl_code.0 == CURLcode::CURLE_SEND_ERROR.0;
 }
-unsafe extern "C" fn subscription_address_matches_camera_origin(
+unsafe extern "C" fn subscription_address_matches_camera_host(
     mut camera_url: *const ::core::ffi::c_char,
     mut subscription_address: *const ::core::ffi::c_char,
 ) -> bool {
+    let mut camera_end: *mut ::core::ffi::c_char = ::core::ptr::null_mut::<::core::ffi::c_char>();
+    let mut sub_end: *mut ::core::ffi::c_char = ::core::ptr::null_mut::<::core::ffi::c_char>();
     let mut camera_number: ::core::ffi::c_long = 0;
     let mut sub_number: ::core::ffi::c_long = 0;
     if !url_is_http_endpoint(camera_url) || !url_is_http_endpoint(subscription_address) {
@@ -2157,18 +2252,28 @@ unsafe extern "C" fn subscription_address_matches_camera_origin(
                                     )
                                     .0 == CURLUcode::CURLUE_OK.0
                                     {
+                                        camera_end = ::core::ptr::null_mut::<::core::ffi::c_char>();
+                                        sub_end = ::core::ptr::null_mut::<::core::ffi::c_char>();
                                         camera_number = strtol(
                                             camera_port,
-                                            ::core::ptr::null_mut::<*mut ::core::ffi::c_char>(),
+                                            &raw mut camera_end,
                                             10 as ::core::ffi::c_int,
                                         );
                                         sub_number = strtol(
                                             sub_port,
-                                            ::core::ptr::null_mut::<*mut ::core::ffi::c_char>(),
+                                            &raw mut sub_end,
                                             10 as ::core::ffi::c_int,
                                         );
-                                        ok = camera_number > 0 as ::core::ffi::c_long
-                                            && camera_number == sub_number
+                                        ok = !camera_end.is_null()
+                                            && *camera_end as ::core::ffi::c_int
+                                                == '\0' as ::core::ffi::c_int
+                                            && camera_number >= 1 as ::core::ffi::c_long
+                                            && camera_number <= 65535 as ::core::ffi::c_long
+                                            && !sub_end.is_null()
+                                            && *sub_end as ::core::ffi::c_int
+                                                == '\0' as ::core::ffi::c_int
+                                            && sub_number >= 1 as ::core::ffi::c_long
+                                            && sub_number <= 65535 as ::core::ffi::c_long
                                             && strcasecmp(camera_scheme, sub_scheme)
                                                 == 0 as ::core::ffi::c_int
                                             && strcasecmp(camera_host, sub_host)
@@ -2213,6 +2318,7 @@ unsafe extern "C" fn send_subscription_request(
     mut request_body: *const ::core::ffi::c_char,
     mut operation: onvif_operation_t,
     mut transport_dropped: *mut bool,
+    mut expected_camera_url: *const ::core::ffi::c_char,
 ) -> *mut ::core::ffi::c_char {
     if !transport_dropped.is_null() {
         *transport_dropped = r#false != 0;
@@ -2221,155 +2327,201 @@ unsafe extern "C" fn send_subscription_request(
     if subscription.is_null() || request_body.is_null() || action.is_null() {
         return ::core::ptr::null_mut::<::core::ffi::c_char>();
     }
-    if strncasecmp(
-        &raw mut (*subscription).subscription_address as *mut ::core::ffi::c_char,
-        b"http://\0".as_ptr() as *const ::core::ffi::c_char,
-        7 as size_t,
-    ) == 0 as ::core::ffi::c_int
-        || strncasecmp(
-            &raw mut (*subscription).subscription_address as *mut ::core::ffi::c_char,
-            b"https://\0".as_ptr() as *const ::core::ffi::c_char,
-            8 as size_t,
-        ) == 0 as ::core::ffi::c_int
-    {
-        if !subscription_address_matches_camera_origin(
-            &raw mut (*subscription).camera_url as *mut ::core::ffi::c_char,
-            &raw mut (*subscription).subscription_address as *mut ::core::ffi::c_char,
-        ) {
-            _log_message_ctx(
-                log_level_t::LOG_LEVEL_WARN,
-                LOG_COMPONENT,
-                _log_stream_name,
-                b"Rejected ONVIF subscription endpoint outside the configured camera origin\0"
-                    .as_ptr() as *const ::core::ffi::c_char,
-            );
-            return ::core::ptr::null_mut::<::core::ffi::c_char>();
-        }
-        let mut response: *mut ::core::ffi::c_char = ::core::ptr::null_mut::<::core::ffi::c_char>();
-        let mut status: onvif_request_status_t = onvif_request_status_t {
-            curl_code: CURLcode(0 as ::core::ffi::c_int as ::core::ffi::c_uint),
-            http_code: 0,
-            elapsed: 0.,
-            new_connections: 0,
-        };
-        let mut attempts: ::core::ffi::c_int = 0 as ::core::ffi::c_int;
-        let mut lock: *mut pthread_mutex_t = subscription_lock(subscription);
-        if lock.is_null() {
-            return ::core::ptr::null_mut::<::core::ffi::c_char>();
-        }
-        pthread_mutex_lock(lock);
-        if (*subscription).curl.is_null() {
-            (*subscription).curl = create_curl_handle();
-        }
-        if (*subscription).curl.is_null() {
-            pthread_mutex_unlock(lock);
-            _log_message_ctx(
-                log_level_t::LOG_LEVEL_ERROR,
-                LOG_COMPONENT,
-                _log_stream_name,
-                b"Failed to create a curl handle for the ONVIF subscription of %s\0".as_ptr()
-                    as *const ::core::ffi::c_char,
-                &raw mut (*subscription).camera_url as *mut ::core::ffi::c_char,
-            );
-            return ::core::ptr::null_mut::<::core::ffi::c_char>();
-        }
-        while attempts < ONVIF_PULL_DROP_MAX_ATTEMPTS {
-            attempts += 1;
-            response = perform_onvif_request_locked(
-                (*subscription).curl,
-                &raw mut (*subscription).subscription_address as *mut ::core::ffi::c_char,
-                &raw mut (*subscription).username as *mut ::core::ffi::c_char,
-                &raw mut (*subscription).password as *mut ::core::ffi::c_char,
-                request_body,
-                operation,
-                &raw mut status,
-            );
-            if !response.is_null()
-                || !is_transport_drop(&raw mut status)
-                || attempts >= ONVIF_PULL_DROP_MAX_ATTEMPTS
-                || is_shutdown_initiated() as ::core::ffi::c_int != 0
-            {
-                break;
-            }
-            _log_message_ctx(
-                log_level_t::LOG_LEVEL_DEBUG,
-                LOG_COMPONENT,
-                _log_stream_name,
-                b"ONVIF request %s: camera closed the connection without a response (curl=%d); retrying on the same subscription (attempt %d/%d)\0"
-                    .as_ptr() as *const ::core::ffi::c_char,
-                action,
-                status.curl_code.0 as ::core::ffi::c_int,
-                attempts + 1 as ::core::ffi::c_int,
-                6 as ::core::ffi::c_int,
-            );
-            usleep((ONVIF_PULL_DROP_RETRY_DELAY_MS * 1000 as ::core::ffi::c_int) as __useconds_t);
-        }
-        pthread_mutex_unlock(lock);
-        if !transport_dropped.is_null() {
-            *transport_dropped =
-                response.is_null() && is_transport_drop(&raw mut status) as ::core::ffi::c_int != 0;
-        }
-        if response.is_null() && status.curl_code.0 != CURLcode::CURLE_OK.0 {
-            _log_message_ctx(
-                log_level_t(
-                    (if !transport_dropped.is_null()
-                        && *transport_dropped as ::core::ffi::c_int != 0
-                    {
-                        log_level_t::LOG_LEVEL_DEBUG.0 as ::core::ffi::c_int
-                    } else {
-                        log_level_t::LOG_LEVEL_ERROR.0 as ::core::ffi::c_int
-                    }) as ::core::ffi::c_uint,
-                ),
-                LOG_COMPONENT,
-                _log_stream_name,
-                b"ONVIF request %s failed after %d attempt%s (last attempt: curl=%d, HTTP=%ld, elapsed=%.3fs, new connections=%ld): %s\0"
-                    .as_ptr() as *const ::core::ffi::c_char,
-                action,
-                attempts,
-                if attempts == 1 as ::core::ffi::c_int {
-                    b"\0".as_ptr() as *const ::core::ffi::c_char
-                } else {
-                    b"s\0".as_ptr() as *const ::core::ffi::c_char
-                },
-                status.curl_code.0 as ::core::ffi::c_int,
-                status.http_code,
-                status.elapsed,
-                status.new_connections,
-                curl_easy_strerror(status.curl_code),
-            );
-        }
-        return response;
+    let mut lock: *mut pthread_mutex_t = subscription_lock(subscription);
+    if lock.is_null() {
+        return ::core::ptr::null_mut::<::core::ffi::c_char>();
     }
-    if !strchr(
+    pthread_mutex_lock(lock);
+    if !expected_camera_url.is_null()
+        && (!(*subscription).active
+            || strcmp(
+                &raw mut (*subscription).camera_url as *mut ::core::ffi::c_char,
+                expected_camera_url,
+            ) != 0 as ::core::ffi::c_int)
+    {
+        pthread_mutex_unlock(lock);
+        return ::core::ptr::null_mut::<::core::ffi::c_char>();
+    }
+    let mut target_url: *mut ::core::ffi::c_char = ::core::ptr::null_mut::<::core::ffi::c_char>();
+    if has_uri_scheme_prefix(
         &raw mut (*subscription).subscription_address as *mut ::core::ffi::c_char,
-        ':' as ::core::ffi::c_int,
-    )
-    .is_null()
+    ) as ::core::ffi::c_int
+        != 0
         || strncmp(
             &raw mut (*subscription).subscription_address as *mut ::core::ffi::c_char,
             b"//\0".as_ptr() as *const ::core::ffi::c_char,
             2 as size_t,
         ) == 0 as ::core::ffi::c_int
     {
-        return ::core::ptr::null_mut::<::core::ffi::c_char>();
+        if strncmp(
+            &raw mut (*subscription).subscription_address as *mut ::core::ffi::c_char,
+            b"//\0".as_ptr() as *const ::core::ffi::c_char,
+            2 as size_t,
+        ) != 0 as ::core::ffi::c_int
+            && (strncasecmp(
+                &raw mut (*subscription).subscription_address as *mut ::core::ffi::c_char,
+                b"http://\0".as_ptr() as *const ::core::ffi::c_char,
+                7 as size_t,
+            ) == 0 as ::core::ffi::c_int
+                || strncasecmp(
+                    &raw mut (*subscription).subscription_address as *mut ::core::ffi::c_char,
+                    b"https://\0".as_ptr() as *const ::core::ffi::c_char,
+                    8 as size_t,
+                ) == 0 as ::core::ffi::c_int)
+        {
+            target_url =
+                strdup(&raw mut (*subscription).subscription_address as *mut ::core::ffi::c_char);
+        }
+    } else {
+        let mut resolved: *mut CURLU = curl_url();
+        let mut base: *const ::core::ffi::c_char =
+            if (*subscription).service_url[0usize] as ::core::ffi::c_int != 0 {
+                &raw mut (*subscription).service_url as *mut ::core::ffi::c_char
+            } else {
+                &raw mut (*subscription).camera_url as *mut ::core::ffi::c_char
+            };
+        if !resolved.is_null()
+            && curl_url_set(
+                resolved,
+                CURLUPart::CURLUPART_URL,
+                base,
+                0 as ::core::ffi::c_uint,
+            )
+            .0 == CURLUcode::CURLUE_OK.0
+            && curl_url_set(
+                resolved,
+                CURLUPart::CURLUPART_URL,
+                &raw mut (*subscription).subscription_address as *mut ::core::ffi::c_char,
+                0 as ::core::ffi::c_uint,
+            )
+            .0 == CURLUcode::CURLUE_OK.0
+        {
+            let mut curl_target: *mut ::core::ffi::c_char =
+                ::core::ptr::null_mut::<::core::ffi::c_char>();
+            if curl_url_get(
+                resolved,
+                CURLUPart::CURLUPART_URL,
+                &raw mut curl_target,
+                0 as ::core::ffi::c_uint,
+            )
+            .0 == CURLUcode::CURLUE_OK.0
+            {
+                target_url = strdup(curl_target);
+                curl_free(curl_target as *mut ::core::ffi::c_void);
+            }
+        }
+        if !resolved.is_null() {
+            curl_url_cleanup(resolved);
+        }
     }
-    let mut last_slash: *const ::core::ffi::c_char = strrchr(
-        &raw mut (*subscription).subscription_address as *mut ::core::ffi::c_char,
-        '/' as ::core::ffi::c_int,
-    );
-    if last_slash.is_null()
-        || *last_slash.offset(1isize) as ::core::ffi::c_int == '\0' as ::core::ffi::c_int
+    if target_url.is_null()
+        || !subscription_address_matches_camera_host(
+            &raw mut (*subscription).camera_url as *mut ::core::ffi::c_char,
+            target_url,
+        )
     {
+        free(target_url as *mut ::core::ffi::c_void);
+        _log_message_ctx(
+            log_level_t::LOG_LEVEL_WARN,
+            LOG_COMPONENT,
+            _log_stream_name,
+            b"Rejected ONVIF subscription endpoint with a different scheme/host or invalid port\0"
+                .as_ptr() as *const ::core::ffi::c_char,
+        );
+        pthread_mutex_unlock(lock);
         return ::core::ptr::null_mut::<::core::ffi::c_char>();
     }
-    return send_onvif_request(
-        &raw mut (*subscription).camera_url as *mut ::core::ffi::c_char,
-        &raw mut (*subscription).username as *mut ::core::ffi::c_char,
-        &raw mut (*subscription).password as *mut ::core::ffi::c_char,
-        request_body,
-        last_slash.offset(1 as ::core::ffi::c_int as isize),
-        operation,
-    );
+    let mut response: *mut ::core::ffi::c_char = ::core::ptr::null_mut::<::core::ffi::c_char>();
+    let mut status: onvif_request_status_t = onvif_request_status_t {
+        curl_code: CURLcode(0 as ::core::ffi::c_int as ::core::ffi::c_uint),
+        http_code: 0,
+        elapsed: 0.,
+        new_connections: 0,
+    };
+    let mut attempts: ::core::ffi::c_int = 0 as ::core::ffi::c_int;
+    if (*subscription).curl.is_null() {
+        (*subscription).curl = create_curl_handle();
+    }
+    if (*subscription).curl.is_null() {
+        free(target_url as *mut ::core::ffi::c_void);
+        pthread_mutex_unlock(lock);
+        _log_message_ctx(
+            log_level_t::LOG_LEVEL_ERROR,
+            LOG_COMPONENT,
+            _log_stream_name,
+            b"Failed to create a curl handle for the ONVIF subscription of %s\0".as_ptr()
+                as *const ::core::ffi::c_char,
+            &raw mut (*subscription).camera_url as *mut ::core::ffi::c_char,
+        );
+        return ::core::ptr::null_mut::<::core::ffi::c_char>();
+    }
+    while attempts < ONVIF_PULL_DROP_MAX_ATTEMPTS {
+        attempts += 1;
+        response = perform_onvif_request_locked(
+            (*subscription).curl,
+            target_url,
+            &raw mut (*subscription).username as *mut ::core::ffi::c_char,
+            &raw mut (*subscription).password as *mut ::core::ffi::c_char,
+            request_body,
+            operation,
+            &raw mut status,
+        );
+        if !response.is_null()
+            || !is_transport_drop(&raw mut status)
+            || attempts >= ONVIF_PULL_DROP_MAX_ATTEMPTS
+            || is_shutdown_initiated() as ::core::ffi::c_int != 0
+        {
+            break;
+        }
+        _log_message_ctx(
+            log_level_t::LOG_LEVEL_DEBUG,
+            LOG_COMPONENT,
+            _log_stream_name,
+            b"ONVIF request %s: camera closed the connection without a response (curl=%d); retrying on the same subscription (attempt %d/%d)\0"
+                .as_ptr() as *const ::core::ffi::c_char,
+            action,
+            status.curl_code.0 as ::core::ffi::c_int,
+            attempts + 1 as ::core::ffi::c_int,
+            6 as ::core::ffi::c_int,
+        );
+        usleep((ONVIF_PULL_DROP_RETRY_DELAY_MS * 1000 as ::core::ffi::c_int) as __useconds_t);
+    }
+    free(target_url as *mut ::core::ffi::c_void);
+    pthread_mutex_unlock(lock);
+    if !transport_dropped.is_null() {
+        *transport_dropped =
+            response.is_null() && is_transport_drop(&raw mut status) as ::core::ffi::c_int != 0;
+    }
+    if response.is_null() && status.curl_code.0 != CURLcode::CURLE_OK.0 {
+        _log_message_ctx(
+            log_level_t(
+                (if !transport_dropped.is_null()
+                    && *transport_dropped as ::core::ffi::c_int != 0
+                {
+                    log_level_t::LOG_LEVEL_DEBUG.0 as ::core::ffi::c_int
+                } else {
+                    log_level_t::LOG_LEVEL_ERROR.0 as ::core::ffi::c_int
+                }) as ::core::ffi::c_uint,
+            ),
+            LOG_COMPONENT,
+            _log_stream_name,
+            b"ONVIF request %s failed after %d attempt%s (last attempt: curl=%d, HTTP=%ld, elapsed=%.3fs, new connections=%ld): %s\0"
+                .as_ptr() as *const ::core::ffi::c_char,
+            action,
+            attempts,
+            if attempts == 1 as ::core::ffi::c_int {
+                b"\0".as_ptr() as *const ::core::ffi::c_char
+            } else {
+                b"s\0".as_ptr() as *const ::core::ffi::c_char
+            },
+            status.curl_code.0 as ::core::ffi::c_int,
+            status.http_code,
+            status.elapsed,
+            status.new_connections,
+            curl_easy_strerror(status.curl_code),
+        );
+    }
+    return response;
 }
 unsafe extern "C" fn renew_subscription_locked(
     mut subscription: *mut onvif_subscription_t,
@@ -2381,6 +2533,7 @@ unsafe extern "C" fn renew_subscription_locked(
         request_body,
         onvif_operation_t::ONVIF_OPERATION_RENEW,
         ::core::ptr::null_mut::<bool>(),
+        ::core::ptr::null::<::core::ffi::c_char>(),
     );
     if response.is_null() {
         return r#false != 0;
@@ -2415,6 +2568,7 @@ unsafe extern "C" fn unsubscribe_subscription_locked(mut subscription: *mut onvi
         request_body,
         onvif_operation_t::ONVIF_OPERATION_UNSUBSCRIBE,
         ::core::ptr::null_mut::<bool>(),
+        ::core::ptr::null::<::core::ffi::c_char>(),
     );
     if !response.is_null() {
         free(response as *mut ::core::ffi::c_void);
@@ -2463,6 +2617,7 @@ unsafe extern "C" fn discover_event_service_url(
         );
         return ::core::ptr::null_mut::<::core::ffi::c_char>();
     }
+    let mut response_fallback: *mut ::core::ffi::c_char = strdup(response);
     let mut xml: ezxml_t = ezxml_parse_str(response, strlen(response));
     let mut event_url: *mut ::core::ffi::c_char = ::core::ptr::null_mut::<::core::ffi::c_char>();
     if !xml.is_null() {
@@ -2524,10 +2679,10 @@ unsafe extern "C" fn discover_event_service_url(
         }
         ezxml_free(xml);
     }
-    if event_url.is_null() {
+    if event_url.is_null() && !response_fallback.is_null() {
         let mut events_ns_0: *const ::core::ffi::c_char =
             b"http://www.onvif.org/ver10/events/wsdl\0".as_ptr() as *const ::core::ffi::c_char;
-        let mut ns_pos: *const ::core::ffi::c_char = strstr(response, events_ns_0);
+        let mut ns_pos: *const ::core::ffi::c_char = strstr(response_fallback, events_ns_0);
         if !ns_pos.is_null() {
             let mut xaddr_open: [*const ::core::ffi::c_char; 3] = [
                 b"<tds:XAddr>\0".as_ptr() as *const ::core::ffi::c_char,
@@ -2556,6 +2711,7 @@ unsafe extern "C" fn discover_event_service_url(
             }
         }
     }
+    free(response_fallback as *mut ::core::ffi::c_void);
     if !event_url.is_null() {
         _log_message_ctx(
             log_level_t::LOG_LEVEL_INFO,
@@ -2575,6 +2731,14 @@ unsafe extern "C" fn discover_event_service_url(
     free(response as *mut ::core::ffi::c_void);
     return event_url;
 }
+unsafe extern "C" fn release_subscription_reservation(mut slot: ::core::ffi::c_int) {
+    pthread_mutex_lock(&raw mut subscription_mutex);
+    subscriptions[slot as usize].reserved = r#false != 0;
+    if !subscriptions[slot as usize].active {
+        subscriptions[slot as usize].camera_url[0usize] = '\0' as ::core::ffi::c_char;
+    }
+    pthread_mutex_unlock(&raw mut subscription_mutex);
+}
 unsafe extern "C" fn get_subscription(
     mut url: *const ::core::ffi::c_char,
     mut username: *const ::core::ffi::c_char,
@@ -2585,6 +2749,7 @@ unsafe extern "C" fn get_subscription(
         pthread_mutex_unlock(&raw mut subscription_mutex);
         return ::core::ptr::null_mut::<onvif_subscription_t>();
     }
+    let mut slot: ::core::ffi::c_int = -1 as ::core::ffi::c_int;
     let mut i: ::core::ffi::c_int = 0 as ::core::ffi::c_int;
     while i < subscription_count {
         if strcmp(
@@ -2603,10 +2768,10 @@ unsafe extern "C" fn get_subscription(
                         log_level_t::LOG_LEVEL_DEBUG,
                         LOG_COMPONENT,
                         _log_stream_name,
-                        b"Renewing ONVIF subscription for %s\0".as_ptr()
-                            as *const ::core::ffi::c_char,
-                        url,
+                        b"Renewing ONVIF subscription\0".as_ptr() as *const ::core::ffi::c_char,
                     );
+                    subscriptions[i as usize].reserved = r#true != 0;
+                    pthread_mutex_unlock(&raw mut subscription_mutex);
                     if !renew_subscription_locked(
                         (&raw mut subscriptions as *mut onvif_subscription_t).offset(i as isize),
                     ) {
@@ -2614,24 +2779,26 @@ unsafe extern "C" fn get_subscription(
                             log_level_t::LOG_LEVEL_WARN,
                             LOG_COMPONENT,
                             _log_stream_name,
-                            b"ONVIF subscription renewal failed for %s; recreating it\0".as_ptr()
+                            b"ONVIF subscription renewal failed; recreating it\0".as_ptr()
                                 as *const ::core::ffi::c_char,
-                            url,
                         );
                         unsubscribe_subscription_locked(
                             (&raw mut subscriptions as *mut onvif_subscription_t)
                                 .offset(i as isize),
                         );
+                        pthread_mutex_lock(&raw mut subscription_mutex);
+                        slot = i;
                         break;
+                    } else {
+                        pthread_mutex_lock(&raw mut subscription_mutex);
+                        subscriptions[i as usize].reserved = r#false != 0;
                     }
                 }
                 _log_message_ctx(
                     log_level_t::LOG_LEVEL_DEBUG,
                     LOG_COMPONENT,
                     _log_stream_name,
-                    b"Reusing existing ONVIF subscription for %s\0".as_ptr()
-                        as *const ::core::ffi::c_char,
-                    url,
+                    b"Reusing existing ONVIF subscription\0".as_ptr() as *const ::core::ffi::c_char,
                 );
                 pthread_mutex_unlock(&raw mut subscription_mutex);
                 return (&raw mut subscriptions as *mut onvif_subscription_t).offset(i as isize);
@@ -2640,35 +2807,73 @@ unsafe extern "C" fn get_subscription(
                     log_level_t::LOG_LEVEL_INFO,
                     LOG_COMPONENT,
                     _log_stream_name,
-                    b"ONVIF subscription for %s is inactive, creating new one\0".as_ptr()
+                    b"ONVIF subscription is inactive, creating new one\0".as_ptr()
                         as *const ::core::ffi::c_char,
-                    url,
                 );
+                subscriptions[i as usize].reserved = r#true != 0;
+                slot = i;
                 break;
             } else {
                 _log_message_ctx(
                     log_level_t::LOG_LEVEL_INFO,
                     LOG_COMPONENT,
                     _log_stream_name,
-                    b"ONVIF subscription for %s expired, replacing it\0".as_ptr()
+                    b"ONVIF subscription expired, replacing it\0".as_ptr()
                         as *const ::core::ffi::c_char,
-                    url,
                 );
+                subscriptions[i as usize].reserved = r#true != 0;
+                pthread_mutex_unlock(&raw mut subscription_mutex);
                 unsubscribe_subscription_locked(
                     (&raw mut subscriptions as *mut onvif_subscription_t).offset(i as isize),
                 );
+                pthread_mutex_lock(&raw mut subscription_mutex);
+                slot = i;
                 break;
             }
         } else {
             i += 1;
         }
     }
+    if slot < 0 as ::core::ffi::c_int {
+        let mut i_0: ::core::ffi::c_int = 0 as ::core::ffi::c_int;
+        while i_0 < subscription_count {
+            if !subscriptions[i_0 as usize].active && !subscriptions[i_0 as usize].reserved {
+                slot = i_0;
+                break;
+            } else {
+                i_0 += 1;
+            }
+        }
+        if slot < 0 as ::core::ffi::c_int && subscription_count < MAX_SUBSCRIPTIONS {
+            let c2rust_fresh0 = subscription_count;
+            subscription_count += 1;
+            slot = c2rust_fresh0;
+        }
+        if slot < 0 as ::core::ffi::c_int {
+            _log_message_ctx(
+                log_level_t::LOG_LEVEL_ERROR,
+                LOG_COMPONENT,
+                _log_stream_name,
+                b"No space for new ONVIF subscription\0".as_ptr() as *const ::core::ffi::c_char,
+            );
+            pthread_mutex_unlock(&raw mut subscription_mutex);
+            return ::core::ptr::null_mut::<onvif_subscription_t>();
+        }
+        subscriptions[slot as usize].reserved = r#true != 0;
+        safe_strcpy(
+            &raw mut (*(&raw mut subscriptions as *mut onvif_subscription_t).offset(slot as isize))
+                .camera_url as *mut ::core::ffi::c_char,
+            url,
+            ::core::mem::size_of::<[::core::ffi::c_char; 512]>(),
+            0 as size_t,
+        );
+    }
+    pthread_mutex_unlock(&raw mut subscription_mutex);
     _log_message_ctx(
         log_level_t::LOG_LEVEL_INFO,
         LOG_COMPONENT,
         _log_stream_name,
-        b"Creating new ONVIF subscription for %s\0".as_ptr() as *const ::core::ffi::c_char,
-        url,
+        b"Creating new ONVIF subscription\0".as_ptr() as *const ::core::ffi::c_char,
     );
     let mut request_body: *const ::core::ffi::c_char = b"<CreatePullPointSubscription xmlns=\"http://www.onvif.org/ver10/events/wsdl\"><InitialTerminationTime>PT600S</InitialTerminationTime></CreatePullPointSubscription>\0"
         .as_ptr() as *const ::core::ffi::c_char;
@@ -3190,26 +3395,36 @@ unsafe extern "C" fn get_subscription(
         0,
     ];
     if !discovered_url.is_null() {
-        _log_message_ctx(
-            log_level_t::LOG_LEVEL_INFO,
-            LOG_COMPONENT,
-            _log_stream_name,
-            b"ONVIF: Sending CreatePullPointSubscription to discovered endpoint\0".as_ptr()
-                as *const ::core::ffi::c_char,
-        );
-        safe_strcpy(
-            &raw mut attempted_event_url as *mut ::core::ffi::c_char,
-            discovered_url,
-            ::core::mem::size_of::<[::core::ffi::c_char; 512]>(),
-            0 as size_t,
-        );
-        response = send_onvif_request_to_url(
-            discovered_url,
-            username,
-            password,
-            request_body,
-            onvif_operation_t::ONVIF_OPERATION_CREATE_PULLPOINT,
-        );
+        if subscription_address_matches_camera_host(url, discovered_url) {
+            _log_message_ctx(
+                log_level_t::LOG_LEVEL_INFO,
+                LOG_COMPONENT,
+                _log_stream_name,
+                b"ONVIF: Sending CreatePullPointSubscription to discovered endpoint\0".as_ptr()
+                    as *const ::core::ffi::c_char,
+            );
+            safe_strcpy(
+                &raw mut attempted_event_url as *mut ::core::ffi::c_char,
+                discovered_url,
+                ::core::mem::size_of::<[::core::ffi::c_char; 512]>(),
+                0 as size_t,
+            );
+            response = send_onvif_request_to_url(
+                discovered_url,
+                username,
+                password,
+                request_body,
+                onvif_operation_t::ONVIF_OPERATION_CREATE_PULLPOINT,
+            );
+        } else {
+            _log_message_ctx(
+                log_level_t::LOG_LEVEL_WARN,
+                LOG_COMPONENT,
+                _log_stream_name,
+                b"ONVIF: Ignoring discovered event endpoint outside the camera host\0".as_ptr()
+                    as *const ::core::ffi::c_char,
+            );
+        }
         free(discovered_url as *mut ::core::ffi::c_void);
     }
     if response.is_null() {
@@ -3219,15 +3434,15 @@ unsafe extern "C" fn get_subscription(
             b"Events\0".as_ptr() as *const ::core::ffi::c_char,
             ::core::ptr::null::<::core::ffi::c_char>(),
         ];
-        let mut i_0: ::core::ffi::c_int = 0 as ::core::ffi::c_int;
-        while !fallback_services[i_0 as usize].is_null() && response.is_null() {
+        let mut i_1: ::core::ffi::c_int = 0 as ::core::ffi::c_int;
+        while !fallback_services[i_1 as usize].is_null() && response.is_null() {
             let mut fallback_url: [::core::ffi::c_char; 512] = [0; 512];
             let mut written: ::core::ffi::c_int = snprintf(
                 &raw mut fallback_url as *mut ::core::ffi::c_char,
                 ::core::mem::size_of::<[::core::ffi::c_char; 512]>(),
                 b"%s/onvif/%s\0".as_ptr() as *const ::core::ffi::c_char,
                 url,
-                fallback_services[i_0 as usize],
+                fallback_services[i_1 as usize],
             );
             if !(written < 0 as ::core::ffi::c_int
                 || written as size_t >= ::core::mem::size_of::<[::core::ffi::c_char; 512]>())
@@ -3244,7 +3459,7 @@ unsafe extern "C" fn get_subscription(
                         _log_stream_name,
                         b"ONVIF: Skipping already-tried event endpoint: onvif/%s\0".as_ptr()
                             as *const ::core::ffi::c_char,
-                        fallback_services[i_0 as usize],
+                        fallback_services[i_1 as usize],
                     );
                 } else {
                     _log_message_ctx(
@@ -3253,19 +3468,27 @@ unsafe extern "C" fn get_subscription(
                         _log_stream_name,
                         b"ONVIF: Trying fallback event endpoint: onvif/%s\0".as_ptr()
                             as *const ::core::ffi::c_char,
-                        fallback_services[i_0 as usize],
+                        fallback_services[i_1 as usize],
                     );
                     response = send_onvif_request(
                         url,
                         username,
                         password,
                         request_body,
-                        fallback_services[i_0 as usize],
+                        fallback_services[i_1 as usize],
                         onvif_operation_t::ONVIF_OPERATION_CREATE_PULLPOINT,
                     );
+                    if !response.is_null() {
+                        safe_strcpy(
+                            &raw mut attempted_event_url as *mut ::core::ffi::c_char,
+                            &raw mut fallback_url as *mut ::core::ffi::c_char,
+                            ::core::mem::size_of::<[::core::ffi::c_char; 512]>(),
+                            0 as size_t,
+                        );
+                    }
                 }
             }
-            i_0 += 1;
+            i_1 += 1;
         }
     }
     if response.is_null() {
@@ -3276,7 +3499,7 @@ unsafe extern "C" fn get_subscription(
             b"Failed to create subscription on any endpoint\0".as_ptr()
                 as *const ::core::ffi::c_char,
         );
-        pthread_mutex_unlock(&raw mut subscription_mutex);
+        release_subscription_reservation(slot);
         return ::core::ptr::null_mut::<onvif_subscription_t>();
     }
     let mut subscription_address: *mut ::core::ffi::c_char = extract_subscription_address(response);
@@ -3289,28 +3512,37 @@ unsafe extern "C" fn get_subscription(
             _log_stream_name,
             b"Failed to extract subscription address\0".as_ptr() as *const ::core::ffi::c_char,
         );
-        pthread_mutex_unlock(&raw mut subscription_mutex);
+        release_subscription_reservation(slot);
         return ::core::ptr::null_mut::<onvif_subscription_t>();
     }
-    let mut slot: ::core::ffi::c_int = -1 as ::core::ffi::c_int;
-    let mut i_1: ::core::ffi::c_int = 0 as ::core::ffi::c_int;
-    while i_1 < subscription_count {
-        if !subscriptions[i_1 as usize].active {
-            slot = i_1;
-            break;
-        } else {
-            i_1 += 1;
-        }
+    if strlen(subscription_address) >= ::core::mem::size_of::<[::core::ffi::c_char; 512]>() {
+        _log_message_ctx(
+            log_level_t::LOG_LEVEL_WARN,
+            LOG_COMPONENT,
+            _log_stream_name,
+            b"ONVIF subscription address exceeds local capacity; rejecting it\0".as_ptr()
+                as *const ::core::ffi::c_char,
+        );
+        free(subscription_address as *mut ::core::ffi::c_void);
+        release_subscription_reservation(slot);
+        return ::core::ptr::null_mut::<onvif_subscription_t>();
     }
-    if slot == -1 as ::core::ffi::c_int && subscription_count < MAX_SUBSCRIPTIONS {
-        let c2rust_fresh0 = subscription_count;
-        subscription_count += 1;
-        slot = c2rust_fresh0;
-    }
+    pthread_mutex_lock(&raw mut subscription_mutex);
     if slot >= 0 as ::core::ffi::c_int {
-        release_subscription_curl(
+        let mut slot_lock: *mut pthread_mutex_t = subscription_lock(
             (&raw mut subscriptions as *mut onvif_subscription_t).offset(slot as isize),
         );
+        if slot_lock.is_null() {
+            free(subscription_address as *mut ::core::ffi::c_void);
+            subscriptions[slot as usize].reserved = r#false != 0;
+            pthread_mutex_unlock(&raw mut subscription_mutex);
+            return ::core::ptr::null_mut::<onvif_subscription_t>();
+        }
+        pthread_mutex_lock(slot_lock);
+        if !subscriptions[slot as usize].curl.is_null() {
+            curl_easy_cleanup(subscriptions[slot as usize].curl);
+            subscriptions[slot as usize].curl = NULL as *mut ::core::ffi::c_void;
+        }
         memset(
             (&raw mut subscriptions as *mut onvif_subscription_t).offset(slot as isize)
                 as *mut ::core::ffi::c_void,
@@ -3345,11 +3577,19 @@ unsafe extern "C" fn get_subscription(
             ::core::mem::size_of::<[::core::ffi::c_char; 512]>(),
             0 as size_t,
         );
+        safe_strcpy(
+            &raw mut (*(&raw mut subscriptions as *mut onvif_subscription_t).offset(slot as isize))
+                .service_url as *mut ::core::ffi::c_char,
+            &raw mut attempted_event_url as *mut ::core::ffi::c_char,
+            ::core::mem::size_of::<[::core::ffi::c_char; 512]>(),
+            0 as size_t,
+        );
         apply_subscription_lease(
             (&raw mut subscriptions as *mut onvif_subscription_t).offset(slot as isize),
             lease_seconds,
         );
         subscriptions[slot as usize].active = r#true != 0;
+        pthread_mutex_unlock(slot_lock);
         _log_message_ctx(
             log_level_t::LOG_LEVEL_INFO,
             LOG_COMPONENT,
@@ -3415,7 +3655,11 @@ unsafe extern "C" fn note_pull_failure(mut camera_url: *const ::core::ffi::c_cha
                     camera_url,
                     120 as ::core::ffi::c_int,
                 );
+                (*subscription).reserved = r#true != 0;
+                pthread_mutex_unlock(&raw mut subscription_mutex);
                 unsubscribe_subscription_locked(subscription);
+                pthread_mutex_lock(&raw mut subscription_mutex);
+                (*subscription).reserved = r#false != 0;
             }
             break;
         }
@@ -3577,6 +3821,15 @@ unsafe extern "C" fn normalize_object_class(
     {
         return b"person\0".as_ptr() as *const ::core::ffi::c_char;
     }
+    if ci_contains(raw, b"motorcycle\0".as_ptr() as *const ::core::ffi::c_char)
+        as ::core::ffi::c_int
+        != 0
+        || ci_contains(raw, b"motorbike\0".as_ptr() as *const ::core::ffi::c_char)
+            as ::core::ffi::c_int
+            != 0
+    {
+        return b"vehicle\0".as_ptr() as *const ::core::ffi::c_char;
+    }
     if ci_contains(raw, b"nonmotor\0".as_ptr() as *const ::core::ffi::c_char) as ::core::ffi::c_int
         != 0
         || ci_contains(raw, b"bicycle\0".as_ptr() as *const ::core::ffi::c_char)
@@ -3611,6 +3864,63 @@ unsafe extern "C" fn normalize_object_class(
         return b"animal\0".as_ptr() as *const ::core::ffi::c_char;
     }
     return ::core::ptr::null::<::core::ffi::c_char>();
+}
+unsafe extern "C" fn is_recognized_class_flag_name(mut name: *const ::core::ffi::c_char) -> bool {
+    if name.is_null() {
+        return r#false != 0;
+    }
+    static mut flags: [*const ::core::ffi::c_char; 42] = [
+        b"Human\0".as_ptr() as *const ::core::ffi::c_char,
+        b"People\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Person\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Pedestrian\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Vehicle\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Car\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Motorcycle\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Motorbike\0".as_ptr() as *const ::core::ffi::c_char,
+        b"NonMotor\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Bicycle\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Bike\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Cycle\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Face\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Animal\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Dog\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Cat\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Pet\0".as_ptr() as *const ::core::ffi::c_char,
+        b"IsHuman\0".as_ptr() as *const ::core::ffi::c_char,
+        b"IsPeople\0".as_ptr() as *const ::core::ffi::c_char,
+        b"IsPerson\0".as_ptr() as *const ::core::ffi::c_char,
+        b"IsPedestrian\0".as_ptr() as *const ::core::ffi::c_char,
+        b"IsVehicle\0".as_ptr() as *const ::core::ffi::c_char,
+        b"IsCar\0".as_ptr() as *const ::core::ffi::c_char,
+        b"IsMotorcycle\0".as_ptr() as *const ::core::ffi::c_char,
+        b"IsMotorbike\0".as_ptr() as *const ::core::ffi::c_char,
+        b"IsNonMotor\0".as_ptr() as *const ::core::ffi::c_char,
+        b"IsBicycle\0".as_ptr() as *const ::core::ffi::c_char,
+        b"IsBike\0".as_ptr() as *const ::core::ffi::c_char,
+        b"IsCycle\0".as_ptr() as *const ::core::ffi::c_char,
+        b"IsFace\0".as_ptr() as *const ::core::ffi::c_char,
+        b"IsAnimal\0".as_ptr() as *const ::core::ffi::c_char,
+        b"IsDog\0".as_ptr() as *const ::core::ffi::c_char,
+        b"IsCat\0".as_ptr() as *const ::core::ffi::c_char,
+        b"IsPet\0".as_ptr() as *const ::core::ffi::c_char,
+        b"HumanDetect\0".as_ptr() as *const ::core::ffi::c_char,
+        b"PeopleDetect\0".as_ptr() as *const ::core::ffi::c_char,
+        b"PersonDetect\0".as_ptr() as *const ::core::ffi::c_char,
+        b"VehicleDetect\0".as_ptr() as *const ::core::ffi::c_char,
+        b"CarDetect\0".as_ptr() as *const ::core::ffi::c_char,
+        b"FaceDetect\0".as_ptr() as *const ::core::ffi::c_char,
+        b"AnimalDetect\0".as_ptr() as *const ::core::ffi::c_char,
+        ::core::ptr::null::<::core::ffi::c_char>(),
+    ];
+    let mut i: size_t = 0 as size_t;
+    while !flags[i].is_null() {
+        if strcasecmp(name, flags[i]) == 0 as ::core::ffi::c_int {
+            return r#true != 0;
+        }
+        i = i.wrapping_add(1);
+    }
+    return r#false != 0;
 }
 unsafe extern "C" fn find_object_class(
     mut node: ezxml_t,
@@ -3661,6 +3971,7 @@ unsafe extern "C" fn find_object_class(
                     == 0 as ::core::ffi::c_int
                     || strcmp(value, b"1\0".as_ptr() as *const ::core::ffi::c_char)
                         == 0 as ::core::ffi::c_int)
+                && is_recognized_class_flag_name(name) as ::core::ffi::c_int != 0
             {
                 let mut cls_0: *const ::core::ffi::c_char = normalize_object_class(name);
                 if !cls_0.is_null() {
@@ -3699,6 +4010,37 @@ unsafe extern "C" fn value_is_true(mut value: *const ::core::ffi::c_char) -> boo
         == 0 as ::core::ffi::c_int
         || strcmp(value, b"1\0".as_ptr() as *const ::core::ffi::c_char) == 0 as ::core::ffi::c_int;
 }
+unsafe extern "C" fn is_asserted_item_name(mut name: *const ::core::ffi::c_char) -> bool {
+    if name.is_null() {
+        return r#false != 0;
+    }
+    static mut state_names: [*const ::core::ffi::c_char; 16] = [
+        b"IsMotion\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Motion\0".as_ptr() as *const ::core::ffi::c_char,
+        b"MotionAlarm\0".as_ptr() as *const ::core::ffi::c_char,
+        b"State\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Active\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Detected\0".as_ptr() as *const ::core::ffi::c_char,
+        b"IsActive\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Person\0".as_ptr() as *const ::core::ffi::c_char,
+        b"People\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Human\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Vehicle\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Car\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Bicycle\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Face\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Animal\0".as_ptr() as *const ::core::ffi::c_char,
+        ::core::ptr::null::<::core::ffi::c_char>(),
+    ];
+    let mut i: size_t = 0 as size_t;
+    while !state_names[i].is_null() {
+        if strcasecmp(name, state_names[i]) == 0 as ::core::ffi::c_int {
+            return r#true != 0;
+        }
+        i = i.wrapping_add(1);
+    }
+    return is_recognized_class_flag_name(name);
+}
 unsafe extern "C" fn data_has_asserted_item(mut node: ezxml_t, mut in_data: bool) -> bool {
     let mut c: ezxml_t = if !node.is_null() {
         (*node).child
@@ -3716,6 +4058,11 @@ unsafe extern "C" fn data_has_asserted_item(mut node: ezxml_t, mut in_data: bool
                 local_name(c),
                 b"SimpleItem\0".as_ptr() as *const ::core::ffi::c_char,
             ) == 0 as ::core::ffi::c_int
+            && is_asserted_item_name(ezxml_attr(
+                c,
+                b"Name\0".as_ptr() as *const ::core::ffi::c_char,
+            )) as ::core::ffi::c_int
+                != 0
             && value_is_true(ezxml_attr(
                 c,
                 b"Value\0".as_ptr() as *const ::core::ffi::c_char,
@@ -3792,6 +4139,75 @@ unsafe extern "C" fn xml_find_active_motion(
     }
     return any;
 }
+unsafe extern "C" fn malformed_motion_element_asserted(
+    mut response: *const ::core::ffi::c_char,
+) -> bool {
+    static mut true_values: [*const ::core::ffi::c_char; 4] = [
+        b"Value=\"true\"\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Value='true'\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Value=\"1\"\0".as_ptr() as *const ::core::ffi::c_char,
+        b"Value='1'\0".as_ptr() as *const ::core::ffi::c_char,
+    ];
+    let mut tag: *const ::core::ffi::c_char = strchr(response, '<' as ::core::ffi::c_int);
+    while !tag.is_null() {
+        let mut gt_end: *const ::core::ffi::c_char = strchr(tag, '>' as ::core::ffi::c_int);
+        let mut lt_end: *const ::core::ffi::c_char = strchr(
+            tag.offset(1 as ::core::ffi::c_int as isize),
+            '<' as ::core::ffi::c_int,
+        );
+        let mut end: *const ::core::ffi::c_char = gt_end;
+        if end.is_null() || !lt_end.is_null() && lt_end < end {
+            end = lt_end;
+        }
+        if end.is_null() {
+            end = tag.offset(strlen(tag) as isize);
+        }
+        let mut name: *const ::core::ffi::c_char = tag.offset(1 as ::core::ffi::c_int as isize);
+        let mut name_end: *const ::core::ffi::c_char = name;
+        while name_end < end
+            && *name_end as ::core::ffi::c_int != ' ' as ::core::ffi::c_int
+            && *name_end as ::core::ffi::c_int != '\t' as ::core::ffi::c_int
+            && *name_end as ::core::ffi::c_int != '\r' as ::core::ffi::c_int
+            && *name_end as ::core::ffi::c_int != '\n' as ::core::ffi::c_int
+            && *name_end as ::core::ffi::c_int != '/' as ::core::ffi::c_int
+        {
+            name_end = name_end.offset(1);
+        }
+        let mut local: *const ::core::ffi::c_char = memchr(
+            name as *const ::core::ffi::c_void,
+            ':' as ::core::ffi::c_int,
+            name_end.offset_from(name) as size_t,
+        ) as *const ::core::ffi::c_char;
+        local = if !local.is_null() {
+            local.offset(1 as ::core::ffi::c_int as isize)
+        } else {
+            name
+        };
+        if !(name_end.offset_from(local) != 6isize
+            || strncasecmp(
+                local,
+                b"Motion\0".as_ptr() as *const ::core::ffi::c_char,
+                6 as size_t,
+            ) != 0 as ::core::ffi::c_int)
+        {
+            let mut i: size_t = 0 as size_t;
+            while i < ::core::mem::size_of::<[*const ::core::ffi::c_char; 4]>()
+                .wrapping_div(::core::mem::size_of::<*const ::core::ffi::c_char>())
+            {
+                let mut value: *const ::core::ffi::c_char = strstr(name_end, true_values[i]);
+                if !value.is_null() && value.offset(strlen(true_values[i]) as isize) <= end {
+                    return r#true != 0;
+                }
+                i = i.wrapping_add(1);
+            }
+        }
+        tag = strchr(
+            tag.offset(1 as ::core::ffi::c_int as isize),
+            '<' as ::core::ffi::c_int,
+        );
+    }
+    return r#false != 0;
+}
 unsafe extern "C" fn has_motion_event(
     mut response: *const ::core::ffi::c_char,
     mut label: *mut ::core::ffi::c_char,
@@ -3828,7 +4244,15 @@ unsafe extern "C" fn has_motion_event(
         return r#false != 0;
     }
     let mut xml: ezxml_t = ezxml_parse_str(copy, strlen(copy));
-    if xml.is_null() {
+    let mut parse_error: *const ::core::ffi::c_char = if !xml.is_null() {
+        ezxml_error(xml)
+    } else {
+        ::core::ptr::null::<::core::ffi::c_char>()
+    };
+    if xml.is_null()
+        || !parse_error.is_null()
+            && *parse_error.offset(0isize) as ::core::ffi::c_int != '\0' as ::core::ffi::c_int
+    {
         _log_message_ctx(
             log_level_t::LOG_LEVEL_DEBUG,
             LOG_COMPONENT,
@@ -3836,26 +4260,10 @@ unsafe extern "C" fn has_motion_event(
             b"ONVIF Detection: failed to parse PullMessages response, using fallback heuristic\0"
                 .as_ptr() as *const ::core::ffi::c_char,
         );
-        let mut fallback: bool = !strstr(
-            response,
-            b"Value=\"true\"\0".as_ptr() as *const ::core::ffi::c_char,
-        )
-        .is_null()
-            || !strstr(
-                response,
-                b"Value='true'\0".as_ptr() as *const ::core::ffi::c_char,
-            )
-            .is_null()
-            || !strstr(
-                response,
-                b"Value=\"1\"\0".as_ptr() as *const ::core::ffi::c_char,
-            )
-            .is_null()
-            || !strstr(
-                response,
-                b"Value='1'\0".as_ptr() as *const ::core::ffi::c_char,
-            )
-            .is_null();
+        if !xml.is_null() {
+            ezxml_free(xml);
+        }
+        let mut fallback: bool = malformed_motion_element_asserted(response);
         if fallback as ::core::ffi::c_int != 0 && !label.is_null() && label_sz > 0 as size_t {
             safe_strcpy(
                 label,
@@ -3879,387 +4287,33 @@ unsafe extern "C" fn store_lpr_notifications(
     if response.is_null() || stream_name.is_null() || *stream_name.offset(0isize) == 0 {
         return;
     }
-    let mut events: [onvif_lpr_event_t; 16] = [
-        onvif_lpr_event_t {
-            source: onvif_lpr_source_t(0 as ::core::ffi::c_int as ::core::ffi::c_uint),
-            asserted: false,
-            observed_at_ms: 0,
-            topic: [0; 256],
-            plate: [0; 64],
-            has_confidence: false,
-            confidence: 0.,
-            country: [0; 64],
-            region: [0; 64],
-            plate_type: [0; 64],
-            direction: [0; 64],
-            lane: [0; 64],
-            vehicle_type: [0; 64],
-            vehicle_color: [0; 64],
-            object_id: [0; 96],
-            correlation_id: [0; 96],
-            has_bounding_box: false,
-            bbox_left: 0.,
-            bbox_top: 0.,
-            bbox_right: 0.,
-            bbox_bottom: 0.,
-        },
-        onvif_lpr_event_t {
-            source: onvif_lpr_source_t::ONVIF_LPR_SOURCE_PROFILE_M,
-            asserted: false,
-            observed_at_ms: 0,
-            topic: [0; 256],
-            plate: [0; 64],
-            has_confidence: false,
-            confidence: 0.,
-            country: [0; 64],
-            region: [0; 64],
-            plate_type: [0; 64],
-            direction: [0; 64],
-            lane: [0; 64],
-            vehicle_type: [0; 64],
-            vehicle_color: [0; 64],
-            object_id: [0; 96],
-            correlation_id: [0; 96],
-            has_bounding_box: false,
-            bbox_left: 0.,
-            bbox_top: 0.,
-            bbox_right: 0.,
-            bbox_bottom: 0.,
-        },
-        onvif_lpr_event_t {
-            source: onvif_lpr_source_t::ONVIF_LPR_SOURCE_PROFILE_M,
-            asserted: false,
-            observed_at_ms: 0,
-            topic: [0; 256],
-            plate: [0; 64],
-            has_confidence: false,
-            confidence: 0.,
-            country: [0; 64],
-            region: [0; 64],
-            plate_type: [0; 64],
-            direction: [0; 64],
-            lane: [0; 64],
-            vehicle_type: [0; 64],
-            vehicle_color: [0; 64],
-            object_id: [0; 96],
-            correlation_id: [0; 96],
-            has_bounding_box: false,
-            bbox_left: 0.,
-            bbox_top: 0.,
-            bbox_right: 0.,
-            bbox_bottom: 0.,
-        },
-        onvif_lpr_event_t {
-            source: onvif_lpr_source_t::ONVIF_LPR_SOURCE_PROFILE_M,
-            asserted: false,
-            observed_at_ms: 0,
-            topic: [0; 256],
-            plate: [0; 64],
-            has_confidence: false,
-            confidence: 0.,
-            country: [0; 64],
-            region: [0; 64],
-            plate_type: [0; 64],
-            direction: [0; 64],
-            lane: [0; 64],
-            vehicle_type: [0; 64],
-            vehicle_color: [0; 64],
-            object_id: [0; 96],
-            correlation_id: [0; 96],
-            has_bounding_box: false,
-            bbox_left: 0.,
-            bbox_top: 0.,
-            bbox_right: 0.,
-            bbox_bottom: 0.,
-        },
-        onvif_lpr_event_t {
-            source: onvif_lpr_source_t::ONVIF_LPR_SOURCE_PROFILE_M,
-            asserted: false,
-            observed_at_ms: 0,
-            topic: [0; 256],
-            plate: [0; 64],
-            has_confidence: false,
-            confidence: 0.,
-            country: [0; 64],
-            region: [0; 64],
-            plate_type: [0; 64],
-            direction: [0; 64],
-            lane: [0; 64],
-            vehicle_type: [0; 64],
-            vehicle_color: [0; 64],
-            object_id: [0; 96],
-            correlation_id: [0; 96],
-            has_bounding_box: false,
-            bbox_left: 0.,
-            bbox_top: 0.,
-            bbox_right: 0.,
-            bbox_bottom: 0.,
-        },
-        onvif_lpr_event_t {
-            source: onvif_lpr_source_t::ONVIF_LPR_SOURCE_PROFILE_M,
-            asserted: false,
-            observed_at_ms: 0,
-            topic: [0; 256],
-            plate: [0; 64],
-            has_confidence: false,
-            confidence: 0.,
-            country: [0; 64],
-            region: [0; 64],
-            plate_type: [0; 64],
-            direction: [0; 64],
-            lane: [0; 64],
-            vehicle_type: [0; 64],
-            vehicle_color: [0; 64],
-            object_id: [0; 96],
-            correlation_id: [0; 96],
-            has_bounding_box: false,
-            bbox_left: 0.,
-            bbox_top: 0.,
-            bbox_right: 0.,
-            bbox_bottom: 0.,
-        },
-        onvif_lpr_event_t {
-            source: onvif_lpr_source_t::ONVIF_LPR_SOURCE_PROFILE_M,
-            asserted: false,
-            observed_at_ms: 0,
-            topic: [0; 256],
-            plate: [0; 64],
-            has_confidence: false,
-            confidence: 0.,
-            country: [0; 64],
-            region: [0; 64],
-            plate_type: [0; 64],
-            direction: [0; 64],
-            lane: [0; 64],
-            vehicle_type: [0; 64],
-            vehicle_color: [0; 64],
-            object_id: [0; 96],
-            correlation_id: [0; 96],
-            has_bounding_box: false,
-            bbox_left: 0.,
-            bbox_top: 0.,
-            bbox_right: 0.,
-            bbox_bottom: 0.,
-        },
-        onvif_lpr_event_t {
-            source: onvif_lpr_source_t::ONVIF_LPR_SOURCE_PROFILE_M,
-            asserted: false,
-            observed_at_ms: 0,
-            topic: [0; 256],
-            plate: [0; 64],
-            has_confidence: false,
-            confidence: 0.,
-            country: [0; 64],
-            region: [0; 64],
-            plate_type: [0; 64],
-            direction: [0; 64],
-            lane: [0; 64],
-            vehicle_type: [0; 64],
-            vehicle_color: [0; 64],
-            object_id: [0; 96],
-            correlation_id: [0; 96],
-            has_bounding_box: false,
-            bbox_left: 0.,
-            bbox_top: 0.,
-            bbox_right: 0.,
-            bbox_bottom: 0.,
-        },
-        onvif_lpr_event_t {
-            source: onvif_lpr_source_t::ONVIF_LPR_SOURCE_PROFILE_M,
-            asserted: false,
-            observed_at_ms: 0,
-            topic: [0; 256],
-            plate: [0; 64],
-            has_confidence: false,
-            confidence: 0.,
-            country: [0; 64],
-            region: [0; 64],
-            plate_type: [0; 64],
-            direction: [0; 64],
-            lane: [0; 64],
-            vehicle_type: [0; 64],
-            vehicle_color: [0; 64],
-            object_id: [0; 96],
-            correlation_id: [0; 96],
-            has_bounding_box: false,
-            bbox_left: 0.,
-            bbox_top: 0.,
-            bbox_right: 0.,
-            bbox_bottom: 0.,
-        },
-        onvif_lpr_event_t {
-            source: onvif_lpr_source_t::ONVIF_LPR_SOURCE_PROFILE_M,
-            asserted: false,
-            observed_at_ms: 0,
-            topic: [0; 256],
-            plate: [0; 64],
-            has_confidence: false,
-            confidence: 0.,
-            country: [0; 64],
-            region: [0; 64],
-            plate_type: [0; 64],
-            direction: [0; 64],
-            lane: [0; 64],
-            vehicle_type: [0; 64],
-            vehicle_color: [0; 64],
-            object_id: [0; 96],
-            correlation_id: [0; 96],
-            has_bounding_box: false,
-            bbox_left: 0.,
-            bbox_top: 0.,
-            bbox_right: 0.,
-            bbox_bottom: 0.,
-        },
-        onvif_lpr_event_t {
-            source: onvif_lpr_source_t::ONVIF_LPR_SOURCE_PROFILE_M,
-            asserted: false,
-            observed_at_ms: 0,
-            topic: [0; 256],
-            plate: [0; 64],
-            has_confidence: false,
-            confidence: 0.,
-            country: [0; 64],
-            region: [0; 64],
-            plate_type: [0; 64],
-            direction: [0; 64],
-            lane: [0; 64],
-            vehicle_type: [0; 64],
-            vehicle_color: [0; 64],
-            object_id: [0; 96],
-            correlation_id: [0; 96],
-            has_bounding_box: false,
-            bbox_left: 0.,
-            bbox_top: 0.,
-            bbox_right: 0.,
-            bbox_bottom: 0.,
-        },
-        onvif_lpr_event_t {
-            source: onvif_lpr_source_t::ONVIF_LPR_SOURCE_PROFILE_M,
-            asserted: false,
-            observed_at_ms: 0,
-            topic: [0; 256],
-            plate: [0; 64],
-            has_confidence: false,
-            confidence: 0.,
-            country: [0; 64],
-            region: [0; 64],
-            plate_type: [0; 64],
-            direction: [0; 64],
-            lane: [0; 64],
-            vehicle_type: [0; 64],
-            vehicle_color: [0; 64],
-            object_id: [0; 96],
-            correlation_id: [0; 96],
-            has_bounding_box: false,
-            bbox_left: 0.,
-            bbox_top: 0.,
-            bbox_right: 0.,
-            bbox_bottom: 0.,
-        },
-        onvif_lpr_event_t {
-            source: onvif_lpr_source_t::ONVIF_LPR_SOURCE_PROFILE_M,
-            asserted: false,
-            observed_at_ms: 0,
-            topic: [0; 256],
-            plate: [0; 64],
-            has_confidence: false,
-            confidence: 0.,
-            country: [0; 64],
-            region: [0; 64],
-            plate_type: [0; 64],
-            direction: [0; 64],
-            lane: [0; 64],
-            vehicle_type: [0; 64],
-            vehicle_color: [0; 64],
-            object_id: [0; 96],
-            correlation_id: [0; 96],
-            has_bounding_box: false,
-            bbox_left: 0.,
-            bbox_top: 0.,
-            bbox_right: 0.,
-            bbox_bottom: 0.,
-        },
-        onvif_lpr_event_t {
-            source: onvif_lpr_source_t::ONVIF_LPR_SOURCE_PROFILE_M,
-            asserted: false,
-            observed_at_ms: 0,
-            topic: [0; 256],
-            plate: [0; 64],
-            has_confidence: false,
-            confidence: 0.,
-            country: [0; 64],
-            region: [0; 64],
-            plate_type: [0; 64],
-            direction: [0; 64],
-            lane: [0; 64],
-            vehicle_type: [0; 64],
-            vehicle_color: [0; 64],
-            object_id: [0; 96],
-            correlation_id: [0; 96],
-            has_bounding_box: false,
-            bbox_left: 0.,
-            bbox_top: 0.,
-            bbox_right: 0.,
-            bbox_bottom: 0.,
-        },
-        onvif_lpr_event_t {
-            source: onvif_lpr_source_t::ONVIF_LPR_SOURCE_PROFILE_M,
-            asserted: false,
-            observed_at_ms: 0,
-            topic: [0; 256],
-            plate: [0; 64],
-            has_confidence: false,
-            confidence: 0.,
-            country: [0; 64],
-            region: [0; 64],
-            plate_type: [0; 64],
-            direction: [0; 64],
-            lane: [0; 64],
-            vehicle_type: [0; 64],
-            vehicle_color: [0; 64],
-            object_id: [0; 96],
-            correlation_id: [0; 96],
-            has_bounding_box: false,
-            bbox_left: 0.,
-            bbox_top: 0.,
-            bbox_right: 0.,
-            bbox_bottom: 0.,
-        },
-        onvif_lpr_event_t {
-            source: onvif_lpr_source_t::ONVIF_LPR_SOURCE_PROFILE_M,
-            asserted: false,
-            observed_at_ms: 0,
-            topic: [0; 256],
-            plate: [0; 64],
-            has_confidence: false,
-            confidence: 0.,
-            country: [0; 64],
-            region: [0; 64],
-            plate_type: [0; 64],
-            direction: [0; 64],
-            lane: [0; 64],
-            vehicle_type: [0; 64],
-            vehicle_color: [0; 64],
-            object_id: [0; 96],
-            correlation_id: [0; 96],
-            has_bounding_box: false,
-            bbox_left: 0.,
-            bbox_top: 0.,
-            bbox_right: 0.,
-            bbox_bottom: 0.,
-        },
-    ];
+    if !ci_contains(
+        response,
+        b"LicensePlate\0".as_ptr() as *const ::core::ffi::c_char,
+    ) && !ci_contains(response, b"ANPR\0".as_ptr() as *const ::core::ffi::c_char)
+        && !ci_contains(response, b"ALPR\0".as_ptr() as *const ::core::ffi::c_char)
+        && !ci_contains(response, b"LPR\0".as_ptr() as *const ::core::ffi::c_char)
+    {
+        return;
+    }
+    let events_size: size_t = (C2Rust_Unnamed_1::MAX_LPR_EVENTS_PER_PULL.0 as ::core::ffi::c_int
+        as size_t)
+        .wrapping_mul(::core::mem::size_of::<onvif_lpr_event_t>());
+    let mut events: *mut onvif_lpr_event_t = calloc(
+        C2Rust_Unnamed_1::MAX_LPR_EVENTS_PER_PULL.0 as ::core::ffi::c_int as size_t,
+        ::core::mem::size_of::<onvif_lpr_event_t>(),
+    ) as *mut onvif_lpr_event_t;
+    if events.is_null() {
+        return;
+    }
     let mut count: ::core::ffi::c_int = onvif_parse_lpr_events(
         response,
-        &raw mut events as *mut onvif_lpr_event_t,
-        ::core::mem::size_of::<[onvif_lpr_event_t; 16]>()
-            .wrapping_div(::core::mem::size_of::<onvif_lpr_event_t>()),
+        events,
+        C2Rust_Unnamed_1::MAX_LPR_EVENTS_PER_PULL.0 as ::core::ffi::c_int as size_t,
     );
     if count <= 0 as ::core::ffi::c_int {
-        secure_clear(
-            &raw mut events as *mut onvif_lpr_event_t as *mut ::core::ffi::c_void,
-            ::core::mem::size_of::<[onvif_lpr_event_t; 16]>(),
-        );
+        secure_clear(events as *mut ::core::ffi::c_void, events_size);
+        free(events as *mut ::core::ffi::c_void);
         return;
     }
     if lpr_crypto_key_available() == 0 {
@@ -4273,10 +4327,8 @@ unsafe extern "C" fn store_lpr_notifications(
                     .as_ptr() as *const ::core::ffi::c_char,
             );
         }
-        secure_clear(
-            &raw mut events as *mut onvif_lpr_event_t as *mut ::core::ffi::c_void,
-            ::core::mem::size_of::<[onvif_lpr_event_t; 16]>(),
-        );
+        secure_clear(events as *mut ::core::ffi::c_void, events_size);
+        free(events as *mut ::core::ffi::c_void);
         return;
     }
     let mut stream: stream_config_t = stream_config_t {
@@ -4353,10 +4405,8 @@ unsafe extern "C" fn store_lpr_notifications(
             b"Cannot associate ONVIF LPR notifications with stream identity\0".as_ptr()
                 as *const ::core::ffi::c_char,
         );
-        secure_clear(
-            &raw mut events as *mut onvif_lpr_event_t as *mut ::core::ffi::c_void,
-            ::core::mem::size_of::<[onvif_lpr_event_t; 16]>(),
-        );
+        secure_clear(events as *mut ::core::ffi::c_void, events_size);
+        free(events as *mut ::core::ffi::c_void);
         return;
     }
     let mut recording_id: uint64_t = get_current_recording_id_for_stream(stream_name);
@@ -4428,7 +4478,7 @@ unsafe extern "C" fn store_lpr_notifications(
         if db_lpr_read_from_onvif(
             &raw mut stream.camera_uuid as *mut ::core::ffi::c_char,
             stream_name,
-            (&raw mut events as *mut onvif_lpr_event_t).offset(i as isize),
+            events.offset(i as isize),
             &raw mut input,
         ) != 0 as ::core::ffi::c_int
         {
@@ -4797,10 +4847,8 @@ unsafe extern "C" fn store_lpr_notifications(
         }
         i += 1;
     }
-    secure_clear(
-        &raw mut events as *mut onvif_lpr_event_t as *mut ::core::ffi::c_void,
-        ::core::mem::size_of::<[onvif_lpr_event_t; 16]>(),
-    );
+    secure_clear(events as *mut ::core::ffi::c_void, events_size);
+    free(events as *mut ::core::ffi::c_void);
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn init_onvif_detection_system() -> ::core::ffi::c_int {
@@ -5016,9 +5064,7 @@ pub unsafe extern "C" fn detect_motion_onvif(
         log_level_t::LOG_LEVEL_DEBUG,
         LOG_COMPONENT,
         _log_stream_name,
-        b"ONVIF Detection: Starting detection with URL: %s\0".as_ptr()
-            as *const ::core::ffi::c_char,
-        onvif_url,
+        b"ONVIF Detection: Starting detection\0".as_ptr() as *const ::core::ffi::c_char,
     );
     _log_message_ctx(
         log_level_t::LOG_LEVEL_DEBUG,
@@ -5027,15 +5073,17 @@ pub unsafe extern "C" fn detect_motion_onvif(
         b"ONVIF Detection: Stream name: %s\0".as_ptr() as *const ::core::ffi::c_char,
         stream_name,
     );
+    let mut camera_lock: *mut pthread_mutex_t = camera_lock_for_url(onvif_url);
+    pthread_mutex_lock(camera_lock);
     let mut subscription: *mut onvif_subscription_t =
         get_subscription(onvif_url, username, password);
     if subscription.is_null() {
+        pthread_mutex_unlock(camera_lock);
         _log_message_ctx(
             log_level_t::LOG_LEVEL_ERROR,
             LOG_COMPONENT,
             _log_stream_name,
-            b"Failed to get subscription for %s\0".as_ptr() as *const ::core::ffi::c_char,
-            onvif_url,
+            b"Failed to get subscription\0".as_ptr() as *const ::core::ffi::c_char,
         );
         return -1 as ::core::ffi::c_int;
     }
@@ -5048,6 +5096,7 @@ pub unsafe extern "C" fn detect_motion_onvif(
         request_body,
         onvif_operation_t::ONVIF_OPERATION_PULL_MESSAGES,
         &raw mut transport_dropped,
+        onvif_url,
     );
     if response.is_null() {
         if !transport_dropped {
@@ -5060,6 +5109,7 @@ pub unsafe extern "C" fn detect_motion_onvif(
             );
         }
         note_pull_failure(onvif_url);
+        pthread_mutex_unlock(camera_lock);
         return if transport_dropped as ::core::ffi::c_int != 0 {
             ONVIF_DETECT_RETRY
         } else {
@@ -5067,6 +5117,7 @@ pub unsafe extern "C" fn detect_motion_onvif(
         };
     }
     note_pull_success(onvif_url);
+    pthread_mutex_unlock(camera_lock);
     let mut event_label: [::core::ffi::c_char; 32] = [
         0 as ::core::ffi::c_char,
         0,
@@ -5456,7 +5507,8 @@ pub unsafe extern "C" fn detect_motion_onvif(
             log_level_t::LOG_LEVEL_DEBUG,
             LOG_COMPONENT,
             _log_stream_name,
-            b"ONVIF Detection: No motion detected for %s\0".as_ptr() as *const ::core::ffi::c_char,
+            b"ONVIF Detection: No asserted motion event for %s\0".as_ptr()
+                as *const ::core::ffi::c_char,
             stream_name,
         );
         (*result).count = 0 as ::core::ffi::c_int;

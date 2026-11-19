@@ -19,8 +19,11 @@
 #include <strings.h>
 
 #include "web/go2rtc_websocket.h"
+#include "web/go2rtc_media_policy.h"
 #include "web/httpd_utils.h"
 #include "web/libuv_connection.h"
+#define LOG_COMPONENT "go2rtcWebSocket"
+#include "core/logger.h"
 
 #define WS_BUFFER_SIZE (64 * 1024)
 #define WS_HEADER_LIMIT 8192
@@ -77,6 +80,74 @@ static bool header_token(const char *value, const char *token) {
     return false;
 }
 
+/* Origin and Host carry authorities, not paths or user credentials. Keep the
+ * bracketed IPv6 literal intact when finding an optional port. */
+static bool parse_authority(const char *value, const char **host, size_t *host_len,
+                            unsigned short *port, bool *has_port) {
+    if (!value || !*value) return false;
+    const char *end = value + strlen(value);
+    for (const char *p = value; p < end; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c <= ' ' || c == 127 || strchr("/@?#\\%", c)) return false;
+    }
+
+    const char *port_start = NULL;
+    if (*value == '[') {
+        const char *closing = strchr(value, ']');
+        if (!closing || closing == value + 1 ||
+            memchr(value + 1, '[', (size_t)(closing - value - 1))) return false;
+        *host_len = (size_t)(closing + 1 - value);
+        if (closing + 1 < end) {
+            if (closing[1] != ':') return false;
+            port_start = closing + 2;
+        }
+    } else {
+        if (strchr(value, '[') || strchr(value, ']')) return false;
+        const char *colon = strchr(value, ':');
+        *host_len = colon ? (size_t)(colon - value) : (size_t)(end - value);
+        if (colon) port_start = colon + 1;
+    }
+    if (!*host_len) return false;
+    *host = value;
+    *has_port = port_start != NULL;
+    *port = 0;
+    if (!port_start) return true;
+    if (port_start == end || (size_t)(end - port_start) > 5) return false;
+    unsigned number = 0;
+    for (const char *p = port_start; p < end; p++) {
+        if (!isdigit((unsigned char)*p)) return false;
+        number = number * 10 + (unsigned)(*p - '0');
+        if (number > 65535) return false;
+    }
+    if (!number) return false;
+    *port = (unsigned short)number;
+    return true;
+}
+
+static bool origin_matches_host(const char *origin, const char *host) {
+    const char *authority;
+    unsigned short default_port;
+    if (strncasecmp(origin, "http://", 7) == 0) {
+        authority = origin + 7;
+        default_port = 80;
+    } else if (strncasecmp(origin, "https://", 8) == 0) {
+        authority = origin + 8;
+        default_port = 443;
+    } else {
+        return false;
+    }
+    const char *origin_name = NULL, *host_name = NULL;
+    size_t origin_len = 0, host_len = 0;
+    unsigned short origin_port = 0, host_port = 0;
+    bool origin_has_port = false, host_has_port = false;
+    if (!parse_authority(authority, &origin_name, &origin_len, &origin_port, &origin_has_port) ||
+        !parse_authority(host, &host_name, &host_len, &host_port, &host_has_port)) return false;
+    return origin_len == host_len &&
+           strncasecmp(origin_name, host_name, origin_len) == 0 &&
+           (origin_has_port ? origin_port : default_port) ==
+           (host_has_port ? host_port : default_port);
+}
+
 bool go2rtc_websocket_validate(const http_request_t *req, http_response_t *res) {
     const char *key = single_header(req, "Sec-WebSocket-Key");
     const char *version = single_header(req, "Sec-WebSocket-Version");
@@ -97,9 +168,7 @@ bool go2rtc_websocket_validate(const http_request_t *req, http_response_t *res) 
     int origin_count = 0;
     for (int i = 0; i < req->num_headers; i++)
         if (strcasecmp(req->headers[i].name, "Origin") == 0) origin_count++;
-    const char *authority = origin && strncmp(origin, "http://", 7) == 0 ? origin + 7 :
-                            origin && strncmp(origin, "https://", 8) == 0 ? origin + 8 : NULL;
-    if (!host || origin_count > 1 || (origin && (!authority || strcasecmp(authority, host) != 0))) {
+    if (!host || origin_count > 1 || (origin && !origin_matches_host(origin, host))) {
         http_response_set_json_error(res, 403, "WebSocket origin denied");
         return false;
     }
@@ -134,16 +203,20 @@ static void close_proxy(websocket_proxy_t *proxy) {
     uv_close((uv_handle_t *)&proxy->timeout, handle_closed);
 }
 
-static void fail_proxy(websocket_proxy_t *proxy) {
+static void fail_proxy_with_error(websocket_proxy_t *proxy, const char *message) {
     if (!proxy->upgraded && proxy->conn && !proxy->closing) {
         libuv_connection_t *conn = proxy->conn;
         proxy->conn = NULL;
         conn->go2rtc_websocket = NULL;
         conn->async_response_pending = false;
-        http_response_set_json_error(&conn->response, 502, "go2rtc WebSocket unavailable");
+        http_response_set_json_error(&conn->response, 502, message);
         libuv_send_response_ex(conn, &conn->response, WRITE_ACTION_CLOSE);
     }
     close_proxy(proxy);
+}
+
+static void fail_proxy(websocket_proxy_t *proxy) {
+    fail_proxy_with_error(proxy, "go2rtc WebSocket unavailable");
 }
 
 /* The client side may be TLS; route its I/O through the connection's
@@ -244,9 +317,14 @@ static void upstream_read(uv_stream_t *stream, ssize_t count, const uv_buf_t *bu
             free(buf->base);
             return;
         }
-        if (strncmp(proxy->headers, "HTTP/1.1 101 ", 13) != 0 ||
-            !strcasestr(proxy->headers, "\r\nX-LightNVR-Media-Policy: 1\r\n")) {
+        if (strncmp(proxy->headers, "HTTP/1.1 101 ", 13) != 0) {
             fail_proxy(proxy);
+            free(buf->base);
+            return;
+        }
+        if (!strcasestr(proxy->headers, "\r\nX-LightNVR-Media-Policy: 1\r\n")) {
+            log_warn("%s (WebSocket upgrade)", GO2RTC_MEDIA_POLICY_ERROR);
+            fail_proxy_with_error(proxy, GO2RTC_MEDIA_POLICY_ERROR);
             free(buf->base);
             return;
         }

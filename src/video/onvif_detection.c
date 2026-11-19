@@ -67,6 +67,18 @@ static const char *onvif_operation_action(onvif_operation_t operation) {
     return (unsigned int)operation < ONVIF_OPERATION_COUNT ? actions[operation] : NULL;
 }
 
+static bool has_uri_scheme_prefix(const char *reference) {
+    if (!reference || !isalpha((unsigned char)reference[0])) return false;
+
+    for (size_t i = 1; reference[i] != '\0'; ++i) {
+        unsigned char ch = (unsigned char)reference[i];
+        if (ch == ':') return true;
+        if (!(isalnum(ch) || ch == '+' || ch == '-' || ch == '.')) return false;
+    }
+
+    return false;
+}
+
 /* Tapo cameras accept a ten-minute PullPoint lease and reject both the old
  * one-hour request and a request with no InitialTerminationTime (#567).
  * Renew at 80% of the camera-reported lease so normal polling jitter cannot
@@ -118,6 +130,7 @@ static void secure_clear(void *data, size_t size) {
 typedef struct {
     char camera_url[512];           // URL of the camera (used as the key for lookup)
     char subscription_address[512]; // Address returned by CreatePullPointSubscription (full URL)
+    char service_url[512];          // Endpoint that created this PullPoint
     char username[64];              // Username for authentication
     char password[64];              // Password for authentication
     time_t creation_time;
@@ -126,6 +139,7 @@ typedef struct {
     time_t first_pull_failure_time;
     int consecutive_pull_failures;
     bool active;
+    bool reserved;                  // Creation or renewal in progress
     CURL *curl;                     // Connection for this PullPoint (see subscription_locks)
 } onvif_subscription_t;
 
@@ -135,6 +149,24 @@ static onvif_subscription_t subscriptions[MAX_SUBSCRIPTIONS];
 static int subscription_count = 0;
 static pthread_mutex_t subscription_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool subscriptions_shutting_down = false;
+
+/* Serialize operations for one camera across table lookup and PullMessages.
+ * Hash collisions only reduce concurrency; they cannot mix camera identities. */
+static pthread_mutex_t camera_locks[64];
+static pthread_once_t camera_locks_once = PTHREAD_ONCE_INIT;
+
+static void init_camera_locks(void) {
+    for (size_t i = 0; i < sizeof(camera_locks) / sizeof(camera_locks[0]); i++)
+        pthread_mutex_init(&camera_locks[i], NULL);
+}
+
+static pthread_mutex_t *camera_lock_for_url(const char *url) {
+    unsigned long hash = 5381;
+    for (const unsigned char *p = (const unsigned char *)url; *p; p++)
+        hash = hash * 33 + *p;
+    pthread_once(&camera_locks_once, init_camera_locks);
+    return &camera_locks[hash % (sizeof(camera_locks) / sizeof(camera_locks[0]))];
+}
 
 /* Each PullPoint talks to its camera over its own CURL handle, serialized by
  * the lock of the same index. A PullMessages long poll holds the camera's
@@ -640,8 +672,12 @@ static bool is_transport_drop(const onvif_request_status_t *status) {
            status->curl_code == CURLE_SEND_ERROR;
 }
 
-static bool subscription_address_matches_camera_origin(const char *camera_url,
-                                                          const char *subscription_address) {
+/* PullPoint references can use a camera-local ephemeral port (for example,
+ * Tapo creates the subscription on :2020 and serves PullMessages on :1026).
+ * Keep the scheme and host pinned to the configured camera while allowing a
+ * different valid TCP port on that same host. */
+static bool subscription_address_matches_camera_host(const char *camera_url,
+                                                      const char *subscription_address) {
     if (!url_is_http_endpoint(camera_url) || !url_is_http_endpoint(subscription_address)) return false;
 
     CURLU *camera = curl_url();
@@ -662,9 +698,11 @@ static bool subscription_address_matches_camera_origin(const char *camera_url,
     if (curl_url_get(camera, CURLUPART_PORT, &camera_port, CURLU_DEFAULT_PORT) != CURLUE_OK) goto cleanup;
     if (curl_url_get(sub, CURLUPART_PORT, &sub_port, CURLU_DEFAULT_PORT) != CURLUE_OK) goto cleanup;
 
-    long camera_number = strtol(camera_port, NULL, 10);
-    long sub_number = strtol(sub_port, NULL, 10);
-    ok = camera_number > 0 && camera_number == sub_number &&
+    char *camera_end = NULL, *sub_end = NULL;
+    long camera_number = strtol(camera_port, &camera_end, 10);
+    long sub_number = strtol(sub_port, &sub_end, 10);
+    ok = camera_end && *camera_end == '\0' && camera_number >= 1 && camera_number <= 65535 &&
+         sub_end && *sub_end == '\0' && sub_number >= 1 && sub_number <= 65535 &&
          strcasecmp(camera_scheme, sub_scheme) == 0 &&
          strcasecmp(camera_host, sub_host) == 0;
 
@@ -691,27 +729,57 @@ cleanup:
 static char *send_subscription_request(onvif_subscription_t *subscription,
                                        const char *request_body,
                                        onvif_operation_t operation,
-                                       bool *transport_dropped) {
+                                       bool *transport_dropped,
+                                       const char *expected_camera_url) {
     if (transport_dropped) *transport_dropped = false;
     const char *action = onvif_operation_action(operation);
     if (!subscription || !request_body || !action) return NULL;
 
-    if (strncasecmp(subscription->subscription_address, "http://", 7) == 0 ||
-        strncasecmp(subscription->subscription_address, "https://", 8) == 0) {
-        if (!subscription_address_matches_camera_origin(subscription->camera_url,
-                                                         subscription->subscription_address)) {
-            log_warn("Rejected ONVIF subscription endpoint outside the configured camera origin");
-            return NULL;
+    pthread_mutex_t *lock = subscription_lock(subscription);
+    if (!lock) return NULL;
+    pthread_mutex_lock(lock);
+    if (expected_camera_url &&
+        (!subscription->active ||
+         strcmp(subscription->camera_url, expected_camera_url) != 0)) {
+        pthread_mutex_unlock(lock);
+        return NULL;
+    }
+
+    char *target_url = NULL;
+    if (has_uri_scheme_prefix(subscription->subscription_address) ||
+        strncmp(subscription->subscription_address, "//", 2) == 0) {
+        if (strncmp(subscription->subscription_address, "//", 2) != 0 &&
+            (strncasecmp(subscription->subscription_address, "http://", 7) == 0 ||
+             strncasecmp(subscription->subscription_address, "https://", 8) == 0))
+            target_url = strdup(subscription->subscription_address);
+    } else {
+        CURLU *resolved = curl_url();
+        const char *base = subscription->service_url[0] ?
+                           subscription->service_url : subscription->camera_url;
+        if (resolved && curl_url_set(resolved, CURLUPART_URL, base, 0) == CURLUE_OK &&
+            curl_url_set(resolved, CURLUPART_URL,
+                         subscription->subscription_address, 0) == CURLUE_OK) {
+            char *curl_target = NULL;
+            if (curl_url_get(resolved, CURLUPART_URL, &curl_target, 0) == CURLUE_OK) {
+                target_url = strdup(curl_target);
+                curl_free(curl_target);
+            }
         }
+        if (resolved) curl_url_cleanup(resolved);
+    }
+    if (!target_url || !subscription_address_matches_camera_host(subscription->camera_url,
+                                                                  target_url)) {
+            free(target_url);
+            log_warn("Rejected ONVIF subscription endpoint with a different scheme/host or invalid port");
+            pthread_mutex_unlock(lock);
+            return NULL;
+    }
         char *response = NULL;
         onvif_request_status_t status = {0};
         int attempts = 0;
-        pthread_mutex_t *lock = subscription_lock(subscription);
-        if (!lock) return NULL;
-
-        pthread_mutex_lock(lock);
         if (!subscription->curl) subscription->curl = create_curl_handle();
         if (!subscription->curl) {
+            free(target_url);
             pthread_mutex_unlock(lock);
             log_error("Failed to create a curl handle for the ONVIF subscription of %s",
                       subscription->camera_url);
@@ -720,7 +788,7 @@ static char *send_subscription_request(onvif_subscription_t *subscription,
         while (attempts < ONVIF_PULL_DROP_MAX_ATTEMPTS) {
             attempts++;
             response = perform_onvif_request_locked(subscription->curl,
-                                                    subscription->subscription_address,
+                                                    target_url,
                                                     subscription->username,
                                                     subscription->password,
                                                     request_body, operation, &status);
@@ -735,6 +803,7 @@ static char *send_subscription_request(onvif_subscription_t *subscription,
                       ONVIF_PULL_DROP_MAX_ATTEMPTS);
             usleep(ONVIF_PULL_DROP_RETRY_DELAY_MS * 1000);
         }
+        free(target_url);
         pthread_mutex_unlock(lock);
 
         if (transport_dropped) {
@@ -753,21 +822,9 @@ static char *send_subscription_request(onvif_subscription_t *subscription,
                         status.new_connections, curl_easy_strerror(status.curl_code));
         }
         return response;
-    }
-
-    // Only genuine relative paths may use the legacy camera-local fallback.
-    // An unsupported scheme or network-path URL is not a relative service.
-    if (strchr(subscription->subscription_address, ':') ||
-        strncmp(subscription->subscription_address, "//", 2) == 0) return NULL;
-    const char *last_slash = strrchr(subscription->subscription_address, '/');
-    if (!last_slash || last_slash[1] == '\0') return NULL;
-    return send_onvif_request(subscription->camera_url,
-                              subscription->username,
-                              subscription->password,
-                              request_body, last_slash + 1, operation);
 }
 
-/* subscription_mutex must be held by the caller. */
+/* The caller reserves the slot or runs during shutdown. */
 static bool renew_subscription_locked(onvif_subscription_t *subscription) {
     const char *request_body =
         "<Renew xmlns=\"http://docs.oasis-open.org/wsn/b-2\">"
@@ -775,7 +832,7 @@ static bool renew_subscription_locked(onvif_subscription_t *subscription) {
         "</Renew>";
 
     char *response = send_subscription_request(subscription, request_body,
-                                               ONVIF_OPERATION_RENEW, NULL);
+                                               ONVIF_OPERATION_RENEW, NULL, NULL);
     if (!response) return false;
 
     int lease_seconds = subscription_lease_seconds(response);
@@ -786,7 +843,7 @@ static bool renew_subscription_locked(onvif_subscription_t *subscription) {
     return true;
 }
 
-/* Best-effort cleanup. subscription_mutex must be held by the caller. */
+/* Best-effort cleanup. The caller reserves the slot or runs during shutdown. */
 static void unsubscribe_subscription_locked(onvif_subscription_t *subscription) {
     if (!subscription || !subscription->active ||
         subscription->subscription_address[0] == '\0') {
@@ -796,7 +853,7 @@ static void unsubscribe_subscription_locked(onvif_subscription_t *subscription) 
     const char *request_body =
         "<Unsubscribe xmlns=\"http://docs.oasis-open.org/wsn/b-2\"/>";
     char *response = send_subscription_request(subscription, request_body,
-                                               ONVIF_OPERATION_UNSUBSCRIBE, NULL);
+                                               ONVIF_OPERATION_UNSUBSCRIBE, NULL, NULL);
     if (response) {
         free(response);
         log_debug("Unsubscribed ONVIF PullPoint for %s", subscription->camera_url);
@@ -831,6 +888,10 @@ static char *discover_event_service_url(const char *url, const char *username, c
         return NULL;
     }
 
+    /* Preserve an untouched copy for the fallback substring heuristic.
+     * ezxml_parse_str mutates its input buffer in place. */
+    char *response_fallback = strdup(response);
+
     /* ezxml_parse_str modifies the buffer in place, and the returned
      * tree references it, so keep `response` alive until we copy the
      * matched URL out. */
@@ -862,9 +923,9 @@ static char *discover_event_service_url(const char *url, const char *username, c
 
     /* Fallback: the old substring heuristic, for responses that ezxml
      * can't parse (malformed XML from buggy firmware). */
-    if (!event_url) {
+    if (!event_url && response_fallback) {
         const char *events_ns = "http://www.onvif.org/ver10/events/wsdl";
-        const char *ns_pos = strstr(response, events_ns);
+        const char *ns_pos = strstr(response_fallback, events_ns);
         if (ns_pos) {
             const char *xaddr_open[]  = {"<tds:XAddr>", "<XAddr>", NULL};
             const char *xaddr_close[] = {"</tds:XAddr>", "</XAddr>", NULL};
@@ -882,6 +943,8 @@ static char *discover_event_service_url(const char *url, const char *username, c
         }
     }
 
+    free(response_fallback);
+
     if (event_url) {
         log_info("ONVIF: Discovered event service endpoint");
     } else {
@@ -893,6 +956,13 @@ static char *discover_event_service_url(const char *url, const char *username, c
 }
 
 // Find or create subscription for a camera
+static void release_subscription_reservation(int slot) {
+    pthread_mutex_lock(&subscription_mutex);
+    subscriptions[slot].reserved = false;
+    if (!subscriptions[slot].active) subscriptions[slot].camera_url[0] = '\0';
+    pthread_mutex_unlock(&subscription_mutex);
+}
+
 static onvif_subscription_t *get_subscription(const char *url, const char *username, const char *password) {
     pthread_mutex_lock(&subscription_mutex);
 
@@ -901,41 +971,74 @@ static onvif_subscription_t *get_subscription(const char *url, const char *usern
         return NULL;
     }
 
+    int slot = -1;
     // Check if we already have a subscription for this URL
     for (int i = 0; i < subscription_count; i++) {
         if (strcmp(subscriptions[i].camera_url, url) == 0) {
             // Check if subscription is still valid
             time_t now;
             time(&now);
-            
+
             if (subscriptions[i].active && now < subscriptions[i].expiration_time) {
                 if (now >= subscriptions[i].renewal_time) {
-                    log_debug("Renewing ONVIF subscription for %s", url);
+                    log_debug("Renewing ONVIF subscription");
+                    subscriptions[i].reserved = true;
+                    pthread_mutex_unlock(&subscription_mutex);
                     if (!renew_subscription_locked(&subscriptions[i])) {
-                        log_warn("ONVIF subscription renewal failed for %s; recreating it", url);
+                        log_warn("ONVIF subscription renewal failed; recreating it");
                         unsubscribe_subscription_locked(&subscriptions[i]);
+                        pthread_mutex_lock(&subscription_mutex);
+                        slot = i;
                         break;
                     }
+                    pthread_mutex_lock(&subscription_mutex);
+                    subscriptions[i].reserved = false;
                 }
 
-                log_debug("Reusing existing ONVIF subscription for %s", url);
+                log_debug("Reusing existing ONVIF subscription");
                 pthread_mutex_unlock(&subscription_mutex);
                 return &subscriptions[i];
             } else if (!subscriptions[i].active) {
-                log_info("ONVIF subscription for %s is inactive, creating new one", url);
+                log_info("ONVIF subscription is inactive, creating new one");
+                subscriptions[i].reserved = true;
+                slot = i;
                 break;
             } else {
                 /* We missed the renewal window. Best-effort Unsubscribe avoids
                  * consuming another slot if the camera granted a longer lease
                  * than the timestamps indicated. */
-                log_info("ONVIF subscription for %s expired, replacing it", url);
+                log_info("ONVIF subscription expired, replacing it");
+                subscriptions[i].reserved = true;
+                pthread_mutex_unlock(&subscription_mutex);
                 unsubscribe_subscription_locked(&subscriptions[i]);
+                pthread_mutex_lock(&subscription_mutex);
+                slot = i;
                 break;
             }
         }
     }
 
-    log_info("Creating new ONVIF subscription for %s", url);
+    if (slot < 0) {
+        for (int i = 0; i < subscription_count; i++) {
+            if (!subscriptions[i].active && !subscriptions[i].reserved) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0 && subscription_count < MAX_SUBSCRIPTIONS)
+            slot = subscription_count++;
+        if (slot < 0) {
+            log_error("No space for new ONVIF subscription");
+            pthread_mutex_unlock(&subscription_mutex);
+            return NULL;
+        }
+        subscriptions[slot].reserved = true;
+        safe_strcpy(subscriptions[slot].camera_url, url,
+                    sizeof(subscriptions[slot].camera_url), 0);
+    }
+    pthread_mutex_unlock(&subscription_mutex);
+
+    log_info("Creating new ONVIF subscription");
 
     /* Tapo accepts a ten-minute lease but rejects both PT1H and an omitted
      * InitialTerminationTime with ter:InvalidArgVal (#567). */
@@ -951,11 +1054,15 @@ static onvif_subscription_t *get_subscription(const char *url, const char *usern
     char attempted_event_url[512] = {0};
 
     if (discovered_url) {
-        log_info("ONVIF: Sending CreatePullPointSubscription to discovered endpoint");
-        safe_strcpy(attempted_event_url, discovered_url,
-                    sizeof(attempted_event_url), 0);
-        response = send_onvif_request_to_url(discovered_url, username, password, request_body,
-                                              ONVIF_OPERATION_CREATE_PULLPOINT);
+        if (subscription_address_matches_camera_host(url, discovered_url)) {
+            log_info("ONVIF: Sending CreatePullPointSubscription to discovered endpoint");
+            safe_strcpy(attempted_event_url, discovered_url,
+                        sizeof(attempted_event_url), 0);
+            response = send_onvif_request_to_url(discovered_url, username, password, request_body,
+                                                 ONVIF_OPERATION_CREATE_PULLPOINT);
+        } else {
+            log_warn("ONVIF: Ignoring discovered event endpoint outside the camera host");
+        }
         free(discovered_url);
     }
 
@@ -978,12 +1085,15 @@ static onvif_subscription_t *get_subscription(const char *url, const char *usern
             log_info("ONVIF: Trying fallback event endpoint: onvif/%s", fallback_services[i]);
             response = send_onvif_request(url, username, password, request_body,
                                           fallback_services[i], ONVIF_OPERATION_CREATE_PULLPOINT);
+            if (response)
+                safe_strcpy(attempted_event_url, fallback_url,
+                            sizeof(attempted_event_url), 0);
         }
     }
 
     if (!response) {
         log_error("Failed to create subscription on any endpoint");
-        pthread_mutex_unlock(&subscription_mutex);
+        release_subscription_reservation(slot);
         return NULL;
     }
 
@@ -993,29 +1103,35 @@ static onvif_subscription_t *get_subscription(const char *url, const char *usern
 
     if (!subscription_address) {
         log_error("Failed to extract subscription address");
-        pthread_mutex_unlock(&subscription_mutex);
+        release_subscription_reservation(slot);
         return NULL;
     }
 
-    // Find an empty slot or reuse an inactive one
-    int slot = -1;
-    for (int i = 0; i < subscription_count; i++) {
-        if (!subscriptions[i].active) {
-            slot = i;
-            break;
-        }
+    if (strlen(subscription_address) >= sizeof(subscriptions[0].subscription_address)) {
+        log_warn("ONVIF subscription address exceeds local capacity; rejecting it");
+        free(subscription_address);
+        release_subscription_reservation(slot);
+        return NULL;
     }
 
-    // If no empty slot found, add to the end if there's space
-    if (slot == -1 && subscription_count < MAX_SUBSCRIPTIONS) {
-        slot = subscription_count++;
-    }
+    pthread_mutex_lock(&subscription_mutex);
 
     // If we found a slot, use it
     if (slot >= 0) {
         /* An inactive slot can contain failure state and an old subscription
          * address. Start the replacement with a completely clean record. */
-        release_subscription_curl(&subscriptions[slot]);
+        pthread_mutex_t *slot_lock = subscription_lock(&subscriptions[slot]);
+        if (!slot_lock) {
+            free(subscription_address);
+            subscriptions[slot].reserved = false;
+            pthread_mutex_unlock(&subscription_mutex);
+            return NULL;
+        }
+        pthread_mutex_lock(slot_lock);
+        if (subscriptions[slot].curl) {
+            curl_easy_cleanup(subscriptions[slot].curl);
+            subscriptions[slot].curl = NULL;
+        }
         memset(&subscriptions[slot], 0, sizeof(subscriptions[slot]));
 
         // Store camera URL, username, and password
@@ -1028,10 +1144,13 @@ static onvif_subscription_t *get_subscription(const char *url, const char *usern
         // Store subscription address
         safe_strcpy(subscriptions[slot].subscription_address, subscription_address, 
                 sizeof(subscriptions[slot].subscription_address), 0);
+        safe_strcpy(subscriptions[slot].service_url, attempted_event_url,
+                    sizeof(subscriptions[slot].service_url), 0);
         
         // Schedule renewal from the lease the camera actually granted.
         apply_subscription_lease(&subscriptions[slot], lease_seconds);
         subscriptions[slot].active = true;
+        pthread_mutex_unlock(slot_lock);
         
         log_info("Successfully created ONVIF subscription (lease: %d seconds)", lease_seconds);
         free(subscription_address);
@@ -1077,7 +1196,11 @@ static void note_pull_failure(const char *camera_url) {
             log_warn("ONVIF PullPoint for %s has not completed a pull for %d "
                      "seconds; unsubscribing before refresh",
                      camera_url, ONVIF_PULL_FAILURE_REFRESH_SECONDS);
+            subscription->reserved = true;
+            pthread_mutex_unlock(&subscription_mutex);
             unsubscribe_subscription_locked(subscription);
+            pthread_mutex_lock(&subscription_mutex);
+            subscription->reserved = false;
         }
         break;
     }
@@ -1151,6 +1274,10 @@ static const char *normalize_object_class(const char *raw) {
         ci_contains(raw, "person") || ci_contains(raw, "pedestrian")) {
         return "person";
     }
+    /* Handle motorized two-wheelers before broad bicycle/cycle matching. */
+    if (ci_contains(raw, "motorcycle") || ci_contains(raw, "motorbike")) {
+        return "vehicle";
+    }
     /* Check non-motorized before vehicle so "NonMotor" isn't caught by "motor". */
     if (ci_contains(raw, "nonmotor") || ci_contains(raw, "bicycle") ||
         ci_contains(raw, "bike") || ci_contains(raw, "cycle")) {
@@ -1173,6 +1300,24 @@ static const char *normalize_object_class(const char *raw) {
  * object class inside a Data element, returning the normalized class (or NULL).
  * Alongside ObjectType-style values, Tapo reports asserted class flags such as
  * Name="IsVehicle" Value="true" on TPSmartEventDetector topics (#567). */
+static bool is_recognized_class_flag_name(const char *name) {
+    if (!name) return false;
+    static const char *const flags[] = {
+        "Human", "People", "Person", "Pedestrian", "Vehicle", "Car",
+        "Motorcycle", "Motorbike", "NonMotor", "Bicycle", "Bike", "Cycle",
+        "Face", "Animal", "Dog", "Cat", "Pet",
+        "IsHuman", "IsPeople", "IsPerson", "IsPedestrian", "IsVehicle", "IsCar",
+        "IsMotorcycle", "IsMotorbike", "IsNonMotor", "IsBicycle", "IsBike",
+        "IsCycle", "IsFace", "IsAnimal", "IsDog", "IsCat", "IsPet",
+        "HumanDetect", "PeopleDetect", "PersonDetect", "VehicleDetect",
+        "CarDetect", "FaceDetect", "AnimalDetect", NULL
+    };
+    for (size_t i = 0; flags[i]; ++i) {
+        if (strcasecmp(name, flags[i]) == 0) return true;
+    }
+    return false;
+}
+
 static const char *find_object_class(ezxml_t node, bool in_data) {
     for (ezxml_t c = node ? node->child : NULL; c; c = c->ordered) {
         bool inside = in_data || strcmp(local_name(c), "Data") == 0;
@@ -1186,7 +1331,8 @@ static const char *find_object_class(ezxml_t node, bool in_data) {
             }
             const char *value = ezxml_attr(c, "Value");
             if (name && value &&
-                (strcasecmp(value, "true") == 0 || strcmp(value, "1") == 0)) {
+                (strcasecmp(value, "true") == 0 || strcmp(value, "1") == 0) &&
+                is_recognized_class_flag_name(name)) {
                 const char *cls = normalize_object_class(name);
                 if (cls) return cls;
             }
@@ -1212,16 +1358,30 @@ static bool value_is_true(const char *value) {
     return strcasecmp(value, "true") == 0 || strcmp(value, "1") == 0;
 }
 
+/* Ignore truthy metadata (for example Gain=1) in motion-topic Data sections. */
+static bool is_asserted_item_name(const char *name) {
+    if (!name) return false;
+    static const char *const state_names[] = {
+        "IsMotion", "Motion", "MotionAlarm", "State", "Active", "Detected", "IsActive",
+        "Person", "People", "Human", "Vehicle", "Car", "Bicycle", "Face", "Animal", NULL
+    };
+    for (size_t i = 0; state_names[i]; ++i) {
+        if (strcasecmp(name, state_names[i]) == 0) return true;
+    }
+    return is_recognized_class_flag_name(name);
+}
+
 /*
  * Return true if any SimpleItem beneath `node` that sits inside a Data
- * element has a truthy Value.  `in_data` tracks whether an ancestor was a
- * Data element — Source/Key sections also carry SimpleItems, but their
+ * element has a truthy event-state Value. `in_data` tracks whether an ancestor
+ * was a Data element — Source/Key sections also carry SimpleItems, but their
  * Values are configuration tokens (often literally "1"), not event state.
  */
 static bool data_has_asserted_item(ezxml_t node, bool in_data) {
     for (ezxml_t c = node ? node->child : NULL; c; c = c->ordered) {
         bool inside = in_data || strcmp(local_name(c), "Data") == 0;
         if (inside && strcmp(local_name(c), "SimpleItem") == 0 &&
+            is_asserted_item_name(ezxml_attr(c, "Name")) &&
             value_is_true(ezxml_attr(c, "Value"))) {
             return true;
         }
@@ -1262,6 +1422,35 @@ static bool xml_find_active_motion(ezxml_t node, char *label, size_t label_sz) {
     return any;
 }
 
+/* Some cameras send an unclosed Motion element. Keep that compatibility case
+ * without accepting a truthy Value from an unrelated field in the payload. */
+static bool malformed_motion_element_asserted(const char *response) {
+    static const char *const true_values[] = {
+        "Value=\"true\"", "Value='true'", "Value=\"1\"", "Value='1'"
+    };
+    for (const char *tag = strchr(response, '<'); tag; tag = strchr(tag + 1, '<')) {
+        const char *gt_end = strchr(tag, '>');
+        const char *lt_end = strchr(tag + 1, '<');
+        const char *end = gt_end;
+        if (!end || (lt_end && lt_end < end)) end = lt_end;
+        if (!end) end = tag + strlen(tag);
+        const char *name = tag + 1;
+        const char *name_end = name;
+        while (name_end < end && *name_end != ' ' && *name_end != '\t' &&
+               *name_end != '\r' && *name_end != '\n' && *name_end != '/') {
+            name_end++;
+        }
+        const char *local = memchr(name, ':', (size_t)(name_end - name));
+        local = local ? local + 1 : name;
+        if (name_end - local != 6 || strncasecmp(local, "Motion", 6) != 0) continue;
+        for (size_t i = 0; i < sizeof(true_values) / sizeof(true_values[0]); i++) {
+            const char *value = strstr(name_end, true_values[i]);
+            if (value && value + strlen(true_values[i]) <= end) return true;
+        }
+    }
+    return false;
+}
+
 /*
  * Check for an ACTIVE motion event in a PullMessages response.
  *
@@ -1292,14 +1481,15 @@ static bool has_motion_event(const char *response, char *label, size_t label_sz)
     if (!copy) return false;
 
     ezxml_t xml = ezxml_parse_str(copy, strlen(copy));
-    if (!xml) {
-        /* Malformed XML from buggy firmware: fall back to substring matching,
-         * but at least require a truthy Value somewhere in the payload so a
-         * plain "motion ended" message doesn't trigger. */
+    const char *parse_error = xml ? ezxml_error(xml) : NULL;
+    if (!xml || (parse_error && parse_error[0] != '\0')) {
+        /* Malformed XML from buggy firmware: accept only an asserted Motion
+         * element, not an unrelated truthy metadata Value. */
         log_debug("ONVIF Detection: failed to parse PullMessages response, using fallback heuristic");
-        bool fallback =
-            (strstr(response, "Value=\"true\"") || strstr(response, "Value='true'") ||
-             strstr(response, "Value=\"1\"")    || strstr(response, "Value='1'"));
+        if (xml) {
+            ezxml_free(xml);
+        }
+        bool fallback = malformed_motion_element_asserted(response);
         if (fallback && label && label_sz > 0) safe_strcpy(label, "motion", label_sz, 0);
         free(copy);
         return fallback;
@@ -1317,12 +1507,17 @@ static bool has_motion_event(const char *response, char *label, size_t label_sz)
  * or placed on the general detection/event path. */
 static void store_lpr_notifications(const char *response, const char *stream_name) {
     if (!response || !stream_name || !stream_name[0]) return;
+    if (!ci_contains(response, "LicensePlate") && !ci_contains(response, "ANPR") &&
+        !ci_contains(response, "ALPR") && !ci_contains(response, "LPR")) return;
 
-    onvif_lpr_event_t events[16] = {0};
-    int count = onvif_parse_lpr_events(response, events,
-                                       sizeof(events) / sizeof(events[0]));
+    enum { MAX_LPR_EVENTS_PER_PULL = 100 };
+    const size_t events_size = MAX_LPR_EVENTS_PER_PULL * sizeof(onvif_lpr_event_t);
+    onvif_lpr_event_t *events = calloc(MAX_LPR_EVENTS_PER_PULL, sizeof(*events));
+    if (!events) return;
+    int count = onvif_parse_lpr_events(response, events, MAX_LPR_EVENTS_PER_PULL);
     if (count <= 0) {
-        secure_clear(events, sizeof(events));
+        secure_clear(events, events_size);
+        free(events);
         return;
     }
 
@@ -1332,7 +1527,8 @@ static void store_lpr_notifications(const char *response, const char *stream_nam
             log_warn("LPR reads are available but protected storage is disabled: "
                      "LIGHTNVR_LPR_MASTER_KEY_HEX is not configured");
         }
-        secure_clear(events, sizeof(events));
+        secure_clear(events, events_size);
+        free(events);
         return;
     }
 
@@ -1340,7 +1536,8 @@ static void store_lpr_notifications(const char *response, const char *stream_nam
     if (get_stream_config_by_name(stream_name, &stream) != 0 ||
         !stream.camera_uuid[0]) {
         log_warn("Cannot associate ONVIF LPR notifications with stream identity");
-        secure_clear(events, sizeof(events));
+        secure_clear(events, events_size);
+        free(events);
         return;
     }
 
@@ -1372,7 +1569,8 @@ static void store_lpr_notifications(const char *response, const char *stream_nam
         secure_clear(&input, sizeof(input));
         secure_clear(read_uuid, sizeof(read_uuid));
     }
-    secure_clear(events, sizeof(events));
+    secure_clear(events, events_size);
+    free(events);
 }
 
 /**
@@ -1506,12 +1704,15 @@ int detect_motion_onvif(const char *onvif_url, const char *username, const char 
         log_debug("ONVIF Detection: Using camera with authentication");
     }
 
-    log_debug("ONVIF Detection: Starting detection with URL: %s", onvif_url);
+    log_debug("ONVIF Detection: Starting detection");
     log_debug("ONVIF Detection: Stream name: %s", stream_name);
 
+    pthread_mutex_t *camera_lock = camera_lock_for_url(onvif_url);
+    pthread_mutex_lock(camera_lock);
     onvif_subscription_t *subscription = get_subscription(onvif_url, username, password);
     if (!subscription) {
-        log_error("Failed to get subscription for %s", onvif_url);
+        pthread_mutex_unlock(camera_lock);
+        log_error("Failed to get subscription");
         return -1;
     }
 
@@ -1528,19 +1729,21 @@ int detect_motion_onvif(const char *onvif_url, const char *username, const char 
     // when the motion window started, not when inference + DB write finished.
     time_t event_timestamp = time(NULL);
 
-    // Use the same origin check and relative-path handling as Renew/Unsubscribe.
+    // Use the same camera-host check and relative-path handling as Renew/Unsubscribe.
     bool transport_dropped = false;
     char *response = send_subscription_request(subscription, request_body,
                                                ONVIF_OPERATION_PULL_MESSAGES,
-                                               &transport_dropped);
+                                               &transport_dropped, onvif_url);
 
     if (!response) {
         if (!transport_dropped) log_error("Failed to pull messages from subscription");
         note_pull_failure(onvif_url);
+        pthread_mutex_unlock(camera_lock);
         return transport_dropped ? ONVIF_DETECT_RETRY : -1;
     }
 
     note_pull_success(onvif_url);
+    pthread_mutex_unlock(camera_lock);
 
     // Check for motion events, capturing the object class (person/vehicle/…)
     // when the camera reports a smart detection rather than plain motion.
@@ -1598,7 +1801,7 @@ int detect_motion_onvif(const char *onvif_url, const char *username, const char 
             log_warn("No stream name provided, skipping database storage");
         }
     } else {
-        log_debug("ONVIF Detection: No motion detected for %s", stream_name);
+        log_debug("ONVIF Detection: No asserted motion event for %s", stream_name);
         result->count = 0;
 
         // Notify motion recording that motion has ended

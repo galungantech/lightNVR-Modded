@@ -13,6 +13,11 @@ beforeAll(async () => {
       window.players=[];window.requests=[];window.failures=[];window.errors=[];
       window.recoveries=[];window.settingsReads=[];window.nativeSources=[];window.cleanups=0;
       window.addEventListener('error',event=>{if(event instanceof ErrorEvent){window.errors.push(event.message);event.preventDefault();}});
+      window.addEventListener('unhandledrejection',event=>{
+        const reason=event.reason;
+        window.errors.push(reason instanceof Error ? reason.message : String(reason));
+        event.preventDefault();
+      });
       const originalTimeout=window.setTimeout;
       window.setTimeout=(callback,delay,...args)=>{
         if(window.captureRecovery && (delay===1000||delay===2000)) {
@@ -90,19 +95,26 @@ beforeAll(async () => {
 });
 
 async function openPlayer(config={}) {
-  const browser=await chromium.launch({headless:true});
-  const page=await browser.newPage();
-  page.setDefaultTimeout(5000);
-  await page.route('http://fixture.invalid/**',route=>route.fulfill({
-    contentType:'text/html',body:'<style>svg{width:20px;height:20px}</style><div id="root"></div>',
-  }));
-  await page.goto('http://fixture.invalid/');
-  await page.evaluate(value=>{window.config=value;},config);
-  await page.addScriptTag({content:bundle});
-  await page.waitForFunction(()=>window.config.deferSettings ? !!window.resolveSettings :
-    window.config.deferManifest ? window.requests.length>0 :
-    window.config.nativePlayer ? window.nativeSources.length>0 : window.players.length>0);
-  return {browser,page};
+  let browser;
+  let page;
+  try {
+    browser=await chromium.launch({headless:true});
+    page=await browser.newPage();
+    page.setDefaultTimeout(5000);
+    await page.route('http://fixture.invalid/**',route=>route.fulfill({
+      contentType:'text/html',body:'<style>svg{width:20px;height:20px}</style><div id="root"></div>',
+    }));
+    await page.goto('http://fixture.invalid/');
+    await page.evaluate(value=>{window.config=value;},config);
+    await page.addScriptTag({content:bundle});
+    await page.waitForFunction(()=>window.config.deferSettings ? !!window.resolveSettings :
+      window.config.deferManifest ? window.requests.length>0 :
+      window.config.nativePlayer ? window.nativeSources.length>0 : window.players.length>0);
+    return {browser,page};
+  } catch (error) {
+    if (browser) await browser.close().catch(() => {});
+    throw error;
+  }
 }
 
 it.each(['exhausted','unrecoverable','native'])(
@@ -112,7 +124,17 @@ it.each(['exhausted','unrecoverable','native'])(
       if(branch==='native') await page.locator('video').dispatchEvent('error');
       else await page.evaluate(value=>window.emitFatal(value==='exhausted'?'media':'other',value==='exhausted'?4:1),branch);
       expect(await page.evaluate(()=>window.errors)).toEqual([]);
-      await page.waitForFunction(()=>window.requests.some(r=>r.url==='/hls/fixture%20camera/index.m3u8'));
+      await page.waitForFunction(currentBranch=>{
+        const fallbackUrl='/hls/fixture%20camera/index.m3u8';
+        const requested=window.requests.some(r=>r.url===fallbackUrl);
+        if(!requested) return false;
+        if(currentBranch==='native') {
+          return (window.nativeSources||[]).some(s=>String(s).includes(fallbackUrl));
+        }
+        return (window.players||[]).some(p=>
+          Array.isArray(p?.sources) && p.sources.some(s=>String(s?.src||s).includes(fallbackUrl)),
+        );
+      },branch);
       expect(await page.evaluate(()=>window.failures)).toEqual([]);
       if(branch!=='native') expect(await page.evaluate(()=>window.players[0].destroyed)).toBe(1);
     } finally {await browser.close();}
@@ -127,7 +149,10 @@ it.each(['exhausted','unrecoverable','native'])(
       else await page.evaluate(value=>window.emitFatal(value==='exhausted'?'media':'other',value==='exhausted'?4:1),branch);
       expect(await page.evaluate(()=>window.errors)).toEqual([]);
       await page.waitForFunction(()=>window.failures.length>0);
-      expect(await page.evaluate(()=>window.requests.map(r=>r.url))).toEqual(['/go2rtc/api/stream.m3u8?src=fixture%20camera&mp4=flac']);
+      // The error overlay may fetch the latest recording for its last-frame
+      // image; only manifest requests indicate an HLS transport fallback.
+      expect(await page.evaluate(()=>window.requests.map(r=>r.url).filter(url=>url.includes('.m3u8'))))
+        .toEqual(['/go2rtc/api/stream.m3u8?src=fixture%20camera&mp4=flac']);
       expect(await page.evaluate(()=>window.failures[0])).toBe(branch==='unrecoverable'?'fixture fatal':'live.go2rtcHlsFailedRetry');
     } finally {await browser.close();}
   },
@@ -174,8 +199,11 @@ it('aborts an in-flight manifest preflight on unmount without creating a player'
 it('force-native preference bypasses go2rtc settings and uses native recovery',async()=>{
   const {browser,page}=await openPlayer({enabled:true,forceNative:true});
   try {
-    await page.waitForFunction(()=>window.players.some(p=>!p.destroyed));
-    expect(await page.evaluate(()=>window.requests.every(r=>r.url==='/hls/fixture%20camera/index.m3u8'))).toBe(true);
+    const nativeManifest='/hls/fixture%20camera/index.m3u8';
+    await page.waitForFunction(url=>window.requests.some(r=>r.url===url)&&
+      window.players.some(p=>!p.destroyed&&p.sources.includes(url)),nativeManifest);
+    expect(await page.evaluate(()=>window.requests.length>0&&
+      window.requests.every(r=>r.url==='/hls/fixture%20camera/index.m3u8'))).toBe(true);
     expect(await page.evaluate(()=>window.settingsReads.includes('enabled'))).toBe(false);
     await page.evaluate(()=>window.players.find(p=>!p.destroyed).emit('error',{fatal:true,type:'other',details:'native fatal'}));
     await page.waitForFunction(()=>window.failures.includes('native fatal'));

@@ -34,6 +34,9 @@ import { MobileTileContextMenu, useMobileTileGestures } from './MobileTileGestur
 import { TileAudioButton } from './TileAudioButton.tsx';
 import { FisheyeEptzCanvas } from './FisheyeEptzCanvas.tsx';
 import { isEptzEnabled } from '../../utils/eptz-config.ts';
+import { useLastFrame } from './live/useLastFrame.ts';
+import { lastFrameOverlayBackground } from './live/lastFrame.ts';
+import { LastFrameBackdrop, LastFrameCaption } from './live/LastFrameFallback.tsx';
 import type { DetectionOverlayHandle } from './DetectionOverlay.tsx';
 import type {
   HlsMode,
@@ -60,6 +63,7 @@ export function HLSVideoCell({
   showControls = true,
   globalShowDetections = true,
   alwaysFullscreenOnTap = false,
+  showLastImage = true,
   onRequestReorder,
   mobileGesturesDisabled = false,
   audioDisabled = false,
@@ -84,6 +88,10 @@ export function HLSVideoCell({
   const [privacyActive, setPrivacyActive] = useState(!!stream.privacy_mode);
   const [isTogglingEnabled, setIsTogglingEnabled] = useState(false);
   const canControlPrivacy = stream.can_control_privacy !== false;
+
+  useEffect(() => {
+    setPrivacyActive(!!stream.privacy_mode);
+  }, [stream.privacy_mode]);
 
   // HLS source state: 'go2rtc' (go2rtc's dynamic HLS), 'native' (lightNVR FFmpeg-based HLS), or 'failed'
   // Default to native lightNVR HLS (reliable, always running when streaming enabled)
@@ -113,6 +121,9 @@ export function HLSVideoCell({
   const hlsUrlRef = useRef<string | null>(null);        // Master manifest URL — stored for session-expiry recovery
   const prevStatusRef = useRef(stream.status); // Track previous stream status for transition detection
   const cellAbortRef = useRef<AbortController | null>(null);     // Cancels a queued/in-flight gated preflight on unmount
+  // Last known image behind the error overlay (#974). Declared before the
+  // effects below so its unmount cleanup runs first.
+  const lastFrame = useLastFrame({ streamName: stream.name, videoRef, hasError: !!error, enabled: showLastImage });
   const handleMobileAudioToggle = () => {
     if (audioDisabled) return;
     const nextEnabled = !audioEnabled;
@@ -169,6 +180,14 @@ export function HLSVideoCell({
 
   // Initialize HLS player when component mounts or retry is triggered
   useEffect(() => {
+    if (privacyActive) {
+      console.log(`[HLS ${stream?.name ?? 'unknown'}] Skipping init - privacy mode active`);
+      setIsPlaying(false);
+      setIsLoading(false);
+      setError(null);
+      return;
+    }
+
     if (!stream || !stream.name) {
       console.warn(`[HLS] Skipping init - no stream data`);
       return;
@@ -185,6 +204,7 @@ export function HLSVideoCell({
 
     // Store event listener references for cleanup (native HLS case)
     let nativeLoadedHandler: (() => void) | null = null;
+    let nativePlayingHandler: (() => void) | null = null;
     let nativeErrorHandler: (() => void) | null = null;
 
     // Async initialization function - MUST be defined before doInit to avoid TDZ errors
@@ -275,6 +295,7 @@ export function HLSVideoCell({
       // (go2rtc sessions expire after 5 s of inactivity; reloading the master
       // manifest creates a fresh session instead of retrying the stale one).
       hlsUrlRef.current = hlsStreamUrl;
+      let corsPreflightSucceeded = false;
 
       // Preflight the manifest through the shared connection gate before
       // spinning up a player. go2rtc holds this request open while it dials
@@ -292,6 +313,8 @@ export function HLSVideoCell({
             signal: cellAbortRef.current ? cellAbortRef.current.signal : undefined
           }
         );
+        // A successful cross-origin fetch proves the endpoint permits anonymous CORS.
+        corsPreflightSucceeded = true;
         if (!preflight.ok) {
           const bodyText = await preflight.text().catch(() => '');
           const isSourceUnreachable = /dial tcp|no route to host|connection refused|connect:/i.test(bodyText);
@@ -372,12 +395,17 @@ export function HLSVideoCell({
             fatalErrorCountRef.current = 0;
           }
           setIsLoading(false);
-          setIsPlaying(true);
-
           if (videoRef.current) {
-            videoRef.current.play().catch(error => {
-              console.warn('Auto-play prevented:', error);
-            });
+            videoRef.current.play()
+              .then(() => {
+                if (!isMounted) return;
+                setIsPlaying(true);
+              })
+              .catch(error => {
+                if (!isMounted) return;
+                setIsPlaying(false);
+                console.warn('Auto-play prevented:', error);
+              });
           }
         });
 
@@ -410,6 +438,7 @@ export function HLSVideoCell({
             // Exhausted recovery attempts - give up
             console.error(`[HLS ${stream.name}] Exhausted ${MAX_RECOVERY} recovery attempts`);
             recoveringRef.current = false;
+            lastFrame.capture(); // before destroy() detaches the video (#974)
             if (hlsPlayerRef.current) {
               hlsPlayerRef.current.destroy();
               hlsPlayerRef.current = null;
@@ -456,6 +485,7 @@ export function HLSVideoCell({
             console.warn(`[HLS ${stream.name}] Media error recovery attempt ${attemptNum}/${MAX_RECOVERY}`);
             setTimeout(() => {
               if (isMounted && hlsPlayerRef.current) {
+                lastFrame.capture(); // capture before recoverMediaError() detaches/reattaches media
                 hlsPlayerRef.current.recoverMediaError();
               }
             }, delay);
@@ -463,6 +493,7 @@ export function HLSVideoCell({
             // Unrecoverable error type - destroy immediately
             console.error(`[HLS ${stream.name}] Unrecoverable error type`);
             recoveringRef.current = false;
+            lastFrame.capture(); // before destroy() detaches the video (#974)
             if (hlsPlayerRef.current) {
               hlsPlayerRef.current.destroy();
               hlsPlayerRef.current = null;
@@ -484,10 +515,18 @@ export function HLSVideoCell({
       else if (videoRef.current!.canPlayType('application/vnd.apple.mpegurl')) {
         console.log(`Using native HLS support for stream ${stream.name}`);
         // Native HLS support (Safari)
+        // Request CORS media only after the endpoint has passed the fetch preflight.
+        // Otherwise keep playback available even if snapshots cannot be exported.
+        videoRef.current!.crossOrigin = corsPreflightSucceeded ? 'anonymous' : null;
         videoRef.current!.src = hlsStreamUrl;
 
         // Store handlers for cleanup
         nativeLoadedHandler = function() {
+          if (!isMounted) return;
+          setIsLoading(false);
+        };
+
+        nativePlayingHandler = function() {
           if (!isMounted) return;
           setIsLoading(false);
           setIsPlaying(true);
@@ -513,6 +552,7 @@ export function HLSVideoCell({
         };
 
         videoRef.current!.addEventListener('loadedmetadata', nativeLoadedHandler);
+        videoRef.current!.addEventListener('playing', nativePlayingHandler);
         videoRef.current!.addEventListener('error', nativeErrorHandler);
       } else {
         // Fallback for truly unsupported browsers
@@ -539,6 +579,7 @@ export function HLSVideoCell({
       console.log(`[HLS ${stream.name}] Initializing HLS player...`);
       setIsLoading(true);
       setError(null);
+      setIsPlaying(false);
 
       await initHls();
     };
@@ -567,6 +608,7 @@ export function HLSVideoCell({
 
       // Destroy HLS.js instance
       recoveringRef.current = false;
+      fatalErrorCountRef.current = 0;
       if (hlsPlayerRef.current) {
         hlsPlayerRef.current.destroy();
         hlsPlayerRef.current = null;
@@ -577,6 +619,10 @@ export function HLSVideoCell({
         if (nativeLoadedHandler) {
           videoRef.current.removeEventListener('loadedmetadata', nativeLoadedHandler);
           nativeLoadedHandler = null;
+        }
+        if (nativePlayingHandler) {
+          videoRef.current.removeEventListener('playing', nativePlayingHandler);
+          nativePlayingHandler = null;
         }
         if (nativeErrorHandler) {
           videoRef.current.removeEventListener('error', nativeErrorHandler);
@@ -593,14 +639,14 @@ export function HLSVideoCell({
     // /api/streams status refetch doesn't tear down healthy players when it
     // produces new object identities every poll cycle.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stream?.name, retryCount, hlsMode, useSubStream, audioDisabled, t]);
+  }, [stream?.name, retryCount, hlsMode, useSubStream, audioDisabled, privacyActive, t]);
 
   // Auto-retry when stream status transitions back to 'Running' while the
   // error overlay is visible (e.g. camera came back online after an outage).
   useEffect(() => {
     const prev = prevStatusRef.current;
     prevStatusRef.current = stream.status;
-    if (error && stream.status === 'Running' && prev !== 'Running') {
+    if (!privacyActive && error && stream.status === 'Running' && prev !== 'Running') {
       console.log(`[HLS ${stream.name}] Status changed to Running — auto-retrying after error`);
       fatalErrorCountRef.current = 0;
       recoveringRef.current = false;
@@ -609,7 +655,7 @@ export function HLSVideoCell({
       setIsPlaying(false);
       setRetryCount(c => c + 1);
     }
-  }, [stream.status, error]);
+  }, [stream.status, error, privacyActive]);
 
   // Retry only this browser player. Shared-source refresh is reserved for the
   // explicitly labelled force-refresh control (#457).
@@ -646,7 +692,7 @@ export function HLSVideoCell({
   };
 
   // Auto-retry while the error overlay is visible — see WebRTCVideoCell for rationale.
-  const autoRetryCountdown = useAutoRetry(error, handleRetry);
+  const autoRetryCountdown = useAutoRetry(privacyActive ? null : error, handleRetry);
 
   useEffect(() => {
     if (error && onTransportFailure) onTransportFailure(error);
@@ -819,7 +865,7 @@ export function HLSVideoCell({
           aria-label={t('live.resetZoom')}
           style={{
             position: 'absolute',
-            bottom: '10px',
+            top: '10px',
             insetInlineEnd: '10px',
             padding: '4px 8px',
             backgroundColor: 'rgba(0, 0, 0, 0.6)',
@@ -929,43 +975,47 @@ export function HLSVideoCell({
               canvas.height = videoElement.videoHeight;
               const ctx = canvas.getContext('2d')!;
 
-              // Draw video frame at native resolution
-              ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+              try {
+                // Draw video frame at native resolution
+                ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
 
-              // Draw detections at native resolution if available (fixes boundary shift)
-              if (detectionOverlayRef.current && typeof detectionOverlayRef.current.getDetections === 'function') {
-                const detections = detectionOverlayRef.current.getDetections();
-                if (detections && detections.length > 0) {
-                  drawDetectionsOnCanvas(ctx, canvas.width, canvas.height, detections);
-                }
-              }
-
-              // Auto-download for rapid-fire capability (also works in fullscreen)
-              const timestamp = formatFilenameTimestamp();
-              const fileName = `snapshot-${stream.name.replace(/\s+/g, '-')}-${timestamp}.jpg`;
-
-              canvas.toBlob((blob) => {
-                if (!blob) {
-                  showStatusMessage(t('timeline.failedToCreateSnapshot'), 'error');
-                  return;
-                }
-
-                const blobUrl = URL.createObjectURL(blob);
-                const link = document.createElement('a');
-                link.href = blobUrl;
-                link.download = fileName;
-                document.body.appendChild(link);
-                link.click();
-
-                setTimeout(() => {
-                  if (document.body.contains(link)) {
-                    document.body.removeChild(link);
+                // Draw detections at native resolution if available (fixes boundary shift)
+                if (detectionOverlayRef.current && typeof detectionOverlayRef.current.getDetections === 'function') {
+                  const detections = detectionOverlayRef.current.getDetections();
+                  if (detections && detections.length > 0) {
+                    drawDetectionsOnCanvas(ctx, canvas.width, canvas.height, detections);
                   }
-                  URL.revokeObjectURL(blobUrl);
-                }, 1000);
+                }
 
-                showStatusMessage(t('live.snapshotSaved', { fileName }), 'success', 2000);
-              }, 'image/jpeg', 0.95);
+                // Auto-download for rapid-fire capability (also works in fullscreen)
+                const timestamp = formatFilenameTimestamp();
+                const fileName = `snapshot-${stream.name.replace(/\s+/g, '-')}-${timestamp}.jpg`;
+
+                canvas.toBlob((blob) => {
+                  if (!blob) {
+                    showStatusMessage(t('timeline.failedToCreateSnapshot'), 'error');
+                    return;
+                  }
+
+                  const blobUrl = URL.createObjectURL(blob);
+                  const link = document.createElement('a');
+                  link.href = blobUrl;
+                  link.download = fileName;
+                  document.body.appendChild(link);
+                  link.click();
+
+                  setTimeout(() => {
+                    if (document.body.contains(link)) {
+                      document.body.removeChild(link);
+                    }
+                    URL.revokeObjectURL(blobUrl);
+                  }, 1000);
+
+                  showStatusMessage(t('live.snapshotSaved', { fileName }), 'success', 2000);
+                }, 'image/jpeg', 0.95);
+              } catch (_error) {
+                showStatusMessage(t('timeline.failedToCreateSnapshot'), 'error');
+              }
           }}
         />
         {/* Pause for privacy button */}
@@ -1180,13 +1230,14 @@ export function HLSVideoCell({
             flexDirection: 'column',
             justifyContent: 'center',
             alignItems: 'center',
-            backgroundColor: 'rgba(0, 0, 0, 0.7)',
+            backgroundColor: lastFrameOverlayBackground(lastFrame.image, 'rgba(0, 0, 0, 0.7)'),
             color: 'white',
             zIndex: 5,
             textAlign: 'center',
             transform: 'none'
           }}
         >
+          <LastFrameBackdrop image={lastFrame.image} />
           <div
             className="error-content"
             style={{
@@ -1250,12 +1301,13 @@ export function HLSVideoCell({
                 ? t('live.autoRetryingIn', { seconds: autoRetryCountdown })
                 : t('common.retry')}
             </button>
+            <LastFrameCaption image={lastFrame.image} />
           </div>
         </div>
       )}
 
       {/* Play button overlay (for browsers that block autoplay) */}
-      {!isPlaying && !isLoading && !error && (
+      {!isPlaying && !isLoading && !error && !privacyActive && (
         <div role="button" tabIndex={0} onKeyDown={clickOnActivationKey} aria-label={t('recordings.play')}
           className="play-overlay"
           style={{
@@ -1299,47 +1351,20 @@ export function HLSVideoCell({
         confirmLabel={t('common.refresh')}
       />
 
-      {/* Inline pause-for-privacy confirmation overlay */}
-      {canControlPrivacy && showPrivacyConfirm && (
-        <div style={{
-          position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
-          backgroundColor: 'rgba(0,0,0,0.75)', zIndex: 20,
-          display: 'flex', flexDirection: 'column',
-          alignItems: 'center', justifyContent: 'center', gap: '12px',
-          padding: '16px', textAlign: 'center'
-        }}>
-          <p style={{ color: 'white', fontSize: '14px', maxWidth: '240px', lineHeight: '1.4' }}>
-            {t('live.pauseForPrivacyConfirm')}
-          </p>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <button
-              onClick={handlePauseForPrivacy}
-              disabled={isTogglingEnabled}
-              style={{
-                padding: '6px 16px', backgroundColor: '#7c3aed', color: 'white',
-                border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '13px'
-              }}
-            >
-              {t('live.pauseForPrivacy')}
-            </button>
-            <button
-              onClick={() => setShowPrivacyConfirm(false)}
-              style={{
-                padding: '6px 16px', backgroundColor: 'rgba(255,255,255,0.2)', color: 'white',
-                border: '1px solid rgba(255,255,255,0.4)', borderRadius: '4px', cursor: 'pointer', fontSize: '13px'
-              }}
-            >
-              {t('common.cancel')}
-            </button>
-          </div>
-        </div>
-      )}
+      <ConfirmDialog
+        isOpen={canControlPrivacy && showPrivacyConfirm}
+        onClose={() => setShowPrivacyConfirm(false)}
+        onConfirm={handlePauseForPrivacy}
+        title={t('live.pauseForPrivacy')}
+        message={t('live.pauseForPrivacyConfirm')}
+        confirmLabel={t('live.pauseForPrivacy')}
+      />
 
       {/* Privacy mode overlay — shown when the stream is paused for privacy */}
       {privacyActive && (
         <div style={{
           position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
-          backgroundColor: 'rgba(0,0,0,0.85)', zIndex: 15,
+          backgroundColor: 'rgba(0,0,0,0.85)', zIndex: 40,
           display: 'flex', flexDirection: 'column',
           alignItems: 'center', justifyContent: 'center', gap: '12px'
         }}>
