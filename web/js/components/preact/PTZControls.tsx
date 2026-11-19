@@ -105,12 +105,12 @@ function DirectionButton({
     <button
       type="button"
       className={`ptz-btn ptz-btn-${direction}`}
-      onMouseDown={handleStart as any}
-      onMouseUp={handleEnd as any}
-      onMouseLeave={handleEnd as any}
-      onTouchStart={handleStart as any}
-      onTouchEnd={handleEnd as any}
-      onTouchCancel={handleEnd as any}
+      onMouseDown={(e) => handleStart(e)}
+      onMouseUp={(e) => handleEnd(e)}
+      onMouseLeave={(e) => handleEnd(e)}
+      onTouchStart={(e) => handleStart(e)}
+      onTouchEnd={(e) => handleEnd(e)}
+      onTouchCancel={(e) => handleEnd(e)}
       disabled={disabled}
       style={{
         width: '38px',
@@ -179,6 +179,103 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
   const clampPosition = useCallback((x: number, y: number): Position => {
     const panel = panelRef.current;
     if (!panel) return { x, y };
+
+    const parent = panel.parentElement;
+    if (!parent) return { x, y };
+
+    const parentRect = parent.getBoundingClientRect();
+    const panelRect = panel.getBoundingClientRect();
+
+    const maxX = parentRect.width - panelRect.width;
+    const maxY = parentRect.height - panelRect.height;
+
+    return {
+      x: Math.max(0, Math.min(x, maxX)),
+      y: Math.max(0, Math.min(y, maxY))
+    };
+  }, []);
+
+  // Reset position to DEFAULT_POSITION on fullscreen change and window resize for all devices
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setPosition(DEFAULT_POSITION);
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    window.addEventListener('resize', handleFullscreenChange);
+
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      window.removeEventListener('resize', handleFullscreenChange);
+    };
+  }, []);
+
+  const startDrag = useCallback((e: MouseEvent | TouchEvent) => {
+    e.stopPropagation();
+    
+    const panel = panelRef.current;
+    if (!panel) return;
+
+    const point = 'touches' in e ? e.touches[0] : e;
+    if (!point) return;
+
+    dragData.current = {
+      dragging: true,
+      startX: point.clientX,
+      startY: point.clientY,
+      initialX: position.x,
+      initialY: position.y
+    };
+
+    if (e.cancelable) {
+      e.preventDefault();
+    }
+  }, [position]);
+
+  useEffect(() => {
+    const onDrag = (e: MouseEvent | TouchEvent) => {
+      if (!dragData.current.dragging) return;
+
+      e.stopPropagation();
+
+      const point = 'touches' in e ? e.touches[0] : e;
+      if (!point) return;
+
+      const deltaX = point.clientX - dragData.current.startX;
+      const deltaY = dragData.current.startY - point.clientY;
+
+      const newX = dragData.current.initialX + deltaX;
+      const newY = dragData.current.initialY + deltaY;
+
+      const clamped = clampPosition(newX, newY);
+      setPosition(clamped);
+
+      if (e.cancelable) {
+        e.preventDefault();
+      }
+    };
+
+    const stopDrag = (e: MouseEvent | TouchEvent) => {
+      if (dragData.current.dragging) {
+        e.stopPropagation();
+        dragData.current.dragging = false;
+      }
+    };
+
+    window.addEventListener('mousemove', onDrag, { capture: true });
+    window.addEventListener('mouseup', stopDrag, { capture: true });
+    window.addEventListener('touchmove', onDrag, { passive: false, capture: true });
+    window.addEventListener('touchend', stopDrag, { capture: true });
+    window.addEventListener('touchcancel', stopDrag, { capture: true });
+
+    return () => {
+      window.removeEventListener('mousemove', onDrag, { capture: true });
+      window.removeEventListener('mouseup', stopDrag, { capture: true });
+      window.removeEventListener('touchmove', onDrag, { capture: true });
+      window.removeEventListener('touchend', stopDrag, { capture: true });
+      window.removeEventListener('touchcancel', stopDrag, { capture: true });
+    };
+  }, [clampPosition]);
 
     const parent = panel.parentElement;
     if (!parent) return { x, y };
@@ -476,15 +573,48 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
       });
   }, [stream?.name, t]);
 
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!panel) return;
+    const stop = (event: Event) => event.stopPropagation();
+    panel.addEventListener('click', stop);
+    panel.addEventListener('dblclick', stop);
+    panel.addEventListener('contextmenu', stop);
+    panel.addEventListener('pointerdown', stop);
+    panel.addEventListener('pointermove', stop);
+    panel.addEventListener('pointerup', stop);
+    panel.addEventListener('pointercancel', stop);
+    panel.addEventListener('mousedown', stop);
+    panel.addEventListener('touchstart', stop);
+    panel.addEventListener('touchmove', stop);
+    panel.addEventListener('touchend', stop);
+    panel.addEventListener('touchcancel', stop);
+    panel.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      panel.removeEventListener('click', stop);
+      panel.removeEventListener('dblclick', stop);
+      panel.removeEventListener('contextmenu', stop);
+      panel.removeEventListener('pointerdown', stop);
+      panel.removeEventListener('pointermove', stop);
+      panel.removeEventListener('pointerup', stop);
+      panel.removeEventListener('pointercancel', stop);
+      panel.removeEventListener('mousedown', stop);
+      panel.removeEventListener('touchstart', stop);
+      panel.removeEventListener('touchmove', stop);
+      panel.removeEventListener('touchend', stop);
+      panel.removeEventListener('touchcancel', stop);
+      panel.removeEventListener('wheel', handleWheel);
+    };
+  }, [handleWheel, isVisible, stream?.ptz_enabled]);
+
   if (!isVisible || !stream?.ptz_enabled) return null;
 
   return (
     <div
       ref={panelRef}
       className="ptz-controls"
-      onWheel={(e) => handleWheel(e as unknown as WheelEvent)}
-      onMouseDown={(e) => e.stopPropagation()}
-      onTouchStart={(e) => e.stopPropagation()}
+      role="group"
+      aria-label={t('live.ptzControl')}
       style={{
         position: 'absolute',
         left: `${position.x}px`,
@@ -508,8 +638,21 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
     >
       {/* DRAG HEADER */}
       <div
+        role="button"
+        tabIndex={0}
+        aria-label={t('live.ptzControl')}
         onMouseDown={(e) => startDrag(e as unknown as MouseEvent)}
         onTouchStart={(e) => startDrag(e as unknown as TouchEvent)}
+        onKeyDown={(e) => {
+          const step = 10;
+          if (e.key === 'ArrowLeft') setPosition(clampPosition(position.x - step, position.y));
+          else if (e.key === 'ArrowRight') setPosition(clampPosition(position.x + step, position.y));
+          else if (e.key === 'ArrowUp') setPosition(clampPosition(position.x, position.y + step));
+          else if (e.key === 'ArrowDown') setPosition(clampPosition(position.x, position.y - step));
+          else return;
+          e.preventDefault();
+          e.stopPropagation();
+        }}
         style={{
           display: 'flex',
           alignItems: 'center',
@@ -603,7 +746,7 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
         {/* HOME BUTTON */}
         <button
           type="button"
-          onClick={handleHome as any}
+          onClick={() => handleHome()}
           aria-label={t('live.goToHomePosition')}
           title={t('live.goToHomePosition')}
           style={{
@@ -816,6 +959,7 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
               type="button"
               onClick={handleDeletePreset}
               disabled={saving}
+              aria-label={t('common.delete') || 'Delete Preset'}
               title={t('common.delete') || 'Delete Preset'}
               style={{
                 width: '32px',
@@ -928,13 +1072,13 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
             style={{ 
               width: '100%', 
               fontSize: '10px', 
-              fontWeight: '500', 
+              fontWeight: '500',
               padding: '6px 10px', 
               borderRadius: '8px', 
               border: '1px solid rgba(255, 255, 255, 0.2)', 
               backgroundColor: 'rgba(15, 23, 42, 0.75)', 
               color: 'white', 
-              cursor: 'pointer', 
+              cursor: 'pointer',
               marginTop: '2px',
               display: 'flex',
               alignItems: 'center',
@@ -974,13 +1118,13 @@ export function PTZControls({ stream, isVisible = true, onClose }: PTZControlsPr
             style={{ 
               width: '100%', 
               fontSize: '10px', 
-              fontWeight: '500', 
+              fontWeight: '500',
               padding: '6px 10px', 
               borderRadius: '8px', 
               border: '1px solid rgba(255, 255, 255, 0.2)', 
               backgroundColor: 'rgba(15, 23, 42, 0.75)', 
               color: 'white', 
-              cursor: 'pointer', 
+              cursor: 'pointer',
               marginTop: '2px',
               display: 'flex',
               alignItems: 'center',

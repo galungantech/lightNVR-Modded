@@ -71,6 +71,13 @@ unsafe extern "C" {
         read_cb: uv_read_cb,
     ) -> ::core::ffi::c_int;
     unsafe fn libuv_connection_read_stop(conn: *mut libuv_connection) -> ::core::ffi::c_int;
+    unsafe fn _log_message_ctx(
+        level: log_level_t,
+        component: *const ::core::ffi::c_char,
+        stream: *const ::core::ffi::c_char,
+        format: *const ::core::ffi::c_char,
+        ...
+    );
     unsafe fn memcpy(
         __dest: *mut ::core::ffi::c_void,
         __src: *const ::core::ffi::c_void,
@@ -81,6 +88,11 @@ unsafe extern "C" {
         __s2: *const ::core::ffi::c_void,
         __n: size_t,
     ) -> ::core::ffi::c_int;
+    unsafe fn memchr(
+        __s: *const ::core::ffi::c_void,
+        __c: ::core::ffi::c_int,
+        __n: size_t,
+    ) -> *mut ::core::ffi::c_void;
     unsafe fn strcmp(
         __s1: *const ::core::ffi::c_char,
         __s2: *const ::core::ffi::c_char,
@@ -799,7 +811,18 @@ pub struct websocket_write_t {
     pub resume: *mut uv_stream_t,
     pub data: *mut ::core::ffi::c_char,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct log_level_t(pub ::core::ffi::c_uint);
+impl log_level_t {
+    pub const LOG_LEVEL_ERROR: Self = Self(0);
+    pub const LOG_LEVEL_WARN: Self = Self(1);
+    pub const LOG_LEVEL_INFO: Self = Self(2);
+    pub const LOG_LEVEL_DEBUG: Self = Self(3);
+}
 pub const MAX_STREAMS: ::core::ffi::c_int = LIGHTNVR_MAX_STREAMS;
+pub const LOG_COMPONENT: [::core::ffi::c_char; 16] =
+    unsafe { ::core::mem::transmute::<[u8; 16], [::core::ffi::c_char; 16]>(*b"go2rtcWebSocket\0") };
 pub const WS_BUFFER_SIZE: ::core::ffi::c_int =
     64 as ::core::ffi::c_int * 1024 as ::core::ffi::c_int;
 pub const WS_CONNECTION_LIMIT: ::core::ffi::c_int = if MAX_STREAMS < 32 as ::core::ffi::c_int {
@@ -875,6 +898,168 @@ unsafe extern "C" fn header_token(
     }
     return r#false != 0;
 }
+unsafe extern "C" fn parse_authority(
+    mut value: *const ::core::ffi::c_char,
+    mut host: *mut *const ::core::ffi::c_char,
+    mut host_len: *mut size_t,
+    mut port: *mut ::core::ffi::c_ushort,
+    mut has_port: *mut bool,
+) -> bool {
+    if value.is_null() || *value == 0 {
+        return r#false != 0;
+    }
+    let mut end: *const ::core::ffi::c_char = value.offset(strlen(value) as isize);
+    let mut p: *const ::core::ffi::c_char = value;
+    while p < end {
+        let mut c: ::core::ffi::c_uchar = *p as ::core::ffi::c_uchar;
+        if c as ::core::ffi::c_int <= ' ' as ::core::ffi::c_int
+            || c as ::core::ffi::c_int == 127 as ::core::ffi::c_int
+            || !strchr(
+                b"/@?#\\%\0".as_ptr() as *const ::core::ffi::c_char,
+                c as ::core::ffi::c_int,
+            )
+            .is_null()
+        {
+            return r#false != 0;
+        }
+        p = p.offset(1);
+    }
+    let mut port_start: *const ::core::ffi::c_char = ::core::ptr::null::<::core::ffi::c_char>();
+    if *value as ::core::ffi::c_int == '[' as ::core::ffi::c_int {
+        let mut closing: *const ::core::ffi::c_char = strchr(value, ']' as ::core::ffi::c_int);
+        if closing.is_null()
+            || closing == value.offset(1 as ::core::ffi::c_int as isize)
+            || !memchr(
+                value.offset(1 as ::core::ffi::c_int as isize) as *const ::core::ffi::c_void,
+                '[' as ::core::ffi::c_int,
+                (closing.offset_from(value) - 1isize) as size_t,
+            )
+            .is_null()
+        {
+            return r#false != 0;
+        }
+        *host_len = closing
+            .offset(1 as ::core::ffi::c_int as isize)
+            .offset_from(value) as size_t;
+        if closing.offset(1 as ::core::ffi::c_int as isize) < end {
+            if *closing.offset(1isize) as ::core::ffi::c_int != ':' as ::core::ffi::c_int {
+                return r#false != 0;
+            }
+            port_start = closing.offset(2 as ::core::ffi::c_int as isize);
+        }
+    } else {
+        if !strchr(value, '[' as ::core::ffi::c_int).is_null()
+            || !strchr(value, ']' as ::core::ffi::c_int).is_null()
+        {
+            return r#false != 0;
+        }
+        let mut colon: *const ::core::ffi::c_char = strchr(value, ':' as ::core::ffi::c_int);
+        *host_len = if !colon.is_null() {
+            colon.offset_from(value) as size_t
+        } else {
+            end.offset_from(value) as size_t
+        };
+        if !colon.is_null() {
+            port_start = colon.offset(1 as ::core::ffi::c_int as isize);
+        }
+    }
+    if *host_len == 0 {
+        return r#false != 0;
+    }
+    *host = value;
+    *has_port = !port_start.is_null();
+    *port = 0 as ::core::ffi::c_ushort;
+    if port_start.is_null() {
+        return r#true != 0;
+    }
+    if port_start == end || end.offset_from(port_start) as size_t > 5 as size_t {
+        return r#false != 0;
+    }
+    let mut number: ::core::ffi::c_uint = 0 as ::core::ffi::c_uint;
+    let mut p_0: *const ::core::ffi::c_char = port_start;
+    while p_0 < end {
+        if *(*__ctype_b_loc()).offset(*p_0 as ::core::ffi::c_uchar as ::core::ffi::c_int as isize)
+            as ::core::ffi::c_int
+            & C2Rust_Unnamed::_ISdigit.0 as ::core::ffi::c_int as ::core::ffi::c_ushort
+                as ::core::ffi::c_int
+            == 0
+        {
+            return r#false != 0;
+        }
+        number = number.wrapping_mul(10 as ::core::ffi::c_uint).wrapping_add(
+            (*p_0 as ::core::ffi::c_int - '0' as ::core::ffi::c_int) as ::core::ffi::c_uint,
+        );
+        if number > 65535 as ::core::ffi::c_uint {
+            return r#false != 0;
+        }
+        p_0 = p_0.offset(1);
+    }
+    if number == 0 {
+        return r#false != 0;
+    }
+    *port = number as ::core::ffi::c_ushort;
+    return r#true != 0;
+}
+unsafe extern "C" fn origin_matches_host(
+    mut origin: *const ::core::ffi::c_char,
+    mut host: *const ::core::ffi::c_char,
+) -> bool {
+    let mut authority: *const ::core::ffi::c_char = ::core::ptr::null::<::core::ffi::c_char>();
+    let mut default_port: ::core::ffi::c_ushort = 0;
+    if strncasecmp(
+        origin,
+        b"http://\0".as_ptr() as *const ::core::ffi::c_char,
+        7 as size_t,
+    ) == 0 as ::core::ffi::c_int
+    {
+        authority = origin.offset(7 as ::core::ffi::c_int as isize);
+        default_port = 80 as ::core::ffi::c_ushort;
+    } else if strncasecmp(
+        origin,
+        b"https://\0".as_ptr() as *const ::core::ffi::c_char,
+        8 as size_t,
+    ) == 0 as ::core::ffi::c_int
+    {
+        authority = origin.offset(8 as ::core::ffi::c_int as isize);
+        default_port = 443 as ::core::ffi::c_ushort;
+    } else {
+        return r#false != 0;
+    }
+    let mut origin_name: *const ::core::ffi::c_char = ::core::ptr::null::<::core::ffi::c_char>();
+    let mut host_name: *const ::core::ffi::c_char = ::core::ptr::null::<::core::ffi::c_char>();
+    let mut origin_len: size_t = 0 as size_t;
+    let mut host_len: size_t = 0 as size_t;
+    let mut origin_port: ::core::ffi::c_ushort = 0 as ::core::ffi::c_ushort;
+    let mut host_port: ::core::ffi::c_ushort = 0 as ::core::ffi::c_ushort;
+    let mut origin_has_port: bool = r#false != 0;
+    let mut host_has_port: bool = r#false != 0;
+    if !parse_authority(
+        authority,
+        &raw mut origin_name,
+        &raw mut origin_len,
+        &raw mut origin_port,
+        &raw mut origin_has_port,
+    ) || !parse_authority(
+        host,
+        &raw mut host_name,
+        &raw mut host_len,
+        &raw mut host_port,
+        &raw mut host_has_port,
+    ) {
+        return r#false != 0;
+    }
+    return origin_len == host_len
+        && strncasecmp(origin_name, host_name, origin_len) == 0 as ::core::ffi::c_int
+        && if origin_has_port as ::core::ffi::c_int != 0 {
+            origin_port as ::core::ffi::c_int
+        } else {
+            default_port as ::core::ffi::c_int
+        } == if host_has_port as ::core::ffi::c_int != 0 {
+            host_port as ::core::ffi::c_int
+        } else {
+            default_port as ::core::ffi::c_int
+        };
+}
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn go2rtc_websocket_validate(
     mut req: *const http_request_t,
@@ -945,29 +1130,9 @@ pub unsafe extern "C" fn go2rtc_websocket_validate(
         }
         i_0 += 1;
     }
-    let mut authority: *const ::core::ffi::c_char = if !origin.is_null()
-        && strncmp(
-            origin,
-            b"http://\0".as_ptr() as *const ::core::ffi::c_char,
-            7 as size_t,
-        ) == 0 as ::core::ffi::c_int
-    {
-        origin.offset(7 as ::core::ffi::c_int as isize)
-    } else if !origin.is_null()
-        && strncmp(
-            origin,
-            b"https://\0".as_ptr() as *const ::core::ffi::c_char,
-            8 as size_t,
-        ) == 0 as ::core::ffi::c_int
-    {
-        origin.offset(8 as ::core::ffi::c_int as isize)
-    } else {
-        ::core::ptr::null::<::core::ffi::c_char>()
-    };
     if host.is_null()
         || origin_count > 1 as ::core::ffi::c_int
-        || !origin.is_null()
-            && (authority.is_null() || strcasecmp(authority, host) != 0 as ::core::ffi::c_int)
+        || !origin.is_null() && !origin_matches_host(origin, host)
     {
         http_response_set_json_error(
             res,
@@ -1018,7 +1183,10 @@ unsafe extern "C" fn close_proxy(mut proxy: *mut websocket_proxy_t) {
         Some(handle_closed as unsafe extern "C" fn(*mut uv_handle_t) -> ()),
     );
 }
-unsafe extern "C" fn fail_proxy(mut proxy: *mut websocket_proxy_t) {
+unsafe extern "C" fn fail_proxy_with_error(
+    mut proxy: *mut websocket_proxy_t,
+    mut message: *const ::core::ffi::c_char,
+) {
     if !(*proxy).upgraded && !(*proxy).conn.is_null() && !(*proxy).closing {
         let mut conn: *mut libuv_connection_t = (*proxy).conn;
         (*proxy).conn = ::core::ptr::null_mut::<libuv_connection_t>();
@@ -1027,7 +1195,7 @@ unsafe extern "C" fn fail_proxy(mut proxy: *mut websocket_proxy_t) {
         http_response_set_json_error(
             &raw mut (*conn).response,
             502 as ::core::ffi::c_int,
-            b"go2rtc WebSocket unavailable\0".as_ptr() as *const ::core::ffi::c_char,
+            message,
         );
         libuv_send_response_ex(
             conn,
@@ -1036,6 +1204,12 @@ unsafe extern "C" fn fail_proxy(mut proxy: *mut websocket_proxy_t) {
         );
     }
     close_proxy(proxy);
+}
+unsafe extern "C" fn fail_proxy(mut proxy: *mut websocket_proxy_t) {
+    fail_proxy_with_error(
+        proxy,
+        b"go2rtc WebSocket unavailable\0".as_ptr() as *const ::core::ffi::c_char,
+    );
 }
 unsafe extern "C" fn is_client_stream(
     mut proxy: *const websocket_proxy_t,
@@ -1252,13 +1426,26 @@ unsafe extern "C" fn upstream_read(
             b"HTTP/1.1 101 \0".as_ptr() as *const ::core::ffi::c_char,
             13 as size_t,
         ) != 0 as ::core::ffi::c_int
-            || strcasestr(
-                &raw mut (*proxy).headers as *mut ::core::ffi::c_char,
-                b"\r\nX-LightNVR-Media-Policy: 1\r\n\0".as_ptr() as *const ::core::ffi::c_char,
-            )
-            .is_null()
         {
             fail_proxy(proxy);
+            free((*buf).base as *mut ::core::ffi::c_void);
+            return;
+        }
+        if strcasestr(
+            &raw mut (*proxy).headers as *mut ::core::ffi::c_char,
+            b"\r\nX-LightNVR-Media-Policy: 1\r\n\0".as_ptr() as *const ::core::ffi::c_char,
+        )
+        .is_null()
+        {
+            _log_message_ctx(
+                log_level_t::LOG_LEVEL_WARN,
+                LOG_COMPONENT.as_ptr(),
+                _log_stream_name,
+                b"%s (WebSocket upgrade)\0".as_ptr() as *const ::core::ffi::c_char,
+                b"go2rtc did not acknowledge LightNVR media policy; use the compatible OpenSensor go2rtc fork\0"
+                    .as_ptr() as *const ::core::ffi::c_char,
+            );
+            fail_proxy_with_error(proxy, GO2RTC_MEDIA_POLICY_ERROR.as_ptr());
             free((*buf).base as *mut ::core::ffi::c_void);
             return;
         }
@@ -1480,7 +1667,16 @@ pub unsafe extern "C" fn go2rtc_websocket_shutdown(mut r#loop: *mut uv_loop_t) {
         proxy = (*proxy).next as *mut websocket_proxy_t;
     }
 }
+pub const _log_stream_name: *const ::core::ffi::c_char = NULL as *const ::core::ffi::c_char;
 pub const NULL: *mut ::core::ffi::c_void = ::core::ptr::null_mut::<::core::ffi::c_void>();
 pub const r#true: ::core::ffi::c_int = 1 as ::core::ffi::c_int;
 pub const r#false: ::core::ffi::c_int = 0 as ::core::ffi::c_int;
+pub const GO2RTC_MEDIA_POLICY_ERROR: [::core::ffi::c_char; 92] = unsafe {
+    ::core::mem::transmute::<
+        [u8; 92],
+        [::core::ffi::c_char; 92],
+    >(
+        *b"go2rtc did not acknowledge LightNVR media policy; use the compatible OpenSensor go2rtc fork\0",
+    )
+};
 pub const LIGHTNVR_MAX_STREAMS: ::core::ffi::c_int = 1024 as ::core::ffi::c_int;
