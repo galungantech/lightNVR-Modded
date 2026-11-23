@@ -4,7 +4,7 @@ import { refreshStream } from '../../api/mediaLifecycle.ts';
  * A self-contained component for displaying an HLS video stream
  */
 
-import { useState, useEffect, useRef } from 'preact/hooks';
+import { useState, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import { DetectionOverlay, drawDetectionsOnCanvas } from './DetectionOverlay.tsx';
 import { SnapshotButton } from './SnapshotManager.tsx';
 import { ManualRecordingButton } from './ManualRecordingButton.tsx';
@@ -88,10 +88,53 @@ export function HLSVideoCell({
   const [privacyActive, setPrivacyActive] = useState(!!stream.privacy_mode);
   const [isTogglingEnabled, setIsTogglingEnabled] = useState(false);
   const canControlPrivacy = stream.can_control_privacy !== false;
+  const privacyResumeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const hadPrivacyFocusRef = useRef(false);
+  const previousFocusedElementRef = useRef<HTMLElement | null>(null);
+  const tileContainerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (privacyActive) {
+      const focused = document.activeElement;
+      const container = tileContainerRef.current;
+      const focusedInTile = focused instanceof Node && !!container?.contains(focused);
+
+      if (!focusedInTile && focused !== document.body) {
+        hadPrivacyFocusRef.current = false;
+        previousFocusedElementRef.current = null;
+        return;
+      }
+
+      if (!hadPrivacyFocusRef.current) {
+        previousFocusedElementRef.current = focused instanceof HTMLElement && focused !== document.body
+          ? focused : null;
+      }
+      privacyResumeButtonRef.current?.focus();
+      hadPrivacyFocusRef.current = true;
+      return;
+    }
+
+    if (!hadPrivacyFocusRef.current) return;
+    if (document.activeElement !== privacyResumeButtonRef.current &&
+        document.activeElement !== document.body) {
+      hadPrivacyFocusRef.current = false;
+      previousFocusedElementRef.current = null;
+      return;
+    }
+
+    hadPrivacyFocusRef.current = false;
+    const previous = previousFocusedElementRef.current;
+    if (previous && previous.isConnected) {
+      previous.focus();
+    } else {
+      tileContainerRef.current?.focus();
+    }
+    previousFocusedElementRef.current = null;
+  }, [privacyActive]);
 
   useEffect(() => {
     setPrivacyActive(!!stream.privacy_mode);
-  }, [stream.privacy_mode]);
+  }, [streamId, stream.name, stream.privacy_mode]);
 
   // HLS source state: 'go2rtc' (go2rtc's dynamic HLS), 'native' (lightNVR FFmpeg-based HLS), or 'failed'
   // Default to native lightNVR HLS (reliable, always running when streaming enabled)
@@ -99,6 +142,13 @@ export function HLSVideoCell({
   const [hlsMode, setHlsMode] = useState<HlsMode>(() => {
     return stream && stream.go2rtc_hls_available ? 'go2rtc' : 'native';
   });
+
+  // Reset transport mode when stream identity changes.
+  // This avoids carrying over fallback mode between different streams while
+  // preserving runtime fallback decisions within the same stream instance.
+  useEffect(() => {
+    setHlsMode(stream && stream.go2rtc_hls_available ? 'go2rtc' : 'native');
+  }, [streamId, stream?.name, stream?.go2rtc_hls_available]);
 
   // PTZ controls state
   const [showPTZControls, setShowPTZControls] = useState(false);
@@ -121,19 +171,37 @@ export function HLSVideoCell({
   const hlsUrlRef = useRef<string | null>(null);        // Master manifest URL — stored for session-expiry recovery
   const prevStatusRef = useRef(stream.status); // Track previous stream status for transition detection
   const cellAbortRef = useRef<AbortController | null>(null);     // Cancels a queued/in-flight gated preflight on unmount
+  const audioEnabledRef = useRef(false);
+  const audioPlayRequestTokenRef = useRef(0); // Guards against stale play() rejection mutating newer audio/player state
+  const manualPlayRequestTokenRef = useRef(0); // Guards the play overlay across retries and stream changes
   // Last known image behind the error overlay (#974). Declared before the
   // effects below so its unmount cleanup runs first.
   const lastFrame = useLastFrame({ streamName: stream.name, videoRef, hasError: !!error, enabled: showLastImage });
   const handleMobileAudioToggle = () => {
     if (audioDisabled) return;
-    const nextEnabled = !audioEnabled;
+    const nextEnabled = !audioEnabledRef.current;
+    audioEnabledRef.current = nextEnabled;
+    const requestToken = ++audioPlayRequestTokenRef.current;
     setAudioEnabled(nextEnabled);
-    if (videoRef.current) {
-      videoRef.current.muted = !nextEnabled;
-      if (nextEnabled) videoRef.current.play().catch(() => {
-        if (videoRef.current) videoRef.current.muted = true;
-        setAudioEnabled(false);
-      });
+    const videoEl = videoRef.current;
+    if (videoEl) {
+      videoEl.muted = !nextEnabled;
+      if (nextEnabled) {
+        videoEl.play().catch(() => {
+          // Only rollback if this rejection still matches the latest request
+          // and the same video element is still active.
+          if (
+            requestToken !== audioPlayRequestTokenRef.current ||
+            videoRef.current !== videoEl ||
+            !audioEnabledRef.current
+          ) {
+            return;
+          }
+          videoEl.muted = true;
+          audioEnabledRef.current = false;
+          setAudioEnabled(false);
+        });
+      }
     }
     if (nextEnabled) {
       window.dispatchEvent(new CustomEvent('lightnvr:tile-audio-enabled', {
@@ -153,6 +221,8 @@ export function HLSVideoCell({
 
   useEffect(() => {
     if (!audioDisabled) return;
+    audioPlayRequestTokenRef.current++;
+    audioEnabledRef.current = false;
     setAudioEnabled(false);
     if (videoRef.current) videoRef.current.muted = true;
   }, [audioDisabled]);
@@ -349,8 +419,8 @@ export function HLSVideoCell({
         console.log(`Using HLS.js for stream ${stream.name} (mode: ${usingGo2rtc ? 'go2rtc' : 'native'})`);
 
         // Shared low-memory budget: keep only a small forward buffer and zero back-buffer.
-        // backBufferLength: 0 is the single biggest win — HLS.js default keeps decoded
-        // frames forever for seeking, which multiplies by stream count and crashes the tab.
+        // backBufferLength: 0 removes played media from the buffer as playback advances,
+        // which helps reduce memory pressure across many concurrent streams.
         const sharedMemoryConfig = {
           maxBufferLength: 4,        // seconds of forward buffer (default: 30)
           maxMaxBufferLength: 8,     // hard ceiling (default: 600)
@@ -468,12 +538,18 @@ export function HLSVideoCell({
             console.warn(`[HLS ${stream.name}] Network error recovery attempt ${attemptNum}/${MAX_RECOVERY}`);
             setTimeout(() => {
               if (isMounted && hlsPlayerRef.current) {
-                if (usingGo2rtc && hlsUrlRef.current) {
+                const isManifestLoadFailure =
+                  data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR ||
+                  data.details === Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT;
+
+                if ((usingGo2rtc || isManifestLoadFailure) && hlsUrlRef.current) {
                   // go2rtc sessions expire after 5 s of inactivity. Simply
                   // calling startLoad() retries the same (now-expired) session
                   // ID and keeps 404-ing. Re-fetching the master manifest via
                   // loadSource() creates a brand-new go2rtc session.
-                  console.log(`[HLS ${stream.name}] Reloading master manifest to create fresh go2rtc session`);
+                  // For native HLS, manifest load failures/timeouts can also
+                  // require reloading the source URL before startLoad().
+                  console.log(`[HLS ${stream.name}] Reloading master manifest for network recovery`);
                   hlsPlayerRef.current.loadSource(hlsUrlRef.current);
                   hlsPlayerRef.current.startLoad();
                 } else {
@@ -581,7 +657,15 @@ export function HLSVideoCell({
       setError(null);
       setIsPlaying(false);
 
-      await initHls();
+      try {
+        await initHls();
+      } catch (err) {
+        if (!isMounted) return;
+        console.error(`[HLS ${stream.name}] Failed to initialize player:`, err);
+        setError(err instanceof Error ? err.message : 'Failed to initialize video stream');
+        setIsLoading(false);
+        setIsPlaying(false);
+      }
     };
 
     // Connection concurrency is bounded by the shared stream connection gate
@@ -590,8 +674,12 @@ export function HLSVideoCell({
     doInit();
 
     // Cleanup function
+    const videoEl = videoRef.current;
+
     return () => {
       console.log(`[HLS ${stream.name}] Cleaning up HLS player`);
+      audioPlayRequestTokenRef.current++;
+      manualPlayRequestTokenRef.current++;
       isMounted = false;
 
       // Cancel any queued/in-flight gated preflight
@@ -615,24 +703,24 @@ export function HLSVideoCell({
       }
 
       // Remove native HLS event listeners (Safari)
-      if (videoRef.current) {
+      if (videoEl) {
         if (nativeLoadedHandler) {
-          videoRef.current.removeEventListener('loadedmetadata', nativeLoadedHandler);
+          videoEl.removeEventListener('loadedmetadata', nativeLoadedHandler);
           nativeLoadedHandler = null;
         }
         if (nativePlayingHandler) {
-          videoRef.current.removeEventListener('playing', nativePlayingHandler);
+          videoEl.removeEventListener('playing', nativePlayingHandler);
           nativePlayingHandler = null;
         }
         if (nativeErrorHandler) {
-          videoRef.current.removeEventListener('error', nativeErrorHandler);
+          videoEl.removeEventListener('error', nativeErrorHandler);
           nativeErrorHandler = null;
         }
 
         // Reset video element
-        videoRef.current.pause();
-        videoRef.current.removeAttribute('src');
-        videoRef.current.load();
+        videoEl.pause();
+        videoEl.removeAttribute('src');
+        videoEl.load();
       }
     };
     // Note: depend on stream?.name (not the stream object) so the periodic
@@ -686,13 +774,49 @@ export function HLSVideoCell({
   };
 
   const handleForceRefresh = async () => {
+    const generationAtStart = privacyRequestGenerationRef.current;
+    const streamNameAtStart = stream.name;
+    const streamIdAtStart = streamId;
+
     await refreshStreamRegistration();
+
+    if (
+      privacyRequestGenerationRef.current !== generationAtStart ||
+      streamIdentityRef.current !== streamNameAtStart ||
+      stream.name !== streamNameAtStart ||
+      streamId !== streamIdAtStart
+    ) {
+      return;
+    }
+
     await new Promise(resolve => setTimeout(resolve, 500));
+
+    if (
+      privacyRequestGenerationRef.current !== generationAtStart ||
+      streamIdentityRef.current !== streamNameAtStart ||
+      stream.name !== streamNameAtStart ||
+      streamId !== streamIdAtStart
+    ) {
+      return;
+    }
+
     handleRetry();
   };
 
   // Auto-retry while the error overlay is visible — see WebRTCVideoCell for rationale.
   const autoRetryCountdown = useAutoRetry(privacyActive ? null : error, handleRetry);
+
+  const privacyRequestGenerationRef = useRef(0);
+  const streamIdentityRef = useRef(stream.name);
+
+  useLayoutEffect(() => {
+    streamIdentityRef.current = stream.name;
+    privacyRequestGenerationRef.current += 1;
+    setIsTogglingEnabled(false);
+    setShowPrivacyConfirm(false);
+    setShowRefreshConfirm(false);
+    return () => { privacyRequestGenerationRef.current += 1; };
+  }, [stream.name, streamId]);
 
   useEffect(() => {
     if (error && onTransportFailure) onTransportFailure(error);
@@ -703,22 +827,41 @@ export function HLSVideoCell({
    * The stream stays in the Live View grid under a privacy overlay.
    */
   const handlePauseForPrivacy = async () => {
+    const requestStreamIdentity = stream.name;
+    const requestGeneration = ++privacyRequestGenerationRef.current;
     setIsTogglingEnabled(true);
     try {
-      const res = await fetch(`/api/streams/${encodeURIComponent(stream.name)}`, {
+      const res = await fetch(`/api/streams/${encodeURIComponent(requestStreamIdentity)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ set_privacy_mode: true }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (
+        privacyRequestGenerationRef.current !== requestGeneration ||
+        streamIdentityRef.current !== requestStreamIdentity
+      ) {
+        return;
+      }
       setPrivacyActive(true);
       setShowPrivacyConfirm(false);
       queryClient.invalidateQueries({ queryKey: ['streams'] });
     } catch (err) {
+      if (
+        privacyRequestGenerationRef.current !== requestGeneration ||
+        streamIdentityRef.current !== requestStreamIdentity
+      ) {
+        return;
+      }
       showStatusMessage(`${t('live.pauseForPrivacy')}: ${(err as Error).message}`, 'error', 5000);
       setShowPrivacyConfirm(false);
     } finally {
-      setIsTogglingEnabled(false);
+      if (
+        privacyRequestGenerationRef.current === requestGeneration &&
+        streamIdentityRef.current === requestStreamIdentity
+      ) {
+        setIsTogglingEnabled(false);
+      }
     }
   };
 
@@ -726,20 +869,39 @@ export function HLSVideoCell({
    * Resume stream from privacy mode — sets privacy_mode=false and re-starts the stream.
    */
   const handleResumeFromPrivacy = async () => {
+    const requestStreamIdentity = stream.name;
+    const requestGeneration = ++privacyRequestGenerationRef.current;
     setIsTogglingEnabled(true);
     try {
-      const res = await fetch(`/api/streams/${encodeURIComponent(stream.name)}`, {
+      const res = await fetch(`/api/streams/${encodeURIComponent(requestStreamIdentity)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ set_privacy_mode: false }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (
+        privacyRequestGenerationRef.current !== requestGeneration ||
+        streamIdentityRef.current !== requestStreamIdentity
+      ) {
+        return;
+      }
       setPrivacyActive(false);
       queryClient.invalidateQueries({ queryKey: ['streams'] });
     } catch (err) {
+      if (
+        privacyRequestGenerationRef.current !== requestGeneration ||
+        streamIdentityRef.current !== requestStreamIdentity
+      ) {
+        return;
+      }
       showStatusMessage(`${t('live.resumeStream')}: ${(err as Error).message}`, 'error', 5000);
     } finally {
-      setIsTogglingEnabled(false);
+      if (
+        privacyRequestGenerationRef.current === requestGeneration &&
+        streamIdentityRef.current === requestStreamIdentity
+      ) {
+        setIsTogglingEnabled(false);
+      }
     }
   };
 
@@ -769,6 +931,7 @@ export function HLSVideoCell({
   return (
     <div /* eslint-disable-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- pointer shortcut; the tile toolbar has a keyboard-reachable fullscreen button */
       className="video-cell"
+      tabIndex={-1}
       data-stream-name={stream.name}
       data-stream-id={streamId}
       data-sub-stream={useSubStream ? 'true' : 'false'}
@@ -780,6 +943,7 @@ export function HLSVideoCell({
       onPointerCancel={mobileGestures.onPointerCancel}
       onContextMenu={mobileGestures.onContextMenu}
       onClick={(event) => {
+        if (privacyActive) return;
         if (mobileGestures.onClick(event)) return;
         if (shouldToggleFullscreenFromTap(event, alwaysFullscreenOnTap, zoom.isZoomed,
           cellRef.current, getNativeFullscreenElement())) {
@@ -787,6 +951,7 @@ export function HLSVideoCell({
         }
       }}
       onDblClick={(event) => {
+        if (privacyActive) return;
         if (shouldToggleFullscreenFromDoubleClick(
           event,
           alwaysFullscreenOnTap,
@@ -801,6 +966,7 @@ export function HLSVideoCell({
         // the overlays beside it stay put.
         cellRef.current = el;
         zoom.containerRef.current = el;
+        tileContainerRef.current = el;
       }}
       style={{
         position: 'relative',
@@ -810,6 +976,8 @@ export function HLSVideoCell({
         touchAction: zoom.touchAction
       }}
     >
+      <div inert={privacyActive} aria-hidden={privacyActive}
+        style={{ position: 'relative', width: '100%', height: '100%' }}>
       {/* Video element */}
       <video /* eslint-disable-line jsx-a11y/media-has-caption -- camera footage has no caption source */
         id={`video-${streamId.replace(/\s+/g, '-')}`}
@@ -1324,15 +1492,23 @@ export function HLSVideoCell({
             cursor: 'pointer'
           }}
           onClick={() => {
-            if (videoRef.current) {
-              videoRef.current.play()
-                .then(() => {
-                  setIsPlaying(true);
-                })
-                .catch(error => {
-                  console.error('Play failed:', error);
-                });
+            const videoEl = videoRef.current;
+            if (!videoEl) {
+              return;
             }
+
+            const requestToken = ++manualPlayRequestTokenRef.current;
+
+            videoEl.play()
+              .then(() => {
+                if (videoRef.current !== videoEl || manualPlayRequestTokenRef.current !== requestToken) {
+                  return;
+                }
+                setIsPlaying(true);
+              })
+              .catch(error => {
+                console.error('Play failed:', error);
+              });
           }}
         >
           <div className="play-button">
@@ -1359,6 +1535,7 @@ export function HLSVideoCell({
         message={t('live.pauseForPrivacyConfirm')}
         confirmLabel={t('live.pauseForPrivacy')}
       />
+      </div>
 
       {/* Privacy mode overlay — shown when the stream is paused for privacy */}
       {privacyActive && (
@@ -1376,6 +1553,9 @@ export function HLSVideoCell({
           </svg>
           <p style={{ color: 'rgba(255,255,255,0.7)', fontSize: '14px' }}>{t('live.streamPausedForPrivacy')}</p>
           {canControlPrivacy && <button
+            type="button"
+            ref={privacyResumeButtonRef}
+            aria-label={t('live.resumeStream')}
             onClick={handleResumeFromPrivacy}
             disabled={isTogglingEnabled}
             style={{
